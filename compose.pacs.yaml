@@ -1,0 +1,6 @@
+# Enable only when modalities connect directly to this instance.
+# Keep this range equal to PACS_PORT_START/END in .env.
+services:
+  app:
+    ports:
+      - '5000-5099:5000-5099/tcp'

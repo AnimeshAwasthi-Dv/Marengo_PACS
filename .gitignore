@@ -1,0 +1,14 @@
+node_modules/
+dist/
+uploads/
+artifacts/
+backups/
+tmp/
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+*.sql.gz
+*.dump
+.DS_Store

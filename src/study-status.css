@@ -1,0 +1,44 @@
+.study-tracking { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; background: #191d24; color: #e6e9ef; font: 14px/1.5 Inter, Arial, sans-serif; letter-spacing: 0; }
+.study-tracking * { box-sizing: border-box; letter-spacing: 0; }
+.study-tracking .st-header { flex-shrink: 0; min-height: 64px; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; gap: 16px; border-bottom: 1px solid #343b46; background: #22272f; }
+.study-tracking a { color: inherit; text-decoration: none; }
+.study-tracking .st-brand { font-weight: 700; font-size: 17px; line-height: 1.3; }
+.study-tracking .st-brand span { display: block; font-size: 12px; font-weight: 400; color: #a6b1c3; margin-top: 3px; }
+.study-tracking .st-header > div, .study-tracking .st-button, .study-tracking .st-label, .study-tracking h2, .study-tracking .st-footer span { display: flex; align-items: center; gap: 8px; }
+.study-tracking .st-button { flex-shrink: 0; min-height: 34px; padding: 6px 10px; border: 1px solid #465161; border-radius: 4px; color: #dfe8f7; background: #252c35; font: inherit; cursor: pointer; }
+.study-tracking .st-button:hover { background: #303a49; }
+.study-tracking :focus-visible { outline: 2px solid #8ab4ff; outline-offset: 3px; }
+.study-tracking .st-content { flex: 1; min-height: 0; width: 100%; max-width: 1200px; margin: 0 auto; overflow: auto; padding: 24px; }
+.study-tracking .st-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.study-tracking h1 { font-size: 24px; margin: 0; }
+.study-tracking h2 { font-size: 18px; margin: 4px 0; }
+.study-tracking p { margin: 4px 0; }
+.study-tracking .st-heading p, .study-tracking .st-heading > span, .study-tracking .st-label, .study-tracking small, .study-tracking dt, .study-tracking .st-muted { color: #abb7c9; }
+.study-tracking .st-summary { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 24px; padding: 18px 0; border-top: 1px solid #343b46; border-bottom: 1px solid #343b46; }
+.study-tracking .st-status { display: inline-block; padding: 3px 9px; background: #2c3c55; color: #b6d3ff; border-radius: 4px; }
+.study-tracking .is-complete { background: #234039; color: #88e0be; }
+.study-tracking .st-routine { color: #88e0be; }
+.study-tracking .st-urgent, .study-tracking .st-overdue strong { color: #ffaaaa; }
+.study-tracking .st-timing { display: grid; grid-template-columns: 1fr 1fr 1.8fr; gap: 24px; padding: 24px 0; border-bottom: 1px solid #343b46; }
+.study-tracking .st-timing strong { display: block; font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 8px 0; }
+.study-tracking dl { margin: 0; }
+.study-tracking dl > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 12px; margin: 5px 0; }
+.study-tracking dd { margin: 0; overflow-wrap: anywhere; }
+.study-tracking .st-exchanges { padding: 24px 0; }
+.study-tracking details { margin-top: 12px; border: 1px solid #3a4350; border-radius: 4px; overflow: hidden; }
+.study-tracking summary { padding: 12px; cursor: pointer; background: #232932; }
+.study-tracking summary small { display: block; margin-left: 16px; }
+.study-tracking pre { padding: 16px; margin: 0; overflow: auto; max-height: 380px; font: 13px/1.6 Consolas, monospace; color: #b8dec8; background: #161b20; white-space: pre-wrap; overflow-wrap: anywhere; }
+.study-tracking .st-meta { border-top: 1px solid #343b46; padding-top: 16px; }
+.study-tracking .st-meta > div { grid-template-columns: 140px minmax(0, 1fr); }
+.study-tracking .st-footer { flex-shrink: 0; min-height: 34px; padding: 8px 24px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 12px; color: #abb7c9; border-top: 1px solid #343b46; background: #22272f; }
+.study-tracking .st-error { color: #ffc0c0; background: #422b30; padding: 12px; margin-top: 16px; border-radius: 4px; }
+@media (max-width: 700px) {
+  .study-tracking .st-header, .study-tracking .st-content { padding: 14px; }
+  .study-tracking .st-brand { font-size: 15px; }
+  .study-tracking .st-timing { grid-template-columns: 1fr 1fr; gap: 20px 12px; }
+  .study-tracking .st-timing dl { grid-column: 1 / -1; }
+  .study-tracking .st-timing strong { font-size: 21px; }
+  .study-tracking .st-footer { padding: 8px 14px; }
+  .study-tracking .st-exchanges .st-heading { align-items: start; flex-direction: column; gap: 0; }
+}

@@ -1,0 +1,27 @@
+.ac-evidence { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.ac-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ac-actions h2 { margin-right: auto; font-size: 15px; }
+.ac-filters { flex-wrap: wrap; gap: 10px; }
+.ac-filters label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.ac-filters input { min-width: 120px; max-width: 100%; }
+.ac-filters input:not([type=date]) { width: 300px; }
+.ac-correction { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 24px; border-bottom: 1px solid #39414c; background: #242b34; font-size: 12px; }
+.ac-correction input { flex: 1; min-width: 220px; }
+.ac-records { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.ac-records > .pw-table-scroll { flex: 1; min-width: 0; }
+.ac-audit-table { min-width: 980px; }
+.ac-study-table { min-width: 1050px; }
+.ac-study-table td, .ac-audit-table td { font-size: 12px; }
+.ac-study-table small { display: block; color: #a9b4c4; margin-top: 4px; }
+.ac-id { display: block; max-width: 185px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; }
+.ac-json { width: 400px; flex-shrink: 0; overflow: auto; padding: 16px; border-left: 1px solid #434c59; background: #22272f; }
+.ac-json dl { font-size: 12px; }.ac-json dt { color: #aab7c9; margin-top: 12px; }.ac-json dd { margin: 4px 0 12px; overflow-wrap: anywhere; }
+.ac-json pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; color: #d7e2ee; }
+.ac-selected td { background: #2c3949 !important; }
+.ac-evidence .pw-heading p { font-size: 12px; color: #b6c2d2; margin-top: 6px; }
+.pw-legacy :is(.metric-card,.clinical-toolbar,.clinical-panel,.clinical-side-panel,.clinical-worklist,.table-card,.card) { background: #222831 !important; color: #dce5f2 !important; border-color: #3b4452 !important; box-shadow: none !important; }
+.pw-legacy .metric-card::after { display: none; }
+.pw-legacy :is(tbody,tr,td) { background: #202731 !important; }
+.pw-legacy td :is(strong,span,p,a), .pw-legacy .metric-card :is(p,h3,span,small) { color: inherit; }
+@media(max-width: 1000px) { .ac-records { flex-direction: column; }.ac-json { width: 100%; max-height: 45%; border-left: 0; border-top: 1px solid #434c59; }.ac-correction { padding: 12px; }.ac-evidence .pw-heading { flex-wrap: wrap; gap: 12px; } }
+@media(max-width: 640px) { .ac-filters label { max-width: 100%; }.ac-filters input:not([type=date]) { width: 220px; }.ac-correction input { min-width: 0; width: 100%; flex-basis: 100%; } }

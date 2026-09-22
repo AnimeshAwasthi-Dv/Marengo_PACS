@@ -1,0 +1,6 @@
+ALTER TABLE "client_services"
+ADD COLUMN IF NOT EXISTS "workflowType" TEXT NOT NULL DEFAULT 'AI_ONLY';
+
+ALTER TABLE "pacs_config"
+ADD COLUMN IF NOT EXISTS "workflowType" TEXT NOT NULL DEFAULT 'AI_ONLY',
+ADD COLUMN IF NOT EXISTS "teleradiologyProviderCode" TEXT;

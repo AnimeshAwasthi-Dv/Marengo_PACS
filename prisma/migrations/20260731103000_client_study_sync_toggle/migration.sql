@@ -1,0 +1,2 @@
+ALTER TABLE "clients"
+ADD COLUMN IF NOT EXISTS "studySyncEnabled" BOOLEAN NOT NULL DEFAULT false;

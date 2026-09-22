@@ -1,0 +1,1298 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  CLIENT_USER
+  RADIOLOGIST
+  PROVIDER_ADMIN
+  PROVIDER_MANAGER
+}
+
+enum ClientKind {
+  GROUP
+  CENTER
+}
+
+enum ClientStatus {
+  ACTIVE
+  BLOCKED
+}
+
+enum ServiceCategory {
+  PACS
+}
+
+enum ServiceStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+}
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  SUCCESS
+  FAILED
+}
+
+enum ReturnFormat {
+  DICOM_ENCAPSULATED_PDF
+  DICOM_SECONDARY_CAPTURE
+  HL7
+  HTML
+  PDF
+  DOCX
+}
+
+enum ReportReviewStatus {
+  PENDING
+  IN_REVIEW
+  SAVED
+  APPROVED
+  PUSHED
+  FAILED
+}
+
+model User {
+  id                     String                    @id @default(cuid())
+  userId                 String?                   @unique @map("user_id")
+  email                  String                    @unique
+  name                   String
+  passwordHash           String
+  lastGeneratedPassword  String?
+  role                   UserRole
+  portalRole             String?
+  clientId               String?
+  providerCode           String?
+  client                 Client?                   @relation(fields: [clientId], references: [id])
+  active                 Boolean                   @default(true)
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
+  radiologistProfile     RadiologistProfile?
+  reportAuditLogs        ReportAuditLog[]
+  managedRadiologists    RadiologistProfile[]      @relation("RadiologistManager")
+  createdAvailabilities  RadiologistAvailability[] @relation("AvailabilityCreator")
+  managerCallActions     ReportCallBooking[]       @relation("CallManagerActions")
+  radiologistCallActions ReportCallBooking[]       @relation("CallRadiologistActions")
+  reviewedFeedback       RadiologistFeedback[]     @relation("FeedbackReviewer")
+  submittedFeedback      RadiologistFeedback[]     @relation("FeedbackSubmitter")
+  notificationDeliveries NotificationDelivery[]
+  whatsappWhitelist      NotificationRecipient[]
+
+  @@index([clientId, portalRole])
+  @@map("users")
+}
+
+model Client {
+  id                     String                    @id @default(cuid())
+  code                   String                    @unique
+  name                   String
+  hospitalSlug           String?                   @unique
+  kind                   ClientKind                @default(CENTER)
+  parentClientId         String?
+  facilityType           String
+  primaryContact         String
+  email                  String
+  billingDiscountPercent Float                     @default(0)
+  studySyncEnabled       Boolean                   @default(false)
+  demoModeEnabled        Boolean                   @default(false)
+  demoStudyLimit         Int?
+  status                 ClientStatus              @default(ACTIVE)
+  users                  User[]
+  parentClient           Client?                   @relation("ClientHierarchy", fields: [parentClientId], references: [id], onDelete: SetNull)
+  childClients           Client[]                  @relation("ClientHierarchy")
+  services               ClientService[]
+  pacsConfigs            PacsConfig[]
+  apiKeys                ApiKey[]
+  studies                Study[]
+  jobs                   Job[]
+  usageLogs              UsageLog[]
+  auditLogs              AuditLog[]
+  reportSettings         ReportFormatSetting[]
+  hl7Config              Hl7Config?
+  radiologists           RadiologistProfile[]
+  reportReviews          ReportReview[]
+  callBookings           ReportCallBooking[]
+  processingJobs         ProcessingJob[]
+  billingTransactions    StudyBillingTransaction[]
+  invoices               Invoice[]
+  payments               Payment[]
+  billingDisputes        BillingDispute[]
+  supportTickets         SupportTicket[]
+  notificationRecipients NotificationRecipient[]
+  availableBridgeStudies AvailableBridgeStudy[]
+  bridgeDispatchRequests BridgeDispatchRequest[]
+  bridgeControlCommands  BridgeControlCommand[]
+  bridgeStudyAttachments BridgeStudyAttachment[]
+  patients               Patient[]
+  patientFollowUps       PatientFollowUp[]
+  radiologistFeedback    RadiologistFeedback[]
+  archivedPatientStudies PatientStudyArchive[]
+  notificationEvents     NotificationEvent[]
+  notificationDeliveries NotificationDelivery[]
+  demoRequests           DemoRequest[]
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
+
+  @@index([kind, parentClientId])
+  @@map("clients")
+}
+
+model Service {
+  id          String          @id @default(cuid())
+  name        String          @unique
+  code        String          @unique
+  category    ServiceCategory
+  description String
+  enabled     Boolean         @default(true)
+  clients     ClientService[]
+
+  @@map("services")
+}
+
+model ClientService {
+  id           String          @id @default(cuid())
+  clientId     String
+  serviceId    String
+  status       ServiceStatus   @default(ACTIVE)
+  workflowType String          @default("AI_ONLY")
+  credits      Int             @default(0)
+  usedCredits  Int             @default(0)
+  validFrom    DateTime        @default(now())
+  validUntil   DateTime
+  client       Client          @relation(fields: [clientId], references: [id])
+  service      Service         @relation(fields: [serviceId], references: [id])
+  creditsLog   ServiceCredit[]
+  pacsConfig   PacsConfig?
+
+  @@unique([clientId, serviceId])
+  @@map("client_services")
+}
+
+model ServiceCredit {
+  id              String        @id @default(cuid())
+  clientServiceId String
+  amount          Int
+  reason          String
+  createdBy       String
+  createdAt       DateTime      @default(now())
+  clientService   ClientService @relation(fields: [clientServiceId], references: [id])
+
+  @@map("service_credits")
+}
+
+model PacsConfig {
+  id                        String        @id @default(cuid())
+  clientId                  String
+  clientServiceId           String        @unique
+  ec2PublicIp               String
+  receivingPort             Int           @unique
+  aeTitle                   String        @unique
+  urgentReceivingPort       Int?          @unique
+  urgentAeTitle             String?       @unique
+  extraEndpoints            Json          @default("[]")
+  clientPacsIp              String
+  clientPacsPort            Int
+  clientPacsAeTitle         String
+  returnFormat              ReturnFormat  @default(DICOM_ENCAPSULATED_PDF)
+  workflowType              String        @default("AI_ONLY")
+  teleradiologyProviderCode String?
+  outsourceTeleradiology    Boolean       @default(false)
+  client                    Client        @relation(fields: [clientId], references: [id])
+  clientService             ClientService @relation(fields: [clientServiceId], references: [id])
+
+  @@map("pacs_config")
+}
+
+model ApiKey {
+  id        String    @id @default(cuid())
+  clientId  String
+  name      String
+  keyHash   String
+  scopes    String[]
+  active    Boolean   @default(true)
+  expiresAt DateTime?
+  client    Client    @relation(fields: [clientId], references: [id])
+
+  @@map("api_keys")
+}
+
+model ReportTemplate {
+  id        String   @id @default(cuid())
+  name      String
+  modality  String
+  body      Json
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("report_templates")
+}
+
+model ReportFormatSetting {
+  id                          String       @id @default(cuid())
+  clientId                    String
+  serviceName                 String
+  dicomReturnFormat           ReturnFormat @default(DICOM_ENCAPSULATED_PDF)
+  outputFormat                ReturnFormat @default(DICOM_ENCAPSULATED_PDF)
+  reportMode                  String       @default("Comprehensive")
+  radiologistReviewEnabled    Boolean      @default(false)
+  includeRadiologistSignature Boolean      @default(true)
+  signatureDetailFields       String[]     @default(["fullName", "qualification", "medicalRegistrationNumber", "organisationName"])
+  enabledSections             String[]
+  structuredHeaderJson        Json
+  client                      Client       @relation(fields: [clientId], references: [id])
+
+  @@unique([clientId, serviceName])
+  @@map("report_format_settings")
+}
+
+model Study {
+  id            String                @id @default(cuid())
+  clientId      String
+  studyUid      String                @unique
+  accession     String?
+  modality      String
+  status        JobStatus
+  aiResponse    Json?
+  reportJson    Json?
+  createdAt     DateTime              @default(now())
+  client        Client                @relation(fields: [clientId], references: [id])
+  jobs          Job[]
+  reportReviews ReportReview[]
+  patientId     String?
+  patient       Patient?              @relation(fields: [patientId], references: [id], onDelete: SetNull)
+  feedback      RadiologistFeedback[]
+
+  @@index([clientId, patientId])
+  @@map("studies")
+}
+
+model RadiologistProfile {
+  id                        String                    @id @default(cuid())
+  clientId                  String?
+  providerCode              String?
+  managerUserId             String?
+  userId                    String                    @unique
+  fullName                  String
+  email                     String
+  phone                     String?
+  qualification             String
+  medicalRegistrationNumber String
+  organisationName          String
+  signatureImageUrl         String?
+  documentUrl               String?
+  documentName              String?
+  active                    Boolean                   @default(true)
+  createdAt                 DateTime                  @default(now())
+  updatedAt                 DateTime                  @updatedAt
+  client                    Client?                   @relation(fields: [clientId], references: [id])
+  user                      User                      @relation(fields: [userId], references: [id])
+  manager                   User?                     @relation("RadiologistManager", fields: [managerUserId], references: [id])
+  reportReviews             ReportReview[]
+  callBookings              ReportCallBooking[]
+  availabilitySlots         RadiologistAvailability[]
+
+  @@map("radiologist_profiles")
+}
+
+model NotificationOutbox {
+  id             String    @id @default(cuid())
+  eventType      String
+  aggregateType  String
+  aggregateId    String
+  payload        Json
+  idempotencyKey String    @unique
+  status         String    @default("PENDING")
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  processedAt    DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@map("notification_outbox")
+}
+
+model NotificationEvent {
+  id             String                 @id @default(cuid())
+  eventType      String
+  category       String
+  aggregateType  String
+  aggregateId    String
+  clientId       String?
+  patientRef     String?
+  stage          String?
+  status         String
+  title          String
+  message        String
+  metadata       Json                   @default("{}")
+  idempotencyKey String                 @unique
+  occurredAt     DateTime               @default(now())
+  createdAt      DateTime               @default(now())
+  client         Client?                @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  deliveries     NotificationDelivery[]
+
+  @@index([clientId, eventType, occurredAt])
+  @@index([category, occurredAt])
+  @@index([aggregateType, aggregateId])
+  @@index([status, occurredAt])
+  @@map("notification_events")
+}
+
+model NotificationDelivery {
+  id                    String            @id @default(cuid())
+  eventId               String
+  clientId              String?
+  recipientUserId       String?
+  recipientOrganization String
+  recipientKey          String
+  channel               String
+  status                String            @default("QUEUED")
+  attempts              Int               @default(0)
+  error                 String?
+  sentAt                DateTime?
+  deliveredAt           DateTime?
+  readAt                DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  event                 NotificationEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  client                Client?           @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  recipientUser         User?             @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, recipientKey, channel])
+  @@index([recipientUserId, readAt, createdAt])
+  @@index([recipientOrganization, status, createdAt])
+  @@index([clientId, createdAt])
+  @@map("notification_deliveries")
+}
+
+model ReportReview {
+  id               String                @id @default(cuid())
+  clientId         String
+  studyId          String?
+  radiologistId    String?
+  serviceName      String
+  patientName      String?
+  patientId        String?
+  studyUid         String?
+  accession        String?
+  modality         String?
+  status           ReportReviewStatus    @default(PENDING)
+  outputFormat     ReturnFormat          @default(DICOM_ENCAPSULATED_PDF)
+  aiReportJson     Json
+  editedReportJson Json
+  locked           Boolean               @default(false)
+  generatedAt      DateTime              @default(now())
+  pushedAt         DateTime?
+  reviewedAt       DateTime?
+  approvedAt       DateTime?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  client           Client                @relation(fields: [clientId], references: [id])
+  study            Study?                @relation(fields: [studyId], references: [id])
+  radiologist      RadiologistProfile?   @relation(fields: [radiologistId], references: [id])
+  auditLogs        ReportAuditLog[]
+  callBookings     ReportCallBooking[]
+  patientProfileId String?
+  patientProfile   Patient?              @relation(fields: [patientProfileId], references: [id], onDelete: SetNull)
+  feedback         RadiologistFeedback[]
+  followUps        PatientFollowUp[]
+  publicShares     ReportPublicShare[]
+
+  @@index([clientId, patientProfileId])
+  @@map("report_reviews")
+}
+
+model ReportPublicShare {
+  id        String       @id @default(cuid())
+  reportId  String
+  token     String       @unique
+  expiresAt DateTime
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  report    ReportReview @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId])
+  @@index([expiresAt])
+  @@map("report_public_shares")
+}
+
+model Patient {
+  id                String                 @id @default(cuid())
+  clientId          String
+  patientIdentifier String
+  name              String
+  dateOfBirth       DateTime?
+  age               String?
+  gender            String?
+  sex               String?
+  phone             String?
+  email             String?
+  address           String?
+  clinicalHistory   String?
+  medicalHistory    String?
+  followUpInfo      String?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  client            Client                 @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  studies           Study[]
+  reports           ReportReview[]
+  processingJobs    ProcessingJob[]
+  bridgeStudies     AvailableBridgeStudy[]
+  followUps         PatientFollowUp[]
+  feedback          RadiologistFeedback[]
+  archivedStudies   PatientStudyArchive[]
+
+  @@unique([clientId, patientIdentifier])
+  @@index([clientId, name])
+  @@index([clientId, dateOfBirth])
+  @@map("patients")
+}
+
+model PatientFollowUp {
+  id             String        @id @default(cuid())
+  clientId       String
+  patientId      String
+  reportId       String?
+  required       Boolean       @default(true)
+  followUpDate   DateTime
+  reason         String
+  status         String        @default("PENDING")
+  notes          String?
+  assignedUserId String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  client         Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  patient        Patient       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  report         ReportReview? @relation(fields: [reportId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, status, followUpDate])
+  @@index([patientId, followUpDate])
+  @@map("patient_follow_ups")
+}
+
+model PatientStudyArchive {
+  id                 String                    @id @default(cuid())
+  clientId           String
+  patientId          String
+  studyInstanceUid   String?
+  accessionNumber    String?
+  studyDate          DateTime?
+  modality           String?
+  studyDescription   String
+  bodyRegion         String?
+  clinicalIndication String?
+  institutionName    String?
+  referringPhysician String?
+  seriesCount        Int?
+  instanceCount      Int?
+  createdByUserId    String?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  client             Client                    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  patient            Patient                   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  files              PatientStudyArchiveFile[]
+
+  @@index([clientId, patientId, studyDate])
+  @@index([studyInstanceUid])
+  @@map("patient_study_archives")
+}
+
+model PatientStudyArchiveFile {
+  id           String              @id @default(cuid())
+  archiveId    String
+  role         String
+  originalName String
+  storedName   String
+  filePath     String
+  mimeType     String?
+  sizeBytes    BigInt              @default(0)
+  createdAt    DateTime            @default(now())
+  archive      PatientStudyArchive @relation(fields: [archiveId], references: [id], onDelete: Cascade)
+
+  @@index([archiveId, role])
+  @@map("patient_study_archive_files")
+}
+
+model RadiologistFeedback {
+  id                 String       @id @default(cuid())
+  clientId           String
+  patientId          String?
+  studyId            String?
+  reportId           String
+  radiologistUserId  String
+  feedbackType       String
+  comment            String
+  overallRating      Int?
+  accuracyAssessment String?
+  falsePositive      Boolean      @default(false)
+  falseNegative      Boolean      @default(false)
+  missedFinding      Boolean      @default(false)
+  incorrectFinding   Boolean      @default(false)
+  severity           String?
+  categories         String[]     @default([])
+  submissionVersion  Int          @default(1)
+  status             String       @default("NEW")
+  internalNotes      String?
+  reviewedById       String?
+  reviewedAt         DateTime?
+  renewistStatus     String       @default("PENDING")
+  renewistSyncedAt   DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  client             Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  patient            Patient?     @relation(fields: [patientId], references: [id], onDelete: SetNull)
+  study              Study?       @relation(fields: [studyId], references: [id], onDelete: SetNull)
+  report             ReportReview @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  radiologist        User         @relation("FeedbackSubmitter", fields: [radiologistUserId], references: [id])
+  reviewedBy         User?        @relation("FeedbackReviewer", fields: [reviewedById], references: [id])
+
+  @@unique([reportId, radiologistUserId, submissionVersion])
+  @@index([clientId, status, createdAt])
+  @@index([radiologistUserId, createdAt])
+  @@index([reportId])
+  @@index([renewistStatus])
+  @@map("radiologist_feedback")
+}
+
+model ReportCallBooking {
+  id                          String              @id @default(cuid())
+  reportId                    String
+  clientId                    String
+  radiologistId               String?
+  slotStart                   DateTime
+  slotEnd                     DateTime
+  status                      String              @default("BOOKED")
+  requestedDurationMinutes    Int                 @default(15)
+  actualDurationMinutes       Int?
+  communicationMode           String              @default("BUILT_IN_MEETING")
+  phoneNumber                 String?
+  pricePerMinuteMinor         Int                 @default(1000)
+  estimatedAmountMinor        Int                 @default(15000)
+  finalAmountMinor            Int?
+  managerAcceptedAt           DateTime?
+  managerAcceptedByUserId     String?
+  radiologistAcceptedAt       DateTime?
+  radiologistAcceptedByUserId String?
+  completedAt                 DateTime?
+  billedTransactionId         String?
+  meetingRoom                 String              @unique
+  meetingUrl                  String
+  createdByUserId             String?
+  reason                      String?
+  requestMessage              String?
+  urgency                     String              @default("ROUTINE")
+  confirmedAt                 DateTime?
+  cancelledAt                 DateTime?
+  rescheduledAt               DateTime?
+  createdAt                   DateTime            @default(now())
+  updatedAt                   DateTime            @updatedAt
+  report                      ReportReview        @relation(fields: [reportId], references: [id])
+  client                      Client              @relation(fields: [clientId], references: [id])
+  radiologist                 RadiologistProfile? @relation(fields: [radiologistId], references: [id])
+  managerAcceptedBy           User?               @relation("CallManagerActions", fields: [managerAcceptedByUserId], references: [id])
+  radiologistAcceptedBy       User?               @relation("CallRadiologistActions", fields: [radiologistAcceptedByUserId], references: [id])
+
+  @@map("report_call_bookings")
+}
+
+model RadiologistAvailability {
+  id              String             @id @default(cuid())
+  providerCode    String
+  radiologistId   String
+  slotStart       DateTime
+  slotEnd         DateTime
+  durationMinutes Int                @default(15)
+  status          String             @default("AVAILABLE")
+  createdByUserId String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  radiologist     RadiologistProfile @relation(fields: [radiologistId], references: [id])
+  createdBy       User?              @relation("AvailabilityCreator", fields: [createdByUserId], references: [id])
+
+  @@index([providerCode, slotStart])
+  @@index([radiologistId, slotStart])
+  @@map("radiologist_availability")
+}
+
+model ReportAuditLog {
+  id          String       @id @default(cuid())
+  reportId    String
+  actorUserId String?
+  action      String
+  metadata    Json
+  createdAt   DateTime     @default(now())
+  report      ReportReview @relation(fields: [reportId], references: [id])
+  actor       User?        @relation(fields: [actorUserId], references: [id])
+
+  @@map("report_audit_logs")
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  clientId    String
+  studyId     String?
+  serviceName String
+  status      JobStatus @default(QUEUED)
+  attempts    Int       @default(0)
+  error       String?
+  latencyMs   Int?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  client      Client    @relation(fields: [clientId], references: [id])
+  study       Study?    @relation(fields: [studyId], references: [id])
+
+  @@map("jobs")
+}
+
+model UsageLog {
+  id          String   @id @default(cuid())
+  clientId    String
+  serviceName String
+  studyUid    String?
+  creditsUsed Int
+  success     Boolean
+  message     String
+  createdAt   DateTime @default(now())
+  client      Client   @relation(fields: [clientId], references: [id])
+
+  @@map("usage_logs")
+}
+
+model PricingRule {
+  id                   String    @id @default(cuid())
+  serviceName          String
+  workflowType         String    @default("ANY")
+  priority             String    @default("REGULAR")
+  category             String    @default("REGULAR")
+  currency             String    @default("INR")
+  unitPriceMinor       Int       @default(0)
+  providerPayableMinor Int       @default(0)
+  active               Boolean   @default(true)
+  validFrom            DateTime  @default(now())
+  validUntil           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@unique([serviceName, workflowType, priority, category, validFrom])
+  @@map("pricing_rules")
+}
+
+model StudyBillingTransaction {
+  id              String   @id @default(cuid())
+  clientId        String
+  processingJobId String?
+  studyId         String?
+  serviceName     String
+  workflowType    String   @default("AI_ONLY")
+  priority        String   @default("REGULAR")
+  category        String   @default("REGULAR")
+  units           Int      @default(1)
+  unitPriceMinor  Int      @default(0)
+  amountMinor     Int      @default(0)
+  currency        String   @default("INR")
+  status          String   @default("UNINVOICED")
+  invoiceId       String?
+  metadata        Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  client          Client   @relation(fields: [clientId], references: [id])
+  invoice         Invoice? @relation(fields: [invoiceId], references: [id])
+
+  @@unique([processingJobId, serviceName])
+  @@map("study_billing_transactions")
+}
+
+model Invoice {
+  id                    String                    @id @default(cuid())
+  clientId              String
+  invoiceNumber         String                    @unique
+  periodStart           DateTime
+  periodEnd             DateTime
+  status                String                    @default("DRAFT")
+  currency              String                    @default("INR")
+  subtotalMinor         Int                       @default(0)
+  taxMinor              Int                       @default(0)
+  totalMinor            Int                       @default(0)
+  razorpayPaymentLinkId String?
+  paymentUrl            String?
+  issuedAt              DateTime?
+  paidAt                DateTime?
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  client                Client                    @relation(fields: [clientId], references: [id])
+  lineItems             InvoiceLineItem[]
+  transactions          StudyBillingTransaction[]
+  paymentLinks          PaymentLink[]
+  payments              Payment[]
+
+  @@map("invoices")
+}
+
+model InvoiceLineItem {
+  id             String  @id @default(cuid())
+  invoiceId      String
+  description    String
+  serviceName    String
+  units          Int
+  unitPriceMinor Int
+  amountMinor    Int
+  currency       String  @default("INR")
+  metadata       Json    @default("{}")
+  invoice        Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@map("invoice_line_items")
+}
+
+model PaymentLink {
+  id             String    @id @default(cuid())
+  invoiceId      String
+  provider       String    @default("RAZORPAY")
+  providerLinkId String?
+  shortUrl       String?
+  amountMinor    Int
+  currency       String    @default("INR")
+  status         String    @default("CREATED")
+  expiresAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  invoice        Invoice   @relation(fields: [invoiceId], references: [id])
+
+  @@map("payment_links")
+}
+
+model Payment {
+  id                String   @id @default(cuid())
+  clientId          String
+  invoiceId         String
+  provider          String   @default("OFFLINE")
+  providerPaymentId String?
+  amountMinor       Int
+  currency          String   @default("INR")
+  status            String   @default("CAPTURED")
+  method            String?
+  paidAt            DateTime @default(now())
+  metadata          Json     @default("{}")
+  createdAt         DateTime @default(now())
+  client            Client   @relation(fields: [clientId], references: [id])
+  invoice           Invoice  @relation(fields: [invoiceId], references: [id])
+
+  @@map("payments")
+}
+
+model ProviderPayableTransaction {
+  id               String              @id @default(cuid())
+  providerCode     String
+  dectrocelJobId   String
+  processingJobId  String?
+  serviceName      String
+  workflowType     String
+  priority         String              @default("REGULAR")
+  category         String              @default("REGULAR")
+  units            Int                 @default(1)
+  unitPayableMinor Int                 @default(0)
+  amountMinor      Int                 @default(0)
+  currency         String              @default("INR")
+  status           String              @default("UNSETTLED")
+  settlementId     String?
+  metadata         Json                @default("{}")
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  settlement       ProviderSettlement? @relation(fields: [settlementId], references: [id])
+
+  @@unique([dectrocelJobId, providerCode])
+  @@map("provider_payable_transactions")
+}
+
+model ProviderSettlement {
+  id               String                       @id @default(cuid())
+  providerCode     String
+  settlementNumber String                       @unique
+  periodStart      DateTime
+  periodEnd        DateTime
+  status           String                       @default("DRAFT")
+  currency         String                       @default("INR")
+  subtotalMinor    Int                          @default(0)
+  paidAt           DateTime?
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+  items            ProviderPayableTransaction[]
+
+  @@map("provider_settlements")
+}
+
+model BillingDispute {
+  id                  String   @id @default(cuid())
+  clientId            String?
+  invoiceId           String?
+  settlementId        String?
+  dectrocelJobId      String?
+  type                String
+  expectedAmountMinor Int?
+  appliedAmountMinor  Int?
+  reason              String
+  status              String   @default("OPEN")
+  resolution          String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  client              Client?  @relation(fields: [clientId], references: [id])
+
+  @@map("billing_disputes")
+}
+
+model SupportTicket {
+  id              String                 @id @default(cuid())
+  ticketNumber    String                 @unique
+  clientId        String?
+  relatedStudyId  String?
+  category        String
+  priority        String                 @default("MEDIUM")
+  subject         String
+  description     String
+  status          String                 @default("OPEN")
+  assignedTeam    String?
+  assignedAgentId String?
+  createdByUserId String?
+  firstResponseAt DateTime?
+  resolvedAt      DateTime?
+  closedAt        DateTime?
+  whatsappDemo    Boolean                @default(true)
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  client          Client?                @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  messages        SupportTicketMessage[]
+
+  @@index([clientId, status, priority])
+  @@index([createdAt])
+  @@map("support_tickets")
+}
+
+model SupportTicketMessage {
+  id             String        @id @default(cuid())
+  ticketId       String
+  authorUserId   String?
+  authorRole     String?
+  visibility     String        @default("PUBLIC")
+  channel        String        @default("PORTAL")
+  body           String
+  attachmentRefs Json          @default("[]")
+  whatsappDemo   Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  ticket         SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@map("support_ticket_messages")
+}
+
+model NotificationRecipient {
+  id                     String    @id @default(cuid())
+  name                   String
+  role                   String
+  organization           String
+  clientId               String?
+  userId                 String?
+  phoneE164              String?
+  notificationCategories String[]  @default([])
+  active                 Boolean   @default(true)
+  consentStatus          String    @default("PENDING")
+  consentAt              DateTime?
+  consentSource          String?
+  consentText            String?
+  optOutAt               DateTime?
+  verificationStatus     String    @default("PENDING")
+  verifiedAt             DateTime?
+  lastNotificationAt     DateTime?
+  accessCategories       String[]  @default([])
+  quietHours             Json      @default("{}")
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  client                 Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  user                   User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([phoneE164])
+  @@index([organization, role, active])
+  @@index([userId, active])
+  @@map("notification_recipients")
+}
+
+model DemoRequest {
+  id               String    @id @default(cuid())
+  requestNumber    String    @unique
+  clientId         String?
+  name             String
+  organization     String
+  email            String?
+  phone            String?
+  source           String
+  requestedProduct String?
+  purpose          String
+  status           String    @default("NEW")
+  assignedUserId   String?
+  notes            String?
+  contactedAt      DateTime?
+  scheduledAt      DateTime?
+  completedAt      DateTime?
+  cancelledAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  client           Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, status, createdAt])
+  @@index([status, createdAt])
+  @@index([email])
+  @@map("demo_requests")
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  clientId    String?
+  actorUserId String?
+  action      String
+  metadata    Json
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+  client      Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@map("audit_logs")
+}
+
+model DicomPort {
+  id        String   @id @default(cuid())
+  port      Int      @unique
+  aeTitle   String   @unique
+  allocated Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@map("dicom_ports")
+}
+
+model Hl7Config {
+  id              String  @id @default(cuid())
+  clientId        String  @unique
+  inboundEndpoint String
+  outboundHost    String
+  outboundPort    Int
+  sendingApp      String
+  receivingApp    String
+  enabled         Boolean @default(false)
+  client          Client  @relation(fields: [clientId], references: [id])
+
+  @@map("hl7_config")
+}
+
+model SystemSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
+model ProcessingJob {
+  id             String                @id @default(cuid())
+  clientId       String
+  serviceType    String
+  status         String                @default("queued")
+  internalJobId  String?               @unique
+  workflowType   String?
+  clinicalStatus String?
+  priority       String?
+  providerJobId  String?
+  upstreamStatus Json                  @default("{}")
+  imageCount     Int                   @default(0)
+  uploadName     String
+  uploadPath     String
+  demoMode       Boolean               @default(false)
+  cleanedPath    String?
+  reportHtml     String?
+  error          String?
+  completedAt    DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  client         Client                @relation(fields: [clientId], references: [id])
+  bridgeStudy    AvailableBridgeStudy?
+  patientId      String?
+  patient        Patient?              @relation(fields: [patientId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, patientId])
+  @@index([clientId])
+  @@index([status])
+  @@map("processing_jobs")
+}
+
+model AvailableBridgeStudy {
+  id                 String                  @id @default(cuid())
+  publicStudyId      String                  @unique
+  clientId           String
+  agentId            String
+  agentName          String?
+  studyInstanceUid   String
+  patientId          String?
+  patientName        String?
+  patientSex         String?
+  patientAge         String?
+  accessionNumber    String?
+  studyDate          String?
+  studyTime          String?
+  studyDescription   String?
+  modalities         String[]                @default([])
+  institutionName    String?
+  referringPhysician String?
+  seriesCount        Int                     @default(0)
+  instanceCount      Int                     @default(0)
+  totalSizeBytes     BigInt                  @default(0)
+  studyFingerprint   String?
+  localIp            String?
+  localPort          Int?
+  localAeTitle       String?
+  archiveName        String?
+  archivePath        String?
+  clinicalIndication String?
+  submittedAt        DateTime?
+  priority           String                  @default("REGULAR")
+  processingJobId    String?                 @unique
+  availabilityStatus String                  @default("Available")
+  workflowStatus     String                  @default("Available")
+  firstDetectedAt    DateTime?
+  readyAt            DateTime?
+  lastSyncedAt       DateTime                @default(now())
+  selectedAt         DateTime?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  client             Client                  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  dispatchRequests   BridgeDispatchRequest[]
+  attachments        BridgeStudyAttachment[]
+  processingJob      ProcessingJob?          @relation(fields: [processingJobId], references: [id], onDelete: SetNull)
+  patientProfileId   String?
+  patientProfile     Patient?                @relation(fields: [patientProfileId], references: [id], onDelete: SetNull)
+
+  @@unique([clientId, agentId, studyInstanceUid])
+  @@index([clientId, workflowStatus, availabilityStatus])
+  @@index([clientId, processingJobId, lastSyncedAt, id], map: "abs_client_pending_sync_idx")
+  @@index([clientId, updatedAt, id], map: "abs_client_updated_idx")
+  @@index([clientId, agentId])
+  @@index([clientId, patientProfileId])
+  @@map("available_bridge_studies")
+}
+
+model BridgeStudyAttachment {
+  id            String               @id @default(cuid())
+  clientId      String
+  bridgeStudyId String
+  originalName  String
+  storedName    String
+  filePath      String
+  mimeType      String?
+  sizeBytes     BigInt               @default(0)
+  uploadedBy    String?
+  createdAt     DateTime             @default(now())
+  client        Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  bridgeStudy   AvailableBridgeStudy @relation(fields: [bridgeStudyId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, bridgeStudyId])
+  @@map("bridge_study_attachments")
+}
+
+model BridgeDispatchRequest {
+  id                  String               @id @default(cuid())
+  requestId           String               @unique
+  clientId            String
+  agentId             String
+  availableStudyId    String
+  serviceType         String
+  priority            String               @default("REGULAR")
+  status              String               @default("Pending")
+  destinationJson     Json
+  totalInstances      Int                  @default(0)
+  sentInstances       Int                  @default(0)
+  failedInstances     Int                  @default(0)
+  progressPercentage  Float                @default(0)
+  requestedBy         String?
+  requestedAt         DateTime             @default(now())
+  agentAcknowledgedAt DateTime?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  lastErrorCode       String?
+  lastErrorMessage    String?
+  idempotencyKey      String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  client              Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  availableStudy      AvailableBridgeStudy @relation(fields: [availableStudyId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, agentId, status])
+  @@index([availableStudyId, status])
+  @@map("bridge_dispatch_requests")
+}
+
+model BridgeControlCommand {
+  id               String    @id @default(cuid())
+  commandId        String    @unique
+  clientId         String
+  agentId          String
+  type             String
+  status           String    @default("Pending")
+  payloadJson      Json      @default("{}")
+  resultJson       Json?
+  requestedBy      String?
+  requestedAt      DateTime  @default(now())
+  acknowledgedAt   DateTime?
+  completedAt      DateTime?
+  lastErrorCode    String?
+  lastErrorMessage String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  client           Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, agentId, status])
+  @@index([type, status])
+  @@map("bridge_control_commands")
+}
+
+model TeleradiologyProvider {
+  id                      String   @id @default(cuid())
+  name                    String
+  code                    String   @unique
+  apiBaseUrl              String?
+  authType                String   @default("HMAC")
+  credentialReference     String?
+  studySubmissionEndpoint String?
+  statusEndpoint          String?
+  reportCallbackEndpoint  String?
+  reportRetrievalEndpoint String?
+  supportedModalities     String[] @default([])
+  supportedBodyParts      String[] @default([])
+  supportedStudyFormats   String[] @default([])
+  supportedReportFormats  String[] @default([])
+  expectedTatMinutes      Int?
+  emergencyTatMinutes     Int?
+  active                  Boolean  @default(true)
+  webhookSecretHash       String?
+  allowedSourceIps        String[] @default([])
+  fieldMappings           Json     @default("{}")
+  statusMappings          Json     @default("{}")
+  reportMappings          Json     @default("{}")
+  retryPolicy             Json     @default("{}")
+  timeoutSeconds          Int      @default(60)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@map("teleradiology_providers")
+}
+
+model ProviderJobMapping {
+  id               String   @id @default(cuid())
+  providerId       String?
+  processingJobId  String?
+  reportReviewId   String?
+  dectrocelJobId   String   @unique
+  providerJobId    String?
+  studyInstanceUid String?
+  accessionNumber  String?
+  status           String   @default("CREATED")
+  metadata         Json     @default("{}")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([providerId, providerJobId])
+  @@map("provider_job_mapping")
+}
+
+model ProviderApiRequest {
+  id             String   @id @default(cuid())
+  providerId     String?
+  requestId      String   @unique
+  direction      String
+  endpoint       String
+  status         String
+  authenticated  Boolean  @default(false)
+  idempotencyKey String?
+  requestHash    String?
+  responseCode   Int?
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  @@map("provider_api_requests")
+}
+
+model ProviderReportSubmission {
+  id              String    @id @default(cuid())
+  providerId      String?
+  requestId       String    @unique
+  dectrocelJobId  String
+  renewistJobId   String
+  reportStatus    String
+  reportType      String
+  reportFormat    String
+  reportVersion   Int       @default(1)
+  reportFilePath  String?
+  reportChecksum  String?
+  metadata        Json      @default("{}")
+  reportReviewId  String?
+  receivedAt      DateTime  @default(now())
+  processedAt     DateTime?
+  processingError String?
+
+  @@unique([dectrocelJobId, renewistJobId, reportVersion])
+  @@map("provider_report_submissions")
+}
+
+model ReportVersion {
+  id             String   @id @default(cuid())
+  reportReviewId String
+  version        Int
+  status         String
+  source         String
+  htmlReport     String?
+  filePath       String?
+  checksum       String?
+  immutable      Boolean  @default(true)
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  @@unique([reportReviewId, version])
+  @@map("report_versions")
+}
+
+model PacsReturnJob {
+  id             String    @id @default(cuid())
+  reportReviewId String
+  status         String    @default("PENDING")
+  returnFormat   String
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(3)
+  nextAttemptAt  DateTime?
+  lastAttemptAt  DateTime?
+  acknowledgedAt DateTime?
+  errorCode      String?
+  errorMessage   String?
+  deliveryResult Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@map("pacs_return_jobs")
+}
+
+model JobStatusHistory {
+  id                    String   @id @default(cuid())
+  processingJobId       String?
+  reportReviewId        String?
+  previousStatus        String?
+  newStatus             String
+  actorUserId           String?
+  sourceSystem          String
+  reason                String?
+  relatedRequestId      String?
+  relatedProviderStatus String?
+  technicalDetails      Json     @default("{}")
+  createdAt             DateTime @default(now())
+
+  @@map("job_status_history")
+}

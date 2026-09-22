@@ -1,0 +1,83 @@
+name: marengo
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+x-app: &app
+  image: marengo-portal:local
+  build: .
+  env_file: .env
+  environment: &environment
+    NODE_ENV: production
+    HOST: 0.0.0.0
+    PORT: '4000'
+    DATABASE_URL: postgresql://marengo:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/marengo?schema=public&connection_limit=10&pool_timeout=20
+    NODE_OPTIONS: --max-old-space-size=4096
+    UV_THREADPOOL_SIZE: '4'
+    CHROMIUM_NO_SANDBOX: 'true'
+  init: true
+  logging: *logging
+
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: marengo
+      POSTGRES_DB: marengo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    command: [postgres, -c, shared_buffers=1GB, -c, effective_cache_size=4GB, -c, work_mem=8MB, -c, maintenance_work_mem=256MB, -c, max_connections=50]
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U marengo -d marengo']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    mem_limit: 4g
+    cpus: 1.25
+    logging: *logging
+  migrate:
+    <<: *app
+    command: [node_modules/.bin/prisma, migrate, deploy]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: 'no'
+    mem_limit: 1g
+  app:
+    <<: *app
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    volumes: [uploads:/app/uploads]
+    ports: ['127.0.0.1:4000:4000']
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 6g
+    cpus: 2.5
+    shm_size: 256m
+  web:
+    image: caddy:2-alpine
+    environment:
+      PORTAL_DOMAIN: ${PORTAL_DOMAIN:?Set PORTAL_DOMAIN in .env}
+    ports: ['80:80', '443:443', '443:443/udp']
+    volumes:
+      - ./deployment/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app: {condition: service_healthy}
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.25
+    logging: *logging
+volumes:
+  postgres-data:
+  uploads:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,4 @@
+{$PORTAL_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy app:4000
+}
