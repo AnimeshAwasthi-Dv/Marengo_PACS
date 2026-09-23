@@ -79,6 +79,8 @@ const reportSchema = z.object({
   comments: z.string().optional(),
   provider_status: z.string().optional(),
   turnaround_time_seconds: z.coerce.number().int().nonnegative().optional(),
+  tb_score: z.coerce.number().optional(),
+  update_reason: z.string().optional(),
   callback_reference: z.string().optional(),
   report_checksum: z.string().optional(),
   metadata_json: z.string().optional(),
@@ -243,6 +245,8 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
   const htmlReport = buildRenewistReportHtml(input)
   const normalizedProviderStatus = renewistAdapter.normalizeProviderStatus(input.report_status)
   const nextReviewStatus = input.report_status === 'FAILED' ? 'FAILED' : isFinalReport ? 'APPROVED' : 'SAVED'
+  const updateReason = input.update_reason ?? input.amendment_reason ?? input.comments
+  const replacesReportedReport = isFinalReport && ['APPROVED', 'PUSHED'].includes(report.status)
   const metadata = toPrismaJsonObject({
     ...buildSubmissionMetadata(input, validation.requestId, normalizedProviderStatus),
     ...(currentVersion ? {
@@ -250,7 +254,26 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
         replacedAt: new Date().toISOString(),
         previousChecksum: currentVersion.checksum,
         previousFilePath: currentVersion.filePath,
-        reason: 'Renewist repushed an existing report version',
+        reason: updateReason ?? 'Renewist repushed an existing report version',
+      },
+    } : {}),
+    ...(replacesReportedReport ? {
+      reportedReplacement: {
+        updateReason: updateReason ?? null,
+        previousStatus: report.status,
+        previousReport: {
+          id: report.id,
+          pushedAt: report.pushedAt?.toISOString() ?? null,
+          approvedAt: report.approvedAt?.toISOString() ?? null,
+          checksum: currentVersion?.checksum ?? null,
+          filePath: currentVersion?.filePath ?? null,
+        },
+        replacementReport: {
+          version: input.report_version,
+          status: input.report_status,
+          checksum: input.reportChecksum ?? input.report_checksum ?? null,
+          filePath: input.reportFilePath ?? null,
+        },
       },
     } : {}),
   })
@@ -395,6 +418,13 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
         metadata,
       },
     }),
+    ...(replacesReportedReport ? [prisma.reportAuditLog.create({
+      data: {
+        reportId: report.id,
+        action: 'RENEWIST_REPORTED_REPORT_REPLACED',
+        metadata,
+      },
+    })] : []),
     prisma.providerApiRequest.create({
       data: {
         providerId: validation.providerId,
@@ -698,6 +728,7 @@ function buildRenewistReportHtml(input: ParsedReportRequest) {
     ['Accession', input.accession_number],
     ['Study UID', input.study_instance_uid],
     ['Renewist Job ID', input.renewist_job_id],
+    ['TB Score', input.tb_score === undefined ? undefined : String(input.tb_score)],
     ['Reported At', input.reported_at],
     ['Radiologist', input.radiologist_name],
   ].filter((row): row is [string, string] => Boolean(row[1]))
@@ -727,6 +758,8 @@ function buildSubmissionMetadata(input: ParsedReportRequest, requestId: string, 
     reportFormat: input.report_format,
     reportedAt: input.reported_at,
     signedAt: input.signed_at,
+    tbScore: input.tb_score,
+    updateReason: input.update_reason,
     urgencyStatus: input.urgency_status,
     criticalFinding: input.critical_finding,
     radiologist: {

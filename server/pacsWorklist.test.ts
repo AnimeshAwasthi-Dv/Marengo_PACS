@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { istTimestamp, worklistDuration, worklistStatus, worklistPriority, worklistFacets, worklistModality } from '../src/pacsWorklist';
+import { istTimestamp, worklistDuration, worklistTatStart, worklistTatEnd, worklistStatus, worklistPriority, worklistFacets, worklistModality } from '../src/pacsWorklist';
 
 const facetRow = (receivedAt: string, modalities: string[], state: 'AVAILABLE' | 'REPORTING' | 'REPORTED' = 'AVAILABLE', priority: 'REGULAR' | 'URGENT' = 'REGULAR', needsAttention = false) => ({ receivedAt, study: { modalities }, state, priority, needsAttention });
 
@@ -66,4 +66,20 @@ test('worklist has three clinical statuses and preserves reported delivery failu
   assert.equal(worklistStatus({workflowStatus:'AI Processing'}), 'REPORTING');
   assert.equal(worklistStatus({workflowStatus:'Failed', reportStatus:'APPROVED'}), 'REPORTED');
   assert.equal(worklistStatus({workflowStatus:'PACS Sent'}), 'REPORTED');
+});
+
+test('live TAT continues after processing finishes until report is ready', () => {
+  const start = '2026-09-23T10:00:00Z';
+  const jobEnd = '2026-09-23T10:02:00Z';
+  const reportEnd = '2026-09-23T10:10:00Z';
+  assert.equal(worklistTatStart('AVAILABLE', start), null);
+  assert.equal(worklistDuration(worklistTatStart('AVAILABLE', start), null, Date.parse('2026-09-23T10:05:00Z')), '-');
+  assert.equal(worklistTatStart('REPORTING', start), start);
+  const liveEnd = worklistTatEnd('REPORTING', null, jobEnd);
+  assert.equal(liveEnd, null);
+  assert.equal(worklistDuration(worklistTatStart('REPORTING', start), liveEnd, Date.parse('2026-09-23T10:05:00Z')), '00:05:00');
+  assert.equal(worklistDuration(worklistTatStart('REPORTING', start), liveEnd, Date.parse('2026-09-23T10:05:01Z')), '00:05:01');
+  assert.equal(worklistTatEnd('AVAILABLE', null, jobEnd), null);
+  assert.equal(worklistTatEnd('REPORTED', reportEnd, jobEnd), reportEnd);
+  assert.equal(worklistDuration(worklistTatStart('REPORTED', start), reportEnd, Date.parse('2026-09-23T11:00:00Z')), '00:10:00');
 });

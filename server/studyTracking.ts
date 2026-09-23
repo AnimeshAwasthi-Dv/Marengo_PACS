@@ -3,7 +3,10 @@ import { prisma } from './db';
 import { redactExchange, studyTatCategory, tatTargetSeconds } from './telegramPolicy';
 
 export async function studyTracking(jobId: string, clientIds: string[] | null, db = prisma) {
-  const job = await db.processingJob.findFirst({ where: { id: jobId, ...(clientIds === null ? {} : { clientId: { in: clientIds } }) }, include: { bridgeStudy: true, client: { select: { name: true } } } });
+  const job = await db.processingJob.findFirst({ where: { id: jobId, ...(clientIds === null ? {} : { clientId: { in: clientIds } }) }, include: {
+    bridgeStudy: { select: { studyInstanceUid: true, modalities: true, submittedAt: true, studyDescription: true, patientName: true, accessionNumber: true } },
+    client: { select: { name: true } },
+  } });
   if (!job) return null;
   const mappings = await db.providerJobMapping.findMany({ where: { processingJobId: job.id } });
   const reportIds = mappings.flatMap(m => m.reportReviewId ? [m.reportReviewId] : []);

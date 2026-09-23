@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { enqueuePhysicianReports, PHYSICIAN_REPORT_READY, PHYSICIAN_CALL_REQUESTED, PHYSICIAN_ROLE, physicianDelivery, physicianWhatsappReady, reportReadyTemplate, requestPhysicianCall } from './physicianWhatsapp'
 import express from 'express'
 import { Prisma, type PrismaClient } from '@prisma/client'
 import { z } from 'zod'
@@ -69,12 +70,14 @@ whatsappRouter.get('/webhook', (req, res) => {
 })
 
 whatsappRouter.post('/webhook', async (req, res) => {
+  if (!process.env.WHATSAPP_APP_SECRET?.trim() && extractIncomingMessages(req.body).some(message => message.text.startsWith('physician_call:'))) return res.sendStatus(401)
   if (!verifyWhatsappWebhookSignature(req)) return res.sendStatus(401)
-  res.sendStatus(200)
   try {
     await handleIncomingWhatsapp(req.body)
+    res.sendStatus(200)
   } catch (error) {
     console.error('WhatsApp webhook handling failed', error)
+    res.sendStatus(503)
   }
 })
 
@@ -85,12 +88,15 @@ whatsappRouter.get('/config', async (req, res) => {
   const scope = whatsappScope(req.user!)
   const [recipients, outbox, pendingCount, sentCount, failedCount] = await Promise.all([
     prisma.notificationRecipient.findMany({ where: recipientScopeWhere(scope), orderBy: [{ active: 'desc' }, { updatedAt: 'desc' }], take: 100 }),
-    prisma.notificationOutbox.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
+    prisma.notificationOutbox.findMany({ where: scope.global ? {} : { eventType: { not: PHYSICIAN_REPORT_READY } }, orderBy: { createdAt: 'desc' }, take: 50 }),
     prisma.notificationOutbox.count({ where: { status: 'PENDING' } }),
     prisma.notificationOutbox.count({ where: { status: 'SENT' } }),
     prisma.notificationOutbox.count({ where: { status: { in: ['FAILED', 'DEAD'] } } }),
   ])
   res.json({
+    physicianReportReady: physicianWhatsappReady(),
+    physicianReportTemplateName: process.env.WHATSAPP_REPORT_READY_TEMPLATE_NAME?.trim() || '',
+    callRequests: scope.global ? await prisma.notificationEvent.findMany({ where: { eventType: PHYSICIAN_CALL_REQUESTED }, orderBy: { createdAt: 'desc' }, take: 100 }) : [],
     cloudApiEnabled: process.env.WHATSAPP_CLOUD_API_ENABLED === 'true',
     demoMode: process.env.WHATSAPP_CLOUD_API_ENABLED !== 'true',
     hasCloudApiToken: Boolean(process.env.WHATSAPP_CLOUD_API_TOKEN),
@@ -101,10 +107,10 @@ whatsappRouter.get('/config', async (req, res) => {
     webhookVerifyToken: whatsappWebhookVerifyToken(),
     hasAppSecret: Boolean(process.env.WHATSAPP_APP_SECRET?.trim()),
     hasUtilityTemplate: Boolean(whatsappUtilityTemplateName()),
-    outboundReady: whatsappOutboundReady(),
+    outboundReady: whatsappOutboundReady() || physicianWhatsappReady(),
     commandExample: 'Patient-related actions are available only in the secure portal.',
     recipients,
-    outbox,
+    outbox: outbox.map(item => ({ ...item, payload: { message: normalizePayload(item.payload).message } })),
     summary: { pendingCount, sentCount, failedCount },
   })
 })
@@ -113,6 +119,8 @@ whatsappRouter.post('/recipients', async (req, res) => {
   if (!canManageWhatsapp(req.user!)) return res.status(403).json({ message: 'WhatsApp bot management requires admin access' })
   const scope = whatsappScope(req.user!)
   const body = recipientSchema.parse(req.body)
+  if (body.role === PHYSICIAN_ROLE && !scope.global) return res.status(403).json({ message: 'Only Superadmin can configure referring physicians' })
+  if (body.clientId && !(await prisma.client.findUnique({ where: { id: body.clientId }, select: { id: true } }))) return res.status(400).json({ message: 'Center was not found' })
   const duplicate = await prisma.notificationRecipient.findUnique({ where: { phoneE164: body.phoneE164 }, select: { id: true } })
   if (duplicate) return res.status(409).json({ message: 'This WhatsApp number is already on the whitelist.' })
   if (body.userId && !(await prisma.user.findUnique({ where: { id: body.userId }, select: { id: true } }))) return res.status(400).json({ message: 'The assigned user ID was not found.' })
@@ -129,7 +137,7 @@ whatsappRouter.post('/recipients', async (req, res) => {
       consentStatus: body.consentStatus,
       consentAt: new Date(),
       consentSource: body.consentSource,
-      consentText: whatsappConsentText(),
+      consentText: body.role === PHYSICIAN_ROLE ? 'Agreed to receive referred-study report links and call-request updates on WhatsApp, with opt-out available.' : whatsappConsentText(),
       optOutAt: null,
       verificationStatus: body.verificationStatus,
       verifiedAt: body.verificationStatus === 'VERIFIED' ? new Date() : null,
@@ -148,6 +156,7 @@ whatsappRouter.patch('/recipients/:recipientId', async (req, res) => {
   const existing = await prisma.notificationRecipient.findFirst({ where: { id: String(req.params.recipientId), ...recipientScopeWhere(scope) } })
   if (!existing) return res.status(404).json({ message: 'Recipient not found' })
   const body = recipientSchema.partial().parse(req.body)
+  if ((existing.role === PHYSICIAN_ROLE || body.role === PHYSICIAN_ROLE) && !scope.global) return res.status(403).json({ message: 'Only Superadmin can configure referring physicians' })
   const updated = await prisma.notificationRecipient.update({
     where: { id: existing.id },
     data: {
@@ -162,7 +171,7 @@ whatsappRouter.patch('/recipients/:recipientId', async (req, res) => {
       consentStatus: body.consentStatus,
       consentAt: body.consentConfirmed ? existing.consentAt ?? new Date() : undefined,
       consentSource: body.consentSource,
-      consentText: body.consentConfirmed ? whatsappConsentText() : undefined,
+      consentText: body.consentConfirmed ? (body.role ?? existing.role) === PHYSICIAN_ROLE ? 'Agreed to receive referred-study report links and call-request updates on WhatsApp, with opt-out available.' : whatsappConsentText() : undefined,
       optOutAt: body.consentStatus === 'OPTED_OUT' ? new Date() : body.consentStatus ? null : undefined,
       verificationStatus: body.verificationStatus,
       verifiedAt: body.verificationStatus === undefined ? undefined : body.verificationStatus === 'VERIFIED' ? existing.verifiedAt ?? new Date() : null,
@@ -179,6 +188,14 @@ whatsappRouter.post('/outbox/process', async (req, res) => {
   if (!canManageWhatsapp(req.user!)) return res.status(403).json({ message: 'WhatsApp bot management requires admin access' })
   await processWhatsappOutbox()
   res.json({ processed: true })
+})
+
+whatsappRouter.patch('/physician-calls/:id', async (req, res) => {
+  if (req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ message: 'Superadmin access required' })
+  const body = z.object({ status: z.enum(['PENDING', 'COMPLETED']) }).parse(req.body)
+  const result = await prisma.notificationEvent.updateMany({ where: { id: String(req.params.id), eventType: PHYSICIAN_CALL_REQUESTED }, data: { status: body.status } })
+  if (!result.count) return res.status(404).json({ message: 'Call request not found' })
+  res.json({ updated: true })
 })
 
 whatsappRouter.delete('/recipients/:recipientId', async (req, res) => {
@@ -292,6 +309,7 @@ export async function processWhatsappOutbox(limit = 25) {
   if (outboxWorkerRunning) return
   outboxWorkerRunning = true
   try {
+    if (physicianWhatsappReady()) await enqueuePhysicianReports(prisma)
     const due = await prisma.notificationOutbox.findMany({
       where: { eventType: { notIn: ['TELEGRAM_STUDY_PROCESSING', 'TELEGRAM_TAT_ALERT'] }, status: { in: ['PENDING', 'FAILED'] }, nextAttemptAt: { lte: new Date() } },
       orderBy: { createdAt: 'asc' },
@@ -299,6 +317,20 @@ export async function processWhatsappOutbox(limit = 25) {
     })
     for (const item of due) {
       try {
+        if (item.eventType === PHYSICIAN_REPORT_READY) {
+          // Never route a patient-specific link through the general recipient resolver.
+          if (!physicianWhatsappReady()) continue
+          const delivery = await physicianDelivery(prisma, item.payload)
+          if (!delivery) {
+            await prisma.notificationOutbox.update({ where: { id: item.id }, data: { status: 'DEAD' } })
+            continue
+          }
+          await sendWhatsappPayload(delivery.recipient.phoneE164!, reportReadyTemplate(delivery.recipient.phoneE164!, delivery.url, item.id,
+            process.env.WHATSAPP_REPORT_READY_TEMPLATE_NAME!.trim(), process.env.WHATSAPP_REPORT_READY_TEMPLATE_LANGUAGE?.trim() || 'en'))
+          await prisma.notificationOutbox.update({ where: { id: item.id }, data: { status: 'SENT', attempts: { increment: 1 }, processedAt: new Date() } })
+          await prisma.notificationRecipient.update({ where: { id: delivery.recipient.id }, data: { lastNotificationAt: new Date() } })
+          continue
+        }
         const payload = normalizePayload(item.payload)
         const recipients = await resolveRecipients(payload)
         if (!recipients.length) {
@@ -381,7 +413,6 @@ async function handleIncomingWhatsapp(body: unknown) {
   const messages = extractIncomingMessages(body)
   for (const message of messages) {
     if (message.id && processedIncomingMessages.has(message.id)) continue
-    if (message.id) processedIncomingMessages.set(message.id, Date.now())
     const reply = await handleBotText(message.from, message.text)
     if (reply) {
       try {
@@ -402,6 +433,7 @@ async function handleIncomingWhatsapp(body: unknown) {
         throw error
       }
     }
+    if (message.id) processedIncomingMessages.set(message.id, Date.now())
   }
   const cutoff = Date.now() - 24 * 60 * 60 * 1000
   for (const [id, receivedAt] of processedIncomingMessages) if (receivedAt < cutoff) processedIncomingMessages.delete(id)
@@ -425,6 +457,10 @@ function extractDeliveryStatuses(body: unknown) {
 
 async function handleBotText(from: string, text: string): Promise<BotReply> {
   const normalized = text.trim().replace(/\s+/g, ' ')
+  if (normalized.startsWith('physician_call:')) {
+    const accepted = await requestPhysicianCall(prisma, normalizeIncomingPhone(from), normalized.slice('physician_call:'.length))
+    return textReply(accepted ? 'Your call request has been sent to Superadmin and the assigned radiologist. The team will contact you.' : 'This call request is unavailable. Please contact the hospital.')
+  }
   if (/^(?:stop|unsubscribe|opt\s*out|cancel\s+messages)$/i.test(normalized)) {
     botFlows.delete(from)
     await prisma.notificationRecipient.updateMany({
@@ -682,6 +718,7 @@ async function resolveRecipients(payload: NotificationPayload) {
   const dbRecipients = await prisma.notificationRecipient.findMany({
     where: {
       active: true,
+      role: { not: PHYSICIAN_ROLE },
       verificationStatus: 'VERIFIED',
       consentStatus: { in: ['OPTED_IN', 'APPROVED', 'ACTIVE'] },
       phoneE164: { not: null, ...(requested.length ? { in: requested } : {}) },
@@ -789,8 +826,9 @@ async function markOutboxFailed(id: string, attempts: number, error: string) {
   const nextAttemptAt = new Date(Date.now() + Math.min(60, 2 ** Math.min(attempts, 6)) * 60 * 1000)
   await prisma.notificationOutbox.update({
     where: { id },
-    data: { status: attempts + 1 >= 5 ? 'DEAD' : 'FAILED', attempts: { increment: 1 }, nextAttemptAt, payload: { error } },
+    data: { status: attempts + 1 >= 5 ? 'DEAD' : 'FAILED', attempts: { increment: 1 }, nextAttemptAt },
   })
+  console.warn(`WhatsApp outbox ${id} failed: ${error}`)
 }
 
 function normalizePayload(value: Prisma.JsonValue): NotificationPayload {

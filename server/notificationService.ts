@@ -122,6 +122,7 @@ async function resolveWhitelistedPhones(db: DbClient, input: DomainNotificationI
   return db.notificationRecipient.findMany({
     where: {
       active: true,
+      role: { not: 'REFERRING_PHYSICIAN' },
       verificationStatus: 'VERIFIED',
       consentStatus: { in: ['OPTED_IN', 'APPROVED', 'ACTIVE'] },
       phoneE164: { not: null },

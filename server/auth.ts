@@ -8,6 +8,34 @@ const jwtSecret = process.env.JWT_SECRET?.trim()
 if (!jwtSecret) throw new Error('JWT_SECRET must be configured before the API starts')
 
 type ClientPortalRole = 'FRONT_DESK' | 'TECHNICIAN' | 'MANAGER' | 'IT_TEAM'
+const readOnlyEnvAdminSub = 'readonly-env-admin'
+
+function readOnlyEnvAdminMatches(userId: string, legacyEmail: string, password: string) {
+  if (process.env.DATABASE_READ_ONLY !== 'true') return false
+  const adminPassword = process.env.ADMIN_PASSWORD
+  if (!adminPassword || password !== adminPassword) return false
+  const adminUserId = process.env.ADMIN_USER_ID?.trim().toLowerCase() || 'admin'
+  const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase()
+  const loginId = (userId || legacyEmail).trim().toLowerCase()
+  return loginId === adminUserId || Boolean(adminEmail && loginId === adminEmail)
+}
+
+function readonlyEnvAdminResponse() {
+  const token = jwt.sign({ sub: readOnlyEnvAdminSub, role: 'SUPER_ADMIN', readOnlyEnvAdmin: true }, jwtSecret, { expiresIn: '8h' })
+  return {
+    token,
+    user: {
+      id: readOnlyEnvAdminSub,
+      userId: process.env.ADMIN_USER_ID?.trim() || 'admin',
+      name: 'Read-only Administrator',
+      email: process.env.ADMIN_EMAIL?.trim().toLowerCase() || 'admin@example.com',
+      role: 'SUPER_ADMIN' as const,
+      clientId: null,
+      providerCode: null,
+      portalRole: null,
+    },
+  }
+}
 
 async function getPortalRole(userId: string, role: string): Promise<ClientPortalRole | null> {
   if (role !== 'CLIENT_USER') return null
@@ -25,6 +53,7 @@ export async function login(req: Request, res: Response) {
   const legacyEmail = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
   const password = typeof req.body?.password === 'string' ? req.body.password : ''
   if ((!userId && !legacyEmail) || !password) return res.status(400).json({ message: 'User ID and password are required' })
+  if (readOnlyEnvAdminMatches(userId, legacyEmail, password)) return res.json(readonlyEnvAdminResponse())
   // Email fallback keeps pre-migration accounts usable while administrators distribute their new user IDs.
   const user = await prisma.user.findFirst({
     where: userId ? { OR: [{ userId: { equals: userId, mode: 'insensitive' } }, { email: { equals: userId, mode: 'insensitive' } }] } : { email: { equals: legacyEmail, mode: 'insensitive' } },
@@ -32,6 +61,7 @@ export async function login(req: Request, res: Response) {
   })
 
   if (!user || !user.active || !(await bcrypt.compare(password, user.passwordHash))) {
+    if (readOnlyEnvAdminMatches(userId, legacyEmail, password)) return res.json(readonlyEnvAdminResponse())
     return res.status(401).json({ message: 'Invalid credentials' })
   }
 
@@ -54,7 +84,11 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   if (!token) return res.status(401).json({ message: 'Missing bearer token' })
 
   try {
-    const payload = jwt.verify(token, jwtSecret) as { sub: string; role: string; clientId?: string; providerCode?: string; portalRole?: string | null }
+    const payload = jwt.verify(token, jwtSecret) as { sub: string; role: string; clientId?: string; providerCode?: string; portalRole?: string | null; readOnlyEnvAdmin?: boolean }
+    if (process.env.DATABASE_READ_ONLY === 'true' && payload.readOnlyEnvAdmin === true && payload.sub === readOnlyEnvAdminSub && payload.role === 'SUPER_ADMIN') {
+      req.user = { sub: payload.sub, role: 'SUPER_ADMIN' }
+      return next()
+    }
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
       select: { id: true, role: true, clientId: true, providerCode: true, active: true, client: { select: { status: true } } },

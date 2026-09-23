@@ -56,6 +56,15 @@ export function worklistDuration(received?: string | null, processed?: string | 
   return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((value) => String(value).padStart(2, '0')).join(':');
 }
 
+export function worklistTatStart(state: string, submittedAt?: string | null) {
+  return state === 'AVAILABLE' ? null : submittedAt ?? null;
+}
+
+export function worklistTatEnd(state: string, reportCompletedAt?: string | null, jobCompletedAt?: string | null) {
+  // Processing completion is not report approval: reporting TAT must keep running.
+  return state === 'REPORTED' ? reportCompletedAt ?? jobCompletedAt ?? null : null;
+}
+
 export function worklistStatus(input: { reportStatus?: string | null; workflowStatus: string; processingJobId?: string | null; submittedAt?: string | null }) {
   const workflow = input.workflowStatus.trim().toLowerCase().replace(/[ -]+/g, '_');
   if (['APPROVED', 'PUSHED'].includes(input.reportStatus ?? '') || ['reported', 'pacs_sent', 'sent_to_pacs', 'report_delivered'].includes(workflow)) return 'REPORTED' as const;

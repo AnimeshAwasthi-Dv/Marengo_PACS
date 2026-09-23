@@ -1,6 +1,17 @@
 export type ViewerContext = { studyInstanceUid?: string | null; reportId?: string | null };
 
-export function externalViewerSession(context: ViewerContext, template = process.env.EXTERNAL_VIEWER_URL_TEMPLATE?.trim()) {
+function cleanEnvValue(value: string | undefined) {
+  const trimmed = value?.trim() ?? '';
+  return trimmed === "''" || trimmed === '""' ? '' : trimmed;
+}
+
+function configuredViewerTemplate() {
+  const explicitTemplate = cleanEnvValue(process.env.EXTERNAL_VIEWER_URL_TEMPLATE);
+  if (explicitTemplate) return explicitTemplate;
+  return '';
+}
+
+export function externalViewerSession(context: ViewerContext, template = configuredViewerTemplate()) {
   if (!template) return { enabled: false, message: 'The external DICOM viewer has not been configured yet.' };
   if (!context.studyInstanceUid || !/^\d+(\.\d+)+$/.test(context.studyInstanceUid) || context.studyInstanceUid.length > 64) {
     return { enabled: false, message: 'This study does not have a valid DICOM study UID yet.' };
@@ -14,8 +25,9 @@ export function externalViewerSession(context: ViewerContext, template = process
 }
 
 export function externalViewerOrigin() {
-  const template = process.env.EXTERNAL_VIEWER_URL_TEMPLATE?.trim();
-  if (!template) return null;
+  const template = configuredViewerTemplate();
+  const viewerBaseUrl = cleanEnvValue(process.env.DICOM_VIEWER_API_URL);
+  if (!template) return viewerBaseUrl ? new URL(viewerBaseUrl).origin : null;
   // Validate the same configuration used by study links before adding it to CSP.
   const session = externalViewerSession({ studyInstanceUid: '1.2.3', reportId: 'configuration-check' }, template);
   return session.enabled && session.viewerUrl ? new URL(session.viewerUrl).origin : null;

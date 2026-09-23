@@ -857,6 +857,9 @@ export type NotificationOutboxItem = {
 };
 
 export type WhatsAppBotConfig = {
+  physicianReportReady: boolean;
+  physicianReportTemplateName: string;
+  callRequests: Array<{ id: string; message: string; status: string; createdAt: string; aggregateId: string }>;
   cloudApiEnabled: boolean;
   demoMode: boolean;
   hasCloudApiToken: boolean;

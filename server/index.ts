@@ -1,4 +1,6 @@
 import { externalViewerOrigin } from './viewer/externalViewer';
+import { classifyBreastXrayModalities } from '../src/mammography';
+import { holdSpecialXrayForManualSubmission, isSpecialXrayStudy } from '../src/specialXray';
 import { nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
 import { registerExternalViewerRoutes } from './viewer/routes';
@@ -72,6 +74,7 @@ const uploadsPath = path.resolve(__dirname, '..', 'uploads')
 const appUploadPath = path.join(uploadsPath, 'application-jobs')
 const dicomInboundPath = path.join(uploadsPath, 'dicom-inbound')
 const receiverProcesses = new Map<number, ReturnType<typeof spawn>>()
+const externalViewerImports = new Map<string, { archivePath: string; importId: string; status: string; viewerUrl?: string; expiresAt: number }>()
 
 
 const reportPublicShareTtlMs = 5 * 24 * 60 * 60 * 1000
@@ -81,6 +84,101 @@ let renewistSubmissionTail: Promise<unknown> = Promise.resolve()
 const queuedRenewistJobIds = new Set<string>()
 const portalUserSelect = { id: true, userId: true, email: true, name: true, role: true, portalRole: true, clientId: true, providerCode: true, active: true, createdAt: true, updatedAt: true } as const
 const clientPortalRoleSchema = z.enum(['FRONT_DESK', 'TECHNICIAN', 'MANAGER', 'IT_TEAM'])
+type ViewerImportStatus = { id: string; status: string; statusUrl?: string; expiresAt?: number }
+type ViewerSessionResponse = { viewerUrl?: string; expiresAt?: number }
+
+function viewerServiceConfig() {
+  const viewerBaseUrl = (process.env.DICOM_VIEWER_API_URL ?? '').trim()
+  const apiKey = (process.env.DICOM_VIEWER_SERVICE_API_KEY ?? '').trim()
+  if (!viewerBaseUrl || !apiKey) throw new Error('DICOM viewer service credentials are not configured')
+  return { baseUrl: viewerBaseUrl.replace(/\/+$/g, ''), apiKey }
+}
+
+function studyViewerStorageKind(modalities: string[] | null | undefined): Extract<StorageKind, 'ct-studies' | 'mri-studies' | 'xray-studies' | 'mammography-studies'> {
+  const values = new Set((modalities ?? []).map(value => value.toUpperCase()))
+  if (values.has('CT')) return 'ct-studies'
+  if (values.has('MRI') || values.has('MR')) return 'mri-studies'
+  if (values.has('MG') || values.has('MAMMOGRAPHY')) return 'mammography-studies'
+  return 'xray-studies'
+}
+
+function viewerModality(kind: ReturnType<typeof studyViewerStorageKind>) {
+  if (kind === 'ct-studies') return 'CT'
+  if (kind === 'mri-studies') return 'MRI'
+  if (kind === 'mammography-studies') return 'MAMMOGRAPHY'
+  return 'XRAY'
+}
+
+async function viewerServiceRequest<T>(pathName: string, init: RequestInit = {}): Promise<T> {
+  const config = viewerServiceConfig()
+  const response = await fetch(new URL(pathName, config.baseUrl), {
+    ...init,
+    headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json', ...init.headers },
+  })
+  if (!response.ok) throw new Error(`DICOM viewer service returned ${response.status}: ${await response.text()}`)
+  return response.json() as Promise<T>
+}
+
+async function waitForViewerImport(importId: string) {
+  const deadline = Date.now() + 25_000
+  let current: ViewerImportStatus | null = null
+  while (Date.now() < deadline) {
+    current = await viewerServiceRequest<ViewerImportStatus>(`/api/v1/studies/${encodeURIComponent(importId)}`)
+    if (current.status === 'completed') return current
+    if (current.status === 'failed') throw new Error('DICOM viewer import failed')
+    await new Promise(resolve => setTimeout(resolve, 1500))
+  }
+  return current
+}
+
+async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
+  const study = await prisma.availableBridgeStudy.findUnique({
+    where: { id: studyId },
+    select: {
+      id: true,
+      publicStudyId: true,
+      archivePath: true,
+      archiveName: true,
+      modalities: true,
+      processingJob: { select: { upstreamStatus: true } },
+    },
+  })
+  if (!study) return null
+  const storedStudy = getOriginalStudyStorage(study.processingJob?.upstreamStatus)
+  const archivePath = await resolveSafeBundleFile(study.archivePath)
+  if (!storedStudy?.key && !archivePath) return null
+  const cached = externalViewerImports.get(study.id)
+  const sourceIdentity = storedStudy?.key ?? archivePath ?? ''
+  if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return cached.viewerUrl
+  let importId = cached?.archivePath === sourceIdentity ? cached.importId : ''
+  const kind = studyViewerStorageKind(study.modalities)
+  if (!importId) {
+    const storage = storedStudy?.key ? { key: storedStudy.key } : await storeObject({
+      kind,
+      keyParts: ['viewer-imports', study.id, study.archiveName || path.basename(archivePath!)],
+      body: fsSync.createReadStream(archivePath!),
+      contentType: 'application/zip',
+      localPath: archivePath!,
+    })
+    if (!storage?.key) throw new Error('Unable to upload the study ZIP for DICOM viewer import')
+    const imported = await viewerServiceRequest<ViewerImportStatus>('/api/v1/studies', {
+      method: 'POST',
+      body: JSON.stringify({ zipKey: storage.key, modality: viewerModality(kind) }),
+    })
+    importId = imported.id
+    externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: imported.status, expiresAt: Date.now() + 60 * 60 * 1000 })
+  }
+  const ready = await waitForViewerImport(importId)
+  if (ready?.status !== 'completed') throw new Error('DICOM viewer is still indexing this study. Please try again shortly.')
+  const session = await viewerServiceRequest<ViewerSessionResponse>('/api/v1/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ studyId: importId }),
+  })
+  if (!session.viewerUrl) throw new Error('DICOM viewer service did not return a viewer URL')
+  externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: 'completed', viewerUrl: session.viewerUrl, expiresAt: session.expiresAt ?? Date.now() + 55 * 60 * 1000 })
+  return session.viewerUrl
+}
+
 function userIdForEmail(email: string) {
   const prefix = email.split('@')[0]!.toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40) || 'user'
   return `${prefix}-${crypto.createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 6)}`
@@ -105,6 +203,11 @@ function requireDeploymentFeature(feature: 'billing' | 'calling' | 'notification
 }
 
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') ?? true }))
+app.use('/api', (req, res, next) => {
+  if (process.env.DATABASE_READ_ONLY === 'true' && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)
+    && !(req.method === 'POST' && req.path === '/auth/login')) return res.status(403).json({ message: 'Production database is read-only. Changes are disabled.' })
+  next()
+})
 app.use(helmet({ contentSecurityPolicy: { directives: { frameSrc: ["'self'", 'blob:', ...(externalViewerOrigin() ? [externalViewerOrigin()!] : [])] } } }))
 app.post('/api/v1/billing/razorpay/webhook', requireDeploymentFeature('billing'), express.raw({ type: 'application/json', limit: '2mb' }), handleRazorpayWebhook)
 app.use(express.json({
@@ -123,6 +226,7 @@ app.use('/api/client/study-sync', (_req, res, next) => {
 app.use('/api', (req, res, next) => {
   const startedAt = Date.now()
   res.on('finish', () => {
+    if (process.env.DATABASE_READ_ONLY === 'true') return
     if (req.path === '/health') return
     if (req.method === 'GET' && /\/dashboard$/.test(req.path)) return
     const user = req.user
@@ -2060,7 +2164,7 @@ app.get('/api/client/study-sync/available-studies', requireAuth, async (req, res
       instanceCount: true, totalSizeBytes: true, localIp: true, localPort: true, localAeTitle: true,
       archiveName: true, clinicalIndication: true, processingJobId: true, availabilityStatus: true,
       workflowStatus: true, lastSyncedAt: true, selectedAt: true, submittedAt: true,
-      referringPhysician: true, firstDetectedAt: true, createdAt: true, priority: true,
+      referringPhysician: true, firstDetectedAt: true, createdAt: true, priority: process.env.DATABASE_READ_ONLY !== 'true',
       processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true } },
       dispatchRequests: {
         select: { requestId: true, status: true, progressPercentage: true, createdAt: true, lastErrorMessage: true },
@@ -2101,7 +2205,22 @@ app.get('/api/client/study-sync/available-studies/:studyId/attachments/:attachme
   res.type(mime).sendFile(filePath)
 })
 
-
+app.get('/api/client/study-sync/available-studies/:studyId/download', requireAuth, async (req, res) => {
+  const study = await prisma.availableBridgeStudy.findFirst({
+    where: { id: String(req.params.studyId), ...await workspaceStudyScope(req) },
+    include: {
+      client: { select: { id: true, name: true, code: true } },
+      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true } },
+      dispatchRequests: {
+        select: { requestId: true, status: true, progressPercentage: true, createdAt: true, lastErrorMessage: true },
+        orderBy: { createdAt: 'desc' },
+      },
+      attachments: true,
+    },
+  })
+  if (!study) return res.status(404).json({ message: 'Study was not found for this client' })
+  return sendBridgeStudyBundle(res, study)
+})
 
 app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireClientUser, requireWorkspaceAction('upload'), async (req, res) => {
   const clientId = req.user!.clientId!
@@ -2125,7 +2244,8 @@ app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireC
         studyDate: extracted.studyDate ?? null,
         studyTime: extracted.studyTime ?? null,
         studyDescription: extracted.studyDescription ?? extracted.seriesDescription ?? extracted.protocolName ?? `${modality === 'XRAY' ? 'X-ray' : modality} manual upload`,
-        modalities: [dicomModality],
+        modalities: classifyBreastXrayModalities([extracted.modality ?? dicomModality], extracted.bodyPartExamined),
+        referringPhysician: extracted.referringPhysician ?? null,
         archiveName: upload.uploadName,
         archivePath: upload.filePath,
         totalSizeBytes: BigInt(upload.sizeBytes),
@@ -2649,6 +2769,8 @@ app.post(['/api/v1/study-bridge/studies/sync', '/api/v1/study-bridge/:agentId/st
       study_date: z.string().optional().nullable(),
       study_time: z.string().optional().nullable(),
       study_description: z.string().optional().nullable(),
+      body_part_examined: z.string().optional().nullable(),
+      bodyPartExamined: z.string().optional().nullable(),
       modalities: z.array(z.string()).optional().default([]),
       institution_name: z.string().optional().nullable(),
       referring_physician: z.string().optional().nullable(),
@@ -2765,6 +2887,8 @@ app.post(['/api/v1/study-bridge/:agentId/commands/:commandId/result', '/api/v1/s
       study_date: z.string().optional().nullable(),
       study_time: z.string().optional().nullable(),
       study_description: z.string().optional().nullable(),
+      body_part_examined: z.string().optional().nullable(),
+      bodyPartExamined: z.string().optional().nullable(),
       modalities: z.array(z.string()).optional().default([]),
       institution_name: z.string().optional().nullable(),
       referring_physician: z.string().optional().nullable(),
@@ -4329,7 +4453,7 @@ app.post('/api/admin/processing-jobs/:jobId/retry-renewist', requireAuth, requir
   res.status(202).json({ processingJobId: jobId, status: 'QueuedForRenewist' })
 })
 
-registerExternalViewerRoutes(app, { prisma, requireAuth, requireRadiologist, accessibleClientIds, workspaceStudyScope, getAccessibleProcessingJob, extractQueuedMetadata, publicSharedReport, getAuthorizedReport, canRadiologistAccessReport, isGroupRadiologistProfile, getDicomMetadataValue });
+registerExternalViewerRoutes(app, { prisma, requireAuth, requireRadiologist, accessibleClientIds, workspaceStudyScope, getAccessibleProcessingJob, extractQueuedMetadata, publicSharedReport, getAuthorizedReport, canRadiologistAccessReport, isGroupRadiologistProfile, getDicomMetadataValue, createBridgeStudyViewerUrl });
 
 app.use((error: unknown, _req: Request, res: Response, next: express.NextFunction) => {
   if (res.headersSent) return next(error)
@@ -4351,7 +4475,7 @@ app.get(/^(?!\/api).*/, (_req, res) => {
 
 const httpServer = app.listen(port, host, () => {
   console.log(`DecXpert API listening on http://${host}:${port}`)
-  if (process.env.DISABLE_STARTUP_WORKERS === 'true') {
+  if (process.env.DISABLE_STARTUP_WORKERS === 'true' || process.env.DATABASE_READ_ONLY === 'true') {
     console.log('Startup workers disabled by DISABLE_STARTUP_WORKERS=true')
     return
   }
@@ -4886,10 +5010,10 @@ async function queueInboundStudyIfReady(input: {
   const zipped = await zipDirectory(input.studyDir, uploadPath)
   const zipStat = await fs.stat(uploadPath)
   const studyInstanceUid = dicomMetadata.studyInstanceUid ?? input.studyUid
-  const modalities = Array.from(new Set([
+  const modalities = classifyBreastXrayModalities(Array.from(new Set([
     dicomMetadata.modality,
     defaultModalityForServiceType(input.serviceType),
-  ].filter((value): value is string => Boolean(value)).map((value) => value.toUpperCase())))
+  ].filter((value): value is string => Boolean(value)).map((value) => value.toUpperCase()))), dicomMetadata.bodyPartExamined)
 
   const study = await prisma.$transaction(async (tx) => {
     const savedStudy = await tx.availableBridgeStudy.upsert({
@@ -4909,6 +5033,7 @@ async function queueInboundStudyIfReady(input: {
         studyDate: dicomMetadata.studyDate ?? null,
         studyTime: dicomMetadata.studyTime ?? null,
         studyDescription: dicomMetadata.studyDescription ?? dicomMetadata.seriesDescription ?? dicomMetadata.protocolName ?? input.serviceName,
+        referringPhysician: dicomMetadata.referringPhysician ?? null,
         modalities,
         archiveName: uploadName,
         archivePath: uploadPath,
@@ -4935,6 +5060,7 @@ async function queueInboundStudyIfReady(input: {
         studyDate: dicomMetadata.studyDate ?? null,
         studyTime: dicomMetadata.studyTime ?? null,
         studyDescription: dicomMetadata.studyDescription ?? dicomMetadata.seriesDescription ?? dicomMetadata.protocolName ?? input.serviceName,
+        referringPhysician: dicomMetadata.referringPhysician ?? null,
         modalities,
         archiveName: uploadName,
         archivePath: uploadPath,
@@ -4990,10 +5116,13 @@ async function autoQueueAvailableStudyForRenewist(input: {
     include: { attachments: true },
   })
   if (!study || study.processingJobId || study.availabilityStatus !== 'Available' || !study.archivePath) return null
+  if (study.modalities.includes('MG')) return null
+  if (holdSpecialXrayForManualSubmission(study, input.serviceType ?? input.requestedServiceType)) return null
   const archiveMetadata = await extractDicomStudyMetadata(study.archivePath).catch(() => ({}))
   const dicomMetadata = mergeDicomMetadata(bridgeStudyDicomMetadata(study), archiveMetadata)
   const inferredServiceType = inferBridgeServiceType({
     modalities: dicomMetadata.modality ? [dicomMetadata.modality] : study.modalities,
+    bodyPartExamined: dicomMetadata.bodyPartExamined,
     studyDescription: [
       dicomMetadata.studyDescription,
       dicomMetadata.bodyPartExamined,
@@ -5008,7 +5137,12 @@ async function autoQueueAvailableStudyForRenewist(input: {
   )
   const isXray = inferredServiceType === 'xray'
     || Boolean(serviceType && aiServiceTypeForServiceType(serviceType) === 'xray')
-  if (!isXray) return null
+  if (inferredServiceType === 'mammography') {
+    const modalities = classifyBreastXrayModalities(study.modalities, dicomMetadata.bodyPartExamined)
+    if (modalities.includes('MG')) await prisma.availableBridgeStudy.update({ where: { id: study.id }, data: { modalities } })
+    return null
+  }
+  if (inferredServiceType === 'special-xray-contrast-media' || !isXray) return null
 
   const demoStatus = input.demoMode === undefined ? await getDemoUploadStatus(input.clientId) : { allowed: true, demoMode: input.demoMode, message: '' }
   if (!demoStatus.allowed) return null
@@ -5279,7 +5413,7 @@ async function processApplicationJob(jobId: string) {
           })
           : await processCtUpload(job.uploadPath, job.uploadName, jobFolder, reportId, { serviceName, serviceType, dicomMetadata, clinicalIndication })
     result.html = applyReportMetadata(result.html, dicomMetadata)
-    const billableUnits = aiServiceType === 'ct-thorax' || aiServiceType === 'ct' ? 1 : result.imageCount
+    const billableUnits = billableUnitsForStudy(serviceName, serviceType, result.imageCount)
     if (!job.demoMode && !isTeleradiologyWorkflow(workflowType) && clientService.credits - clientService.usedCredits < billableUnits) {
       throw new Error(`Insufficient credits: ${billableUnits} required, ${clientService.credits - clientService.usedCredits} available`)
     }
@@ -5731,7 +5865,7 @@ async function queueTeleradiologyOnlyJob(input: {
     && (workflowType === 'TELERADIOLOGY_ONLY' || workflowType === 'AI_TELERADIOLOGY' || input.clientService.pacsConfig?.outsourceTeleradiology)
   )
 
-  const billableUnits = Math.max(1, input.job.imageCount || Number(input.dicomMetadata.numberOfInstances ?? 1) || 1)
+  const billableUnits = billableUnitsForStudy(input.serviceName, input.serviceType, input.job.imageCount || Number(input.dicomMetadata.numberOfInstances ?? 1) || 1)
   const studyUid = input.dicomMetadata.studyInstanceUid ?? `APP-${input.job.id}`
   const modality = input.dicomMetadata.modality ?? defaultModalityForServiceType(input.serviceType)
   const originalStudyStorage = await storeObject({
@@ -6263,6 +6397,12 @@ function resolveBillableServiceName(input: {
   }
 
   return input.serviceName
+}
+
+function billableUnitsForStudy(serviceName: string, serviceType: string, imageCount: number) {
+  return /x-?ray/i.test(serviceName) || serviceType === 'xray' || serviceType.startsWith('xray')
+    ? Math.max(1, imageCount || 1)
+    : 1
 }
 
 function renewistModalityForStudy(input: {
@@ -6809,6 +6949,7 @@ function isDicomCandidateFile(fileName: string) {
 }
 
 type DicomMetadata = {
+  referringPhysician?: string
   patientName?: string
   patientId?: string
   accession?: string
@@ -6834,7 +6975,7 @@ async function extractDicomMetadata(filePath: string): Promise<DicomMetadata> {
   const dcmdump = await findTool('dcmdump.exe')
   if (!dcmdump) return {}
 
-  const tags = ['0010,0010', '0010,0020', '0008,0050', '0010,0040', '0010,1010', '0010,0030', '0020,000D', '0020,000E', '0008,0018', '0008,0020', '0008,0030', '0008,0060', '0008,1030', '0008,103E', '0018,1030', '0018,0015']
+  const tags = ['0008,0090', '0010,0010', '0010,0020', '0008,0050', '0010,0040', '0010,1010', '0010,0030', '0020,000D', '0020,000E', '0008,0018', '0008,0020', '0008,0030', '0008,0060', '0008,1030', '0008,103E', '0018,1030', '0018,0015']
   const output = await new Promise<string>((resolve, reject) => {
     execFile(dcmdump, tags.flatMap((tag) => ['+P', tag]).concat(filePath), { windowsHide: true }, (error, stdout, stderr) => {
       if (error) reject(new Error(stderr || error.message))
@@ -6856,6 +6997,7 @@ async function extractDicomMetadata(filePath: string): Promise<DicomMetadata> {
     studyTime: cleanDicomValue(readDicomDumpValue(output, '0008,0030')),
     modality: cleanDicomValue(readDicomDumpValue(output, '0008,0060')),
     studyDescription: cleanDicomValue(readDicomDumpValue(output, '0008,1030')),
+    referringPhysician: cleanDicomValue(readDicomDumpValue(output, '0008,0090')),
     seriesDescription: cleanDicomValue(readDicomDumpValue(output, '0008,103E')),
     protocolName: cleanDicomValue(readDicomDumpValue(output, '0018,1030')),
     bodyPartExamined: cleanDicomValue(readDicomDumpValue(output, '0018,0015')),
@@ -7806,6 +7948,8 @@ const bridgeReceivingSchema = z.object({
   study_date: z.string().optional().nullable(),
   study_time: z.string().optional().nullable(),
   study_description: z.string().optional().nullable(),
+      body_part_examined: z.string().optional().nullable(),
+      bodyPartExamined: z.string().optional().nullable(),
   modalities: z.union([z.array(z.string()), z.string()]).optional(),
   institution_name: z.string().optional().nullable(),
   referring_physician: z.string().optional().nullable(),
@@ -7825,6 +7969,8 @@ type DirectBridgeStudyMetadata = {
   study_date?: string | null
   study_time?: string | null
   study_description?: string | null
+  body_part_examined?: string | null
+  bodyPartExamined?: string | null
   modalities?: string[]
   institution_name?: string | null
   referring_physician?: string | null
@@ -7900,7 +8046,7 @@ function normalizeDirectBridgeStudyMetadata(input: Record<string, unknown>, opti
     study_date: stringValue(field('study_date')) ?? stringValue(field('studyDate')) ?? null,
     study_time: stringValue(field('study_time')) ?? stringValue(field('studyTime')) ?? null,
     study_description: stringValue(field('study_description')) ?? stringValue(field('studyDescription')) ?? null,
-    modalities: normalizeModalities(field('modalities') ?? field('modality')),
+    modalities: classifyBreastXrayModalities(normalizeModalities(field('modalities') ?? field('modality')), stringValue(field('body_part_examined')) ?? stringValue(field('bodyPartExamined'))),
     institution_name: stringValue(field('institution_name')) ?? stringValue(field('institutionName')) ?? null,
     referring_physician: stringValue(field('referring_physician')) ?? stringValue(field('referringPhysician')) ?? null,
     series_count: numberValue(field('series_count') ?? field('seriesCount')) ?? 0,
@@ -8371,6 +8517,7 @@ function mergeDicomMetadata(base: DicomMetadata, extracted: DicomStudyMetadata):
     seriesDescription: base.seriesDescription ?? extracted.seriesDescription,
     protocolName: base.protocolName ?? extracted.protocolName,
     bodyPartExamined: base.bodyPartExamined ?? extracted.bodyPartExamined,
+    referringPhysician: base.referringPhysician ?? extracted.referringPhysician,
   }
 }
 
@@ -8390,6 +8537,7 @@ function mergeDirectBridgeDicomMetadata(base: DirectBridgeStudyMetadata, extract
   const modality = extracted.modality?.toUpperCase()
   return {
     ...base,
+    referring_physician: base.referring_physician ?? extracted.referringPhysician ?? null,
     study_instance_uid: base.study_instance_uid || extracted.studyInstanceUid || '',
     patient_id: base.patient_id ?? extracted.patientId ?? null,
     patient_name: base.patient_name ?? extracted.patientName ?? null,
@@ -8399,7 +8547,7 @@ function mergeDirectBridgeDicomMetadata(base: DirectBridgeStudyMetadata, extract
     study_date: base.study_date ?? extracted.studyDate ?? null,
     study_time: base.study_time ?? extracted.studyTime ?? null,
     study_description: base.study_description ?? extracted.studyDescription ?? extracted.seriesDescription ?? extracted.protocolName ?? null,
-    modalities: base.modalities?.length ? base.modalities : modality ? [modality] : [],
+    modalities: classifyBreastXrayModalities(base.modalities?.length ? base.modalities : modality ? [modality] : [], extracted.bodyPartExamined),
   }
 }
 
@@ -8407,7 +8555,7 @@ function bridgeStudyWithMetadata<T extends { modalities: string[]; studyDescript
   const modalities = Array.from(new Set([...study.modalities, metadata.modality].filter((value): value is string => Boolean(value)).map((value) => value.toUpperCase())))
   return {
     ...study,
-    modalities,
+    modalities: classifyBreastXrayModalities(modalities, metadata.bodyPartExamined),
     studyDescription: study.studyDescription ?? metadata.studyDescription ?? metadata.seriesDescription ?? metadata.protocolName ?? null,
   }
 }
@@ -8589,6 +8737,8 @@ function bridgeStudyData(study: {
   study_date?: string | null
   study_time?: string | null
   study_description?: string | null
+  body_part_examined?: string | null
+  bodyPartExamined?: string | null
   modalities?: string[]
   institution_name?: string | null
   referring_physician?: string | null
@@ -8609,7 +8759,7 @@ function bridgeStudyData(study: {
     studyDate: study.study_date ?? null,
     studyTime: study.study_time ?? null,
     studyDescription: study.study_description ?? null,
-    modalities: (study.modalities ?? []).map((item) => item.toUpperCase()),
+    modalities: classifyBreastXrayModalities(study.modalities ?? [], study.body_part_examined ?? study.bodyPartExamined),
     institutionName: study.institution_name ?? null,
     referringPhysician: study.referring_physician ?? null,
     seriesCount: study.series_count ?? 0,
@@ -8682,6 +8832,7 @@ function formatBridgeStudyForClient(study: {
     studyTime: study.studyTime,
     studyDescription: study.studyDescription,
     modalities: study.modalities,
+    studyCategory: study.modalities.includes('MG') ? 'Mammogram' : isSpecialXrayStudy(study) ? 'Special X-ray' : null,
     seriesCount: study.seriesCount,
     instanceCount: study.instanceCount,
     totalSizeBytes: study.totalSizeBytes ? String(study.totalSizeBytes) : '0',

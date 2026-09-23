@@ -1,6 +1,7 @@
 import { lazy } from 'react';
+import { isSpecialXrayStudy } from './specialXray';
 import { api } from './lib/api';
-import type { UserRole, ClientStatus, ReturnFormat, WorkflowType, User, ClientPortalRole, Service, StudySyncConfig, ClientService, Client, BridgeStudy, Job, UsageLog, ProcessingJob, ReportSetting, RadiologistProfile, ReportReview, PatientProfile, PatientStudyArchive, PatientFollowUp, RadiologistFeedbackItem, BillingInvoice, PricingRule, RazorpayPaymentLinkResponse, ProviderSettlement, BillingSnapshot, ClientBillingUsage, TeleradiologyProvider, ProviderDashboard, RadiologistAvailability, AuditLog, CallOptions, ReportCallBooking, SupportTicketMessage, SupportTicket, NotificationRecipient, WhatsAppBotConfig, AdminOverview, ModalityTab, SortDirection, FilterOption, PasswordPromptState, PatientArchiveFile, PortalNotification, WorkspaceAction, WorklistMedia, BrowserSpeechRecognition, WindowWithSpeechRecognition, Workspace } from './types/portal';
+import type { ClientStatus, ReturnFormat, WorkflowType, User, ClientPortalRole, Service, StudySyncConfig, ClientService, Client, BridgeStudy, Job, UsageLog, ProcessingJob, ReportSetting, RadiologistProfile, ReportReview, PatientProfile, PatientStudyArchive, PatientFollowUp, RadiologistFeedbackItem, BillingInvoice, PricingRule, RazorpayPaymentLinkResponse, ProviderSettlement, BillingSnapshot, ClientBillingUsage, TeleradiologyProvider, ProviderDashboard, RadiologistAvailability, AuditLog, CallOptions, ReportCallBooking, SupportTicketMessage, SupportTicket, NotificationRecipient, WhatsAppBotConfig, AdminOverview, ModalityTab, SortDirection, FilterOption, PasswordPromptState, PatientArchiveFile, PortalNotification, WorkspaceAction, WorklistMedia, BrowserSpeechRecognition, WindowWithSpeechRecognition } from './types/portal';
 import { ExternalViewerPane } from "./features/viewer/ExternalViewerPane";
 import {
   Activity,
@@ -28,14 +29,12 @@ import {
   LayoutDashboard,
   LoaderCircle,
   LogOut,
-  Menu,
   MessageSquare,
   Mic,
   Network,
   Eye,
   EyeOff,
   Filter,
-  PieChart,
   PanelLeftClose,
   PanelLeftOpen,
   Phone,
@@ -46,7 +45,7 @@ import {
   Share2,
   Send,
   ShieldCheck,
-  Signal as SignalIcon,
+  
   UploadCloud,
   UserCog,
   UserRound,
@@ -69,7 +68,7 @@ import { createPortal } from "react-dom";
 import dectrocelBrandLogo from "./assets/dectrocel-brand.jpeg";
 import marengoHospitalHero from "./assets/marengo-asia-hospital-login.png";
 import marengoBrandLogo from "./assets/marengo-asia-emblem.png";
-import { istTimestamp, worklistDuration, worklistStatus, worklistPriority, worklistFacets, worklistModality, worklistModalityLabel } from "./pacsWorklist";
+import { istTimestamp, worklistDuration, worklistTatStart, worklistTatEnd, worklistStatus, worklistPriority, worklistFacets, worklistModality, worklistModalityLabel } from "./pacsWorklist";
 import { workspacePermissions, assignableCenterRoles, clientWorkspaceTabs } from "./workspacePermissions";
 
 import { StudyStatusPage } from "./StudyStatusPage";
@@ -77,10 +76,7 @@ import { StudyStatusPage } from "./StudyStatusPage";
 import { WorkspaceDrawer, WorkspaceDrawerContext } from "./WorkspaceDrawer";
 import {
   filterClientPortalTabs,
-  filterNavigationByTabs,
-  getPortalNavigation,
   getPortalTabs,
-  getWorkspaceDescription,
   resolvePortalWorkspace,
 } from "./portalAccess";
 
@@ -1034,20 +1030,6 @@ function BrandLogo({ className = "" }: { className?: string }) {
   );
 }
 
-function PoweredByDectrocel({ compact = false }: { compact?: boolean }) {
-  return (
-    <div
-      className={cx(
-        "powered-by-dectrocel",
-        compact && "powered-by-dectrocel-compact",
-      )}
-    >
-      <img alt="Dectrocel" src={dectrocelBrandLogo} />
-      <span>Powered by Dectrocel Healthcare &amp; Research Pvt. Ltd.</span>
-    </div>
-  );
-}
-
 function MetricCard({
   icon: Icon,
   label,
@@ -1111,7 +1093,7 @@ function LoginView({
   }
 
   return (
-    <main aria-label="Marengo radiology portal sign in" className="login-page">
+    <main aria-label="Marengo radiology portal sign in" className="login-page balanced-login">
       <section className="login-canvas" aria-labelledby="login-heading">
         <div
           className="login-network-stage"
@@ -1127,8 +1109,8 @@ function LoginView({
             src={marengoHospitalHero}
           />
           <div className="login-stage-panel">
-            <div className="login-hero-brand">
-              <div className="login-hero-brand-logo">
+            <div className="login-brand-lockup">
+              <div className="login-brand-mark">
                 <BrandLogo />
               </div>
               <div>
@@ -1136,27 +1118,17 @@ function LoginView({
                 <p>Radiology Reporting Portal</p>
               </div>
             </div>
-            <div className="login-powered-lockup">
-              <img alt="Dectrocel" src={dectrocelBrandLogo} />
-              <span>
-                Powered by Dectrocel Healthcare &amp; Research Pvt. Ltd.
-              </span>
-            </div>
           </div>
         </div>
 
         <div className="login-auth-zone">
-          <div className="login-auth-brand">
-            <div className="login-auth-mark">
-              <KeyRound size={24} />
-            </div>
-            <div>
-              <p>Secure sign in</p>
-              <span>Enter your credentials to continue.</span>
-            </div>
-          </div>
-
-          <form aria-busy={loading} className="login-card" onSubmit={submit}>
+          <div className="login-auth-shell">
+            <header className="login-form-heading">
+              <div className="login-form-emblem"><BrandLogo /></div>
+              <h2>Sign in</h2>
+              <p>Radiology Reporting Portal</p>
+            </header>
+            <form aria-busy={loading} className="login-card" onSubmit={submit}>
             <div className="login-fields">
               <label>
                 User ID
@@ -1183,7 +1155,7 @@ function LoginView({
                     onClick={() => setShowPassword((visible) => !visible)}
                     type="button"
                   >
-                    {showPassword ? "Hide" : "Show"}
+                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
                   </button>
                 </span>
                 <input
@@ -1223,367 +1195,15 @@ function LoginView({
                 </p>
               ) : null}
             </div>
-          </form>
-          <div className="login-security-note">
-            <ShieldCheck size={18} />
-            <p>
-              Restricted system. Unauthorised access to patient imaging data is
-              prohibited and logged against your identity and network address.
-            </p>
+            </form>
+            <footer className="login-partner">
+              <span>Powered by</span>
+              <img alt="Dectrocel" src={dectrocelBrandLogo} />
+            </footer>
           </div>
         </div>
       </section>
     </main>
-  );
-}
-
-const navigationIcons: Record<string, typeof Activity> = {
-  Dashboard: LayoutDashboard,
-  Centers: Building2,
-  Studies: ClipboardList,
-  Processing: UploadCloud,
-  Reports: FileText,
-  Renewist: Network,
-  Radiologists: UserCog,
-  Patients: Users,
-  "Follow-ups": CalendarDays,
-  "Radiologist Feedback": MessageSquare,
-  "Group Admins": Users,
-  Services: Network,
-  Analytics: PieChart,
-  Billing: CreditCard,
-  Support: Bell,
-  "Audit Logs": ShieldCheck,
-  "Pushed Studies": Download,
-  Activity: BarChart3,
-  "Monthly Analysis": CalendarDays,
-  Profile: UserCog,
-  Report: FileText,
-  "Available study": Network,
-  "Available studies": Network,
-  "Processing studies": UploadCloud,
-  "Generated Reports": FileText,
-  "Generated reports": FileText,
-  Users: UserCog,
-  Logs: ClipboardList,
-};
-
-function Sidebar({
-  role,
-  active,
-  onSelect,
-  client,
-  availableTabs,
-}: {
-  role: UserRole;
-  active: string;
-  onSelect: (item: string) => void;
-  client?: Client | null;
-  availableTabs: string[];
-}) {
-  const workspace = resolvePortalWorkspace(role, client?.code, client?.kind);
-  const groups = filterNavigationByTabs(getPortalNavigation(
-    workspace,
-    Boolean(client?.studySyncEnabled),
-  ), availableTabs);
-
-  return (
-    <aside
-      aria-label="Primary portal navigation"
-      className="portal-sidebar hidden lg:block"
-    >
-      <div className="portal-sidebar-brand">
-        <div className="sidebar-brand-mark">
-          <BrandLogo />
-        </div>
-        <div>
-          <p>Marengo Asia Hospitals</p>
-          <span>Radiology Portal</span>
-        </div>
-      </div>
-      <PoweredByDectrocel compact />
-      <nav aria-label="Workspace sections" className="portal-nav">
-        {groups.map((group, groupIndex) => {
-          const labelId = `desktop-navigation-group-${groupIndex}`;
-          return (
-            <section
-              aria-labelledby={labelId}
-              className="portal-nav-group"
-              key={group.label}
-            >
-              <p id={labelId}>{group.label}</p>
-              {group.items.map((item) => {
-                const Icon = navigationIcons[item] ?? Activity;
-                return (
-                  <button
-                    aria-current={active === item ? "page" : undefined}
-                    className={cx(
-                      "portal-nav-item",
-                      active === item && "portal-nav-item-active",
-                    )}
-                    key={item}
-                    onClick={() => onSelect(item)}
-                    type="button"
-                  >
-                    <Icon aria-hidden="true" size={17} />
-                    <span>{item}</span>
-                  </button>
-                );
-              })}
-            </section>
-          );
-        })}
-      </nav>
-    </aside>
-  );
-}
-
-const userRoleLabels: Record<UserRole, string> = {
-  SUPER_ADMIN: "Super administrator",
-  CLIENT_USER: "Marengo center",
-  RADIOLOGIST: "Radiologist",
-  PROVIDER_ADMIN: "Renewist administrator",
-  PROVIDER_MANAGER: "Renewist manager",
-};
-
-function MobileNav({
-  role,
-  active,
-  setActive,
-  client,
-  user,
-  onLogout,
-  availableTabs,
-}: {
-  role: UserRole;
-  active: string;
-  setActive: (item: string) => void;
-  client?: Client | null;
-  user: User;
-  onLogout: () => void;
-  availableTabs: string[];
-}) {
-  const workspace = resolvePortalWorkspace(role, client?.code, client?.kind);
-  const groups = filterNavigationByTabs(getPortalNavigation(
-    workspace,
-    Boolean(client?.studySyncEnabled),
-  ), availableTabs);
-  const roleLabel =
-    workspace === "MARENGO_GROUP"
-      ? "Marengo group administrator"
-      : userRoleLabels[role];
-  const [open, setOpen] = useState(false);
-  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const drawerRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const menuButton = menuButtonRef.current;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const focusFrame = window.requestAnimationFrame(() =>
-      closeButtonRef.current?.focus(),
-    );
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setOpen(false);
-        return;
-      }
-      if (event.key !== "Tab" || !drawerRef.current) return;
-      const focusable = Array.from(
-        drawerRef.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), a[href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      );
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      window.removeEventListener("keydown", handleKeyDown);
-      document.body.style.overflow = previousOverflow;
-      menuButton?.focus();
-    };
-  }, [open]);
-
-  function selectItem(item: string) {
-    setActive(item);
-    setOpen(false);
-    window.requestAnimationFrame(() =>
-      document.getElementById("portal-main-content")?.focus(),
-    );
-  }
-
-  return (
-    <>
-      <header className="mobile-nav sticky top-0 z-40 lg:hidden">
-        <div className="mobile-nav-bar flex min-w-0 items-center gap-3">
-          <div className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl border border-sky-100 bg-white p-1 shadow-sm">
-            <BrandLogo />
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[11px] font-extrabold uppercase tracking-[0.08em] text-sky-700">
-              Marengo Radiology
-            </p>
-            <h1 className="truncate text-base font-extrabold text-slate-950">
-              {active}
-            </h1>
-          </div>
-          <button
-            aria-controls="mobile-navigation-drawer"
-            aria-expanded={open}
-            aria-label="Open navigation menu"
-            className="mobile-nav-trigger grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-slate-200 bg-white text-slate-700 shadow-sm"
-            onClick={() => setOpen(true)}
-            ref={menuButtonRef}
-            type="button"
-          >
-            <Menu aria-hidden="true" size={22} />
-          </button>
-        </div>
-      </header>
-      {open ? (
-        <div
-          className="mobile-nav-backdrop fixed inset-0 z-[70] bg-slate-950/50 backdrop-blur-sm lg:hidden"
-          onMouseDown={(event) => {
-            if (event.currentTarget === event.target) setOpen(false);
-          }}
-          role="presentation"
-        >
-          <aside
-            aria-label="Navigation menu"
-            aria-modal="true"
-            className="mobile-nav-drawer absolute inset-y-0 left-0 flex w-[min(88vw,360px)] flex-col bg-white shadow-2xl"
-            id="mobile-navigation-drawer"
-            ref={drawerRef}
-            role="dialog"
-          >
-            <div className="mobile-nav-drawer-header flex items-center gap-3 border-b border-slate-200 p-4">
-              <div className="grid h-12 w-12 shrink-0 place-items-center overflow-hidden rounded-xl border border-sky-100 bg-white p-1">
-                <BrandLogo />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-extrabold text-sky-800">
-                  Marengo Asia Hospitals
-                </p>
-                <span className="text-xs font-semibold text-slate-500">
-                  Radiology Reporting Portal
-                </span>
-              </div>
-              <button
-                aria-label="Close navigation menu"
-                className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-slate-200 text-slate-600"
-                onClick={() => setOpen(false)}
-                ref={closeButtonRef}
-                type="button"
-              >
-                <X aria-hidden="true" size={19} />
-              </button>
-            </div>
-            <div className="mobile-nav-drawer-body min-h-0 flex-1 overflow-y-auto px-3 py-4">
-              <nav
-                aria-label="Mobile workspace sections"
-                className="grid gap-5"
-              >
-                {groups.map((group, groupIndex) => {
-                  const labelId = `mobile-navigation-group-${groupIndex}`;
-                  return (
-                    <section
-                      aria-labelledby={labelId}
-                      className="grid gap-1"
-                      key={group.label}
-                    >
-                      <p
-                        className="px-3 pb-1 text-[11px] font-extrabold uppercase tracking-[0.1em] text-slate-400"
-                        id={labelId}
-                      >
-                        {group.label}
-                      </p>
-                      {group.items.map((item) => {
-                        const Icon = navigationIcons[item] ?? Activity;
-                        return (
-                          <button
-                            aria-current={active === item ? "page" : undefined}
-                            className={cx(
-                              "mobile-nav-item flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-bold transition",
-                              active === item
-                                ? "bg-sky-50 text-sky-800 ring-1 ring-sky-100"
-                                : "text-slate-600 hover:bg-slate-50 hover:text-slate-950",
-                            )}
-                            key={item}
-                            onClick={() => selectItem(item)}
-                            type="button"
-                          >
-                            <span
-                              className={cx(
-                                "grid h-9 w-9 shrink-0 place-items-center rounded-lg",
-                                active === item
-                                  ? "bg-sky-700 text-white"
-                                  : "bg-slate-100 text-slate-500",
-                              )}
-                            >
-                              <Icon aria-hidden="true" size={17} />
-                            </span>
-                            <span className="min-w-0 flex-1">{item}</span>
-                            {active === item ? (
-                              <span className="sr-only">Current section</span>
-                            ) : (
-                              <ChevronRight
-                                aria-hidden="true"
-                                className="text-slate-300"
-                                size={16}
-                              />
-                            )}
-                          </button>
-                        );
-                      })}
-                    </section>
-                  );
-                })}
-              </nav>
-            </div>
-            <div className="border-t border-slate-200 bg-slate-50 p-4">
-              <div className="mobile-nav-user mb-3 flex items-center gap-3">
-                <span
-                  aria-hidden="true"
-                  className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-sky-700 text-sm font-black text-white"
-                >
-                  {brandText(user.name).trim().charAt(0).toUpperCase() || "M"}
-                </span>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-extrabold text-slate-900">
-                    {brandText(user.name)}
-                  </p>
-                  <span className="text-xs font-semibold text-slate-500">
-                    {roleLabel}
-                  </span>
-                </div>
-              </div>
-              <button
-                className="flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-sm font-extrabold text-slate-700"
-                onClick={() => {
-                  setOpen(false);
-                  onLogout();
-                }}
-                type="button"
-              >
-                <LogOut aria-hidden="true" size={17} /> Secure logout
-              </button>
-            </div>
-          </aside>
-        </div>
-      ) : null}
-    </>
   );
 }
 
@@ -6047,13 +5667,24 @@ function ReportDocumentPreview({
 }) {
   const [documentData, setDocumentData] = useState<ArrayBuffer | null>(null);
   const [error, setError] = useState("");
+  const [variant, setVariant] = useState('with-letterhead');
+  const [zoom, setZoom] = useState(0.85);
+  const [documentUrl, setDocumentUrl] = useState('');
+  const printFrame = useRef<HTMLIFrameElement>(null);
+  useEffect(() => {
+    if (!documentData) { setDocumentUrl(''); return; }
+    const url = URL.createObjectURL(new Blob([documentData], { type: 'application/pdf' }));
+    setDocumentUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [documentData]);
   useEffect(() => {
     let cancelled = false;
     const path = publicToken
       ? `/api/public/reports/${encodeURIComponent(publicToken)}/pdf`
       : `/api/reports/${encodeURIComponent(report.id)}/pdf`;
     setError("");
-    fetch(path, {
+    setDocumentData(null);
+    fetch(`${path}?variant=${variant}`, {
       cache: "no-store",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
@@ -6062,7 +5693,7 @@ function ReportDocumentPreview({
           throw new Error(
             response.status === 409
               ? "Final signed report is not ready yet."
-              : "Report document is unavailable.",
+              : "This report version is unavailable. Try the other letterhead option.",
           );
         return response.arrayBuffer();
       })
@@ -6081,33 +5712,41 @@ function ReportDocumentPreview({
     return () => {
       cancelled = true;
     };
-  }, [report.id, report.updatedAt, token, publicToken]);
-  if (error)
-    return (
-      <div className="grid h-full place-items-center p-8 text-center text-sm font-semibold text-slate-500">
-        {error}
-      </div>
-    );
-  if (!documentData)
-    return (
-      <div className="grid h-full place-items-center text-sm font-semibold text-slate-500">
-        Loading signed report…
-      </div>
-    );
+  }, [report.id, report.updatedAt, token, publicToken, variant]);
   return (
-    <ResponsivePdfDocument
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      <div role="toolbar" aria-label="Report controls" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 16, padding: '10px 16px', background: '#242c36', color: 'white', flexShrink: 0 }}>
+        <label>Report version <select aria-label="Report version" style={{ color: '#111', padding: 6 }} value={variant} onChange={event => setVariant(event.target.value)}>
+          <option value="with-letterhead">With letterhead</option><option value="without-letterhead">Without letterhead</option>
+        </select></label>
+        <label>Zoom <select aria-label="Report zoom" style={{ color: '#111', padding: 6 }} value={zoom} onChange={event => setZoom(Number(event.target.value))}>
+          <option value={0.65}>65%</option><option value={0.85}>85%</option><option value={1}>100%</option><option value={1.25}>125%</option>
+        </select></label>
+        <button type="button" disabled={!documentData || !documentUrl || Boolean(error)} onClick={() => { printFrame.current?.contentWindow?.focus(); printFrame.current?.contentWindow?.print(); }}>Print</button>
+        <button type="button" disabled={!documentData || !documentUrl || Boolean(error)} onClick={() => {
+          const anchor = document.createElement('a'); anchor.href = documentUrl; anchor.download = `${report.id}-${variant}.pdf`; anchor.click();
+        }}>Download PDF</button>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+      {error ? <p role="alert" style={{ padding: 24 }}>{error}</p> : !documentData ? <p style={{ padding: 24 }}>Loading signed report…</p> : <ResponsivePdfDocument
       data={documentData}
       title={`Radiology report ${report.id}`}
-    />
+      zoom={zoom}
+    />}
+      </div>
+      {documentData && documentUrl && <iframe ref={printFrame} src={documentUrl} title="Printable report PDF" style={{ position: 'fixed', left: -10000, width: 1, height: 1, border: 0 }} />}
+    </div>
   );
 }
 
 function ResponsivePdfDocument({
   data,
   title,
+  zoom = 0.85,
 }: {
   data: ArrayBuffer;
   title: string;
+  zoom?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState("");
@@ -6138,7 +5777,7 @@ function ResponsivePdfDocument({
           // its browser controls. Use the visual viewport as the hard cap so
           // every PDF page is rendered within the visible phone width.
           const visibleWidth = window.visualViewport?.width ?? container.clientWidth;
-          const cssWidth = Math.max(240, Math.min(container.clientWidth, visibleWidth) - 16);
+          const cssWidth = Math.max(240, Math.min(container.clientWidth, visibleWidth, 1000) - 32) * zoom;
           const cssScale = cssWidth / baseViewport.width;
           const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
           const viewport = page.getViewport({ scale: cssScale * pixelRatio });
@@ -6167,7 +5806,7 @@ function ResponsivePdfDocument({
       cancelled = true;
       void loadingTask?.destroy();
     };
-  }, [data, title]);
+  }, [data, title, zoom]);
 
   return (
     <div className="viewer-report-pdf-document" ref={containerRef} role="document">
@@ -7763,15 +7402,20 @@ function EmptyState({ message, title }: { message: string; title?: string }) {
 function WhatsAppBotView({
   token,
   notice,
+  physicianConfiguration = false,
+  centers = [],
 }: {
   token: string;
   notice: (message: string) => void;
+  physicianConfiguration?: boolean;
+  centers?: Array<{ id: string; name: string }>;
 }) {
   const [config, setConfig] = useState<WhatsAppBotConfig | null>(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
     name: "",
-    role: "DECTROCEL",
+    role: physicianConfiguration ? "REFERRING_PHYSICIAN" : "DECTROCEL",
+    clientId: "",
     organization: "DECTROCEL",
     userId: "",
     phoneE164: "",
@@ -7862,7 +7506,7 @@ function WhatsAppBotView({
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold text-slate-950">
-              WhatsApp chatbot
+              {physicianConfiguration ? "WhatsApp Configuration" : "WhatsApp chatbot"}
             </h2>
             <p className="mt-1 text-sm text-slate-500">
               Cloud API setup, notification recipients, and bot command
@@ -7945,6 +7589,18 @@ function WhatsAppBotView({
         </div>
       </section>
 
+      {physicianConfiguration && <section className="soft-card rounded-lg p-5">
+        <h3 className="font-semibold">Referring physician reports</h3>
+        <p className="mt-2 text-sm">Match the physician name to the study’s referring-physician DICOM tag. Approved reports are sent only to the matching verified recipient. Duplicate names require a center selection to distinguish them.</p>
+        <p className="mt-2 text-sm">{config.physicianReportReady ? "Report-link delivery is configured." : "Report-link delivery is waiting for the WhatsApp app secret and approved report-ready template."}</p>
+        <h3 className="mt-5 font-semibold">Radiologist call requests</h3>
+        <p className="text-sm">Superadmin and the assigned radiologist receive a portal notification when a physician requests a call.</p>
+        {config.callRequests?.length ? <div className="mt-3 grid gap-3">{config.callRequests.map(request => <div key={request.id} className="rounded border p-3 text-sm">
+          <p>{request.message}</p><p className="mt-1 text-slate-500">{request.status} · {new Date(request.createdAt).toLocaleString()}</p>
+          {request.status === "PENDING" && <button type="button" className="mt-2 font-semibold text-sky-700" onClick={() => void api(`/api/v1/whatsapp/physician-calls/${request.id}`, token, { method: "PATCH", body: JSON.stringify({ status: "COMPLETED" }) }).then(loadConfig).catch(error => notice(error instanceof Error ? error.message : "Unable to update call request"))}>Mark handled</button>}
+        </div>)}</div> : <p className="mt-3 text-sm text-slate-500">No physician call requests yet.</p>}
+      </section>}
+
       <FormCard
         title="Add WhatsApp recipient"
         onSubmit={addRecipient}
@@ -7956,13 +7612,21 @@ function WhatsAppBotView({
           onChange={(value) => setForm({ ...form, name: value })}
         />
         <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
-          User category
-          <select className="rounded-md border border-slate-200 bg-white px-3 py-2" value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value, organization: event.target.value })}>
+          Role
+          <select className="rounded-md border border-slate-200 bg-white px-3 py-2" value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value, organization: event.target.value === "REFERRING_PHYSICIAN" ? "DECTROCEL" : event.target.value })}>
+            {physicianConfiguration && <option value="REFERRING_PHYSICIAN">Referring physician</option>}
             <option value="DECTROCEL">Dectrocel</option>
             <option value="RENEWIST">Renewist</option>
             <option value="MARENGO_MANAGEMENT">Marengo Management</option>
           </select>
         </label>
+        {form.role === "REFERRING_PHYSICIAN" && <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+          Center scope
+          <select className="rounded-md border border-slate-200 bg-white px-3 py-2" value={form.clientId} onChange={event => setForm({ ...form, clientId: event.target.value })}>
+            <option value="">All centers (unique physician name required)</option>
+            {centers.map(center => <option key={center.id} value={center.id}>{center.name}</option>)}
+          </select>
+        </label>}
         <TextInput
           label="Assigned user ID (optional)"
           value={form.userId}
@@ -8014,7 +7678,7 @@ function WhatsAppBotView({
             required
           />
           <span>
-            I confirm this person explicitly agreed to receive the selected non-clinical Dectrocel WhatsApp notifications and was told how to opt out. Patient and clinical information will remain in the secure portal.
+            {form.role === "REFERRING_PHYSICIAN" ? "I confirm this physician agreed to receive report links and call-request updates on this number and was told how to opt out." : "I confirm this person explicitly agreed to receive the selected Dectrocel WhatsApp notifications and was told how to opt out."}
           </span>
         </label>
         <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
@@ -10351,8 +10015,8 @@ function AdminContent({
         notice={notice}
       />
     );
-  if (active === "WhatsApp Bot" || active === "WhatsApp Whitelist")
-    return <WhatsAppBotView token={token} notice={notice} />;
+  if (active === "WhatsApp Bot" || active === "WhatsApp Whitelist" || active === "WhatsApp Configuration")
+    return <WhatsAppBotView token={token} notice={notice} physicianConfiguration centers={overview.clients} />;
   if (active === "Alerts") return <AlertsView overview={overview} />;
   if (active === "Audit Logs") {
     return (
@@ -11458,6 +11122,7 @@ function MarengoUnifiedWorklist({
   const [priority, setPriority] = useState<"REGULAR" | "URGENT">("REGULAR");
   const [indication, setIndication] = useState("");
   const [sending, setSending] = useState(false);
+  const [terminatingStudyId, setTerminatingStudyId] = useState<string | null>(null);
   const [uploadingStudy, setUploadingStudy] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -11536,14 +11201,13 @@ function MarengoUnifiedWorklist({
     const state = worklistStatus({ reportStatus: report?.status, workflowStatus: study.workflowStatus, processingJobId: study.processingJobId ?? job?.id, submittedAt: study.submittedAt });
     const needsAttention = /fail|error/i.test(`${job?.status ?? study.processingJob?.status ?? ""} ${study.workflowStatus}`);
     const receivedAt = study.receivedAt ?? study.lastSyncedAt;
-    const processedAt = report && ["APPROVED", "PUSHED"].includes(report.status)
-      ? reportTatCompletedAt(report)
-      : ["success", "completed", "sent_to_pacs", "report_delivered"].includes((job?.status ?? study.processingJob?.status ?? "").toLowerCase())
-        ? (job?.completedAt ?? study.processingJob?.completedAt ?? null)
-        : null;
+    const tatStartAt = worklistTatStart(state, study.submittedAt);
+    const processedAt = worklistTatEnd(state,
+      report && ["APPROVED", "PUSHED"].includes(report.status) ? reportTatCompletedAt(report) : null,
+      job?.completedAt ?? study.processingJob?.completedAt);
     const referringDoctor = study.referringPhysician ?? job?.bridgeStudy?.referringPhysician ?? "";
     const priority = worklistPriority(study.priority ?? study.processingJob?.priority ?? job?.priority);
-    return { study, job, report, state, needsAttention, receivedAt, processedAt, referringDoctor, priority };
+    return { study, job, report, state, needsAttention, receivedAt, tatStartAt, processedAt, referringDoctor, priority };
   }), [jobByStudyId, reportByUid, worklistStudies]);
 
   const modalityOptions = useMemo(() => Array.from(new Set(['XR', 'CT', 'MR', 'SPECIALXRAY', ...rows.flatMap(({ study }) => (study.modalities ?? []).map(worklistModality).filter(Boolean))])).sort(), [rows]);
@@ -11728,16 +11392,65 @@ function MarengoUnifiedWorklist({
       const safe = /^[=+@\-\t\r]/.test(value) ? "'" + value : value;
       return '"' + safe.replaceAll('"', '""') + '"';
     };
-    const records = [["Patient name", "Patient ID", "Accession number", "Referring doctor", "Modality", "Study description", "Received (IST)", "Processed (IST)", "TAT (HH:MM:SS)", "Status"],
-      ...selectedRows.map(({ study, state, receivedAt, processedAt, referringDoctor }) => [
+    const records = [["Patient name", "Patient ID", "Accession number", "Referring doctor", "Modality", "Study description", "Received (IST)", "Sent for reporting (IST)", "Reported (IST)", "TAT (HH:MM:SS)", "Status"],
+      ...selectedRows.map(({ study, state, receivedAt, tatStartAt, processedAt, referringDoctor }) => [
         study.patientName ?? "", study.patientId ?? "", study.accessionNumber ?? "", referringDoctor,
         study.modalities.join(", "), study.studyDescription ?? "", istTimestamp(receivedAt).full,
-        istTimestamp(processedAt).full, worklistDuration(receivedAt, processedAt, clockTime), displayedStatus(state).label,
+        istTimestamp(tatStartAt).full, istTimestamp(processedAt).full, worklistDuration(tatStartAt, processedAt, clockTime), displayedStatus(state).label,
       ])];
     const url = URL.createObjectURL(new Blob([records.map((record) => record.map(safeCell).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url; link.download = "marengo-selected-studies.csv"; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function downloadStudyBundle(study: BridgeStudy) {
+    setFeedback(null);
+    try {
+      const response = await fetch(`/api/client/study-sync/available-studies/${encodeURIComponent(study.id)}/download`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const blob = await response.blob();
+      if (!response.ok) {
+        const text = await blob.text().catch(() => "");
+        let message = "Study download is not available";
+        try {
+          message = JSON.parse(text)?.message || message;
+        } catch {
+          if (text.trim()) message = text.trim();
+        }
+        throw new Error(message);
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${study.publicStudyId || study.accessionNumber || study.id}-bundle.zip`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      setFeedback({ text: error instanceof Error ? error.message : "Unable to download study. Please try again.", error: true });
+    }
+  }
+  async function terminateProcessing(study: BridgeStudy) {
+    if (user.role !== "SUPER_ADMIN" || !study.processingJobId || terminatingStudyId) return;
+    const reason = window.prompt("Reason for terminating this processing job before repush:", "Super admin terminated processing for repush");
+    if (reason === null) return;
+    setFeedback(null);
+    setTerminatingStudyId(study.id);
+    try {
+      const result = await api<{ message: string }>(`/api/workspace/studies/${encodeURIComponent(study.id)}/terminate-processing`, token, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      });
+      setFeedback({ text: result.message, error: false });
+      notice(result.message);
+      await Promise.all([loadWorklistStudies(true), reload()]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to terminate processing.";
+      setFeedback({ text: message, error: true });
+      notice(message);
+    } finally {
+      setTerminatingStudyId(null);
+    }
   }
   const sortIcon = (key: typeof sort.key) => sort.key === key
     ? (sort.ascending ? <ArrowUp size={13} /> : <ArrowDown size={13} />)
@@ -11816,10 +11529,10 @@ function MarengoUnifiedWorklist({
               <th aria-sort={sort.key === "modality" ? sort.ascending ? "ascending" : "descending" : "none"}><button onClick={() => changeSort("modality")}>Modality{sortIcon("modality")}</button></th>
               <th>Study description</th>
               <th aria-sort={sort.key === "received" ? sort.ascending ? "ascending" : "descending" : "none"}><button onClick={() => changeSort("received")}>Received <small>IST</small>{sortIcon("received")}</button></th>
-              <th aria-sort={sort.key === "processed" ? sort.ascending ? "ascending" : "descending" : "none"}><button onClick={() => changeSort("processed")}>Processed <small>IST</small>{sortIcon("processed")}</button></th>
+              <th aria-sort={sort.key === "processed" ? sort.ascending ? "ascending" : "descending" : "none"}><button onClick={() => changeSort("processed")}>Reported <small>IST</small>{sortIcon("processed")}</button></th>
               <th>TAT</th><th>Status</th><th>Action</th>
             </tr></thead>
-            <tbody>{visible.map(({ study, state, receivedAt, processedAt, referringDoctor, needsAttention, priority }) => {
+            <tbody>{visible.map(({ study, state, receivedAt, tatStartAt, processedAt, referringDoctor, needsAttention, priority }) => {
               const status = displayedStatus(state);
               const urgent = priority === "URGENT";
               return <tr key={study.id} data-study-id={study.id} className={selectedIds.has(study.id) ? "selected" : ""} onDoubleClick={() => setDetailStudy(study)}>
@@ -11829,11 +11542,11 @@ function MarengoUnifiedWorklist({
                 <td className="pw-numeric">{study.patientId || "-"}</td>
                 <td className="pw-numeric">{study.accessionNumber || "-"}</td>
                 <td title={referringDoctor}>{referringDoctor || "-"}</td>
-                <td><span className="pw-modality">{study.modalities?.join(", ") || "-"}</span></td>
-                <td title={study.studyDescription ?? ""}><span className="pw-description">{study.studyDescription || "Imaging study"}</span></td>
+                <td><span className="pw-modality">{study.modalities?.includes("MG") ? "Mammogram" : study.modalities?.join(", ") || "-"}</span></td>
+                <td title={study.studyDescription ?? ""}><span className="pw-description">{study.studyDescription || "Imaging study"}</span>{isSpecialXrayStudy(study) && <span className="pw-modality" title="Requires manual submission; automatic processing is disabled">Special X-ray</span>}</td>
                 <td className="pw-received" title={istTimestamp(receivedAt).full}>{istTimestamp(receivedAt).date}<span>{istTimestamp(receivedAt).time}</span></td>
                 <td className="pw-received" title={istTimestamp(processedAt).full}>{istTimestamp(processedAt).date}<span>{istTimestamp(processedAt).time}</span></td>
-                <td className="pw-numeric pw-tat" title="Duration (HH:MM:SS)">{worklistDuration(receivedAt, processedAt, clockTime)}</td>
+                <td className="pw-numeric pw-tat" title="Duration (HH:MM:SS)">{worklistDuration(tatStartAt, processedAt, clockTime)}</td>
                 <td><span className={`pw-status ${status.className}`}><i/>{status.label}</span>{needsAttention && <AlertTriangle className="pw-workflow-warning" size={13} aria-label="Workflow needs attention" />}</td>
                 <td><button className="pw-row-action send" onClick={() => { setFeedback(null); setDetailStudy(study); }}>Send<ArrowUpRight size={15} aria-hidden="true"/></button></td>
               </tr>;
@@ -11867,16 +11580,22 @@ function MarengoUnifiedWorklist({
               if (!currentStudy && lastSync && !studyError) return <div className="pw-empty" role="status">This study is no longer available in your worklist.</div>;
               const study = currentStudy ?? sendStudy ?? detailStudy!;
               return <><div className="pw-detail-patient"><span className="pw-modality">{study.modalities.join(", ")}</span><h3>{study.patientName || "Unknown patient"}</h3><p>{study.patientAge || "Age unavailable"} / {study.patientSex || "-"}<span>Patient ID {study.patientId || "-"}</span></p></div>
-                <dl className="pw-details"><dt>Accession number</dt><dd>{study.accessionNumber || "-"}</dd><dt>Referring doctor</dt><dd>{detailRow?.referringDoctor || study.referringPhysician || "-"}</dd><dt>Study</dt><dd>{study.studyDescription || "-"}</dd><dt>Received (IST)</dt><dd>{istTimestamp(detailRow?.receivedAt ?? study.receivedAt ?? study.lastSyncedAt).full}</dd><dt>Processed (IST)</dt><dd>{istTimestamp(detailRow?.processedAt).full}</dd><dt>TAT duration</dt><dd>{worklistDuration(detailRow?.receivedAt ?? study.receivedAt ?? study.lastSyncedAt, detailRow?.processedAt, clockTime)}</dd><dt>Series / images</dt><dd>{study.seriesCount} / {study.instanceCount}</dd><dt>Study UID</dt><dd>{study.studyInstanceUid}</dd></dl>
-                {!sendStudy && <div className="pw-study-tools">
-                  {study.processingJobId && <button onClick={() => window.location.assign(`/study-status/${encodeURIComponent(study.processingJobId!)}`)}><Clock size={14}/>Live status &amp; TAT</button>}
-                  <button className="pw-primary" disabled={!permissions.submit || detailRow?.state !== "AVAILABLE" || Boolean(study.processingJobId)} title={detailRow?.state !== "AVAILABLE" ? "Study has already entered reporting" : "Send study for reporting"} onClick={() => beginSend(study)}><Send size={14}/>Send for reporting</button>
-                  <button onClick={() => setStudyMedia({ kind: "dicom", studyId: study.id, title: study.studyDescription || "DICOM study" })}><Eye size={14}/>DICOM viewer</button>
-                  <button disabled={!detailRow?.report || !["APPROVED","PUSHED"].includes(detailRow.report.status)} title={detailRow?.state === "REPORTED" ? "View final report" : "Report is not available yet"} onClick={() => { if (detailRow?.report) setStudyMedia({ kind: "report", report: detailRow.report, title: "Radiology report" }); }}><FileText size={14}/>Report</button>
-                  {permissions.share && <button disabled={!detailRow?.report || !["APPROVED","PUSHED"].includes(detailRow.report.status)} title={!detailRow?.report ? "A report is required to share this case" : "Share report"} onClick={() => { if (detailRow?.report) setActionDialog({ kind: "share", report: detailRow.report }); }}><Share2 size={14}/>Share</button>}
-                  {permissions.schedule && <button disabled={!detailRow?.report} title={!detailRow?.report ? "Call scheduling becomes available when the case has a report" : "Schedule a radiologist call"} onClick={() => { if (detailRow?.report) setActionDialog({ kind: "call", report: detailRow.report }); }}><Phone size={14}/>Schedule call</button>}
-                  {permissions.attach && <button onClick={() => setActionDialog({ kind: "attach", study: detailRow?.study ?? study })}><Plus size={14}/>Supporting investigation</button>}
-
+                <dl className="pw-details"><dt>Accession number</dt><dd>{study.accessionNumber || "-"}</dd><dt>Referring doctor</dt><dd>{detailRow?.referringDoctor || study.referringPhysician || "-"}</dd><dt>Study</dt><dd>{study.studyDescription || "-"}</dd><dt>Received (IST)</dt><dd>{istTimestamp(detailRow?.receivedAt ?? study.receivedAt ?? study.lastSyncedAt).full}</dd><dt>Sent for reporting (IST)</dt><dd>{istTimestamp(detailRow?.tatStartAt).full}</dd><dt>Reported (IST)</dt><dd>{istTimestamp(detailRow?.processedAt).full}</dd><dt>TAT duration</dt><dd>{worklistDuration(detailRow?.tatStartAt, detailRow?.processedAt, clockTime)}</dd><dt>Series / images</dt><dd>{study.seriesCount} / {study.instanceCount}</dd><dt>Study UID</dt><dd>{study.studyInstanceUid}</dd></dl>
+                {!sendStudy && <div className="pw-study-tools" aria-label="Study actions">
+                  <div className="pw-study-tool-row">
+                    {permissions.attach && <button onClick={() => setActionDialog({ kind: "attach", study: detailRow?.study ?? study })}><Plus size={14}/>Supporting investigation</button>}
+                    <button className="pw-primary" disabled={!permissions.submit || detailRow?.state !== "AVAILABLE" || Boolean(study.processingJobId)} title={detailRow?.state !== "AVAILABLE" ? "Study has already entered reporting" : "Send study for reporting"} onClick={() => beginSend(study)}><Send size={14}/>Send for reporting</button>
+                    {user.role === "SUPER_ADMIN" && detailRow?.state === "REPORTING" && study.processingJobId && <button className="pw-danger" disabled={terminatingStudyId === study.id} title="Cancel this processing job and make the study available to send again" onClick={() => void terminateProcessing(study)}><X size={14}/>{terminatingStudyId === study.id ? "Terminating..." : "Terminate processing"}</button>}
+                  </div>
+                  <div className="pw-study-tool-row">
+                    <button onClick={() => setStudyMedia({ kind: "dicom", studyId: study.id, title: study.studyDescription || "DICOM study" })}><Eye size={14}/>DICOM viewer</button>
+                    <button disabled={!detailRow?.report || !["APPROVED","PUSHED"].includes(detailRow.report.status)} title={detailRow?.state === "REPORTED" ? "View final report" : "Report is not available yet"} onClick={() => { if (detailRow?.report) setStudyMedia({ kind: "report", report: detailRow.report, title: "Radiology report" }); }}><FileText size={14}/>Report</button>
+                  </div>
+                  <div className="pw-study-tool-row">
+                    <button onClick={() => void downloadStudyBundle(study)}><Download size={14}/>Download study</button>
+                    {permissions.share && <button disabled={!detailRow?.report || !["APPROVED","PUSHED"].includes(detailRow.report.status)} title={!detailRow?.report ? "A report is required to share this case" : "Share report"} onClick={() => { if (detailRow?.report) setActionDialog({ kind: "share", report: detailRow.report }); }}><Share2 size={14}/>Share</button>}
+                    {permissions.schedule && <button disabled={!detailRow?.report} title={!detailRow?.report ? "Call scheduling becomes available when the case has a report" : "Schedule a radiologist call"} onClick={() => { if (detailRow?.report) setActionDialog({ kind: "call", report: detailRow.report }); }}><Phone size={14}/>Schedule the call</button>}
+                  </div>
                 </div>}
                 <div className="pw-attachment-heading"><h4>Attachments</h4><span>{(detailRow?.study.attachments ?? study.attachments ?? []).length}</span></div>
                 <ul className="pw-attachments">{(detailRow?.study.attachments ?? study.attachments ?? []).map((file) => <li key={file.id}><FileText size={16}/><div><strong title={file.originalName}>{file.originalName}</strong><small>{Math.max(1, Math.ceil(Number(file.sizeBytes) / 1024))} KB</small></div><button aria-label={`View ${file.originalName}`} onClick={() => setStudyMedia({ kind: "attachment", studyId: study.id, attachment: file, title: file.originalName })}><Eye size={13}/>View</button></li>)}</ul>
@@ -17791,20 +17510,9 @@ function RadiologistProfilePanel({ profile }: { profile: RadiologistProfile }) {
   );
 }
 
-
-
-const workspaceLabels: Record<Workspace, string> = {
-  SUPER_ADMIN: "Marengo super administrator",
-  RENEWIST: "Renewist operations",
-  MARENGO_GROUP: "Marengo group administrator",
-  RADIOLOGIST: "Radiologist",
-  CENTER: "Marengo center",
-};
-
 function AppShell({
   token,
   user,
-  onLogout,
 }: {
   token: string;
   user: User;
@@ -17821,16 +17529,16 @@ function AppShell({
   const [providerDashboard, setProviderDashboard] =
     useState<ProviderDashboard | null>(null);
   const [adminFullOverviewLoaded, setAdminFullOverviewLoaded] = useState(false);
-  const [adminFullOverviewLoading, setAdminFullOverviewLoading] = useState(false);
+  const [, setAdminFullOverviewLoading] = useState(false);
   const [adminFullOverviewError, setAdminFullOverviewError] = useState("");
   const [adminFullOverviewRetry, setAdminFullOverviewRetry] = useState(0);
   const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const [, setError] = useState("");
+  const [, setLoading] = useState(true);
+  const [, setRefreshing] = useState(false);
   const [editorActive, setEditorActive] = useState(false);
-  const [globalSearch, setGlobalSearch] = useState("");
-  const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [, setGlobalSearch] = useState("");
+  const [, setUnreadNotifications] = useState(0);
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
   const dataLoadingRef = useRef(false);
@@ -17838,10 +17546,7 @@ function AppShell({
 
   const role = user.role;
   const workspace = resolvePortalWorkspace(role, client?.code, client?.kind);
-  const pageKicker = useMemo(
-    () => getWorkspaceDescription(workspace),
-    [workspace],
-  );
+
   const hasLoadedData = Boolean(
     (role === "SUPER_ADMIN" && overview) ||
     (role === "RADIOLOGIST" && radiologist) ||
@@ -17869,28 +17574,18 @@ function AppShell({
         "Notifications", "Processing Notifications", "Queries", "Report",
         "Reporting Statistics", "Support", "WhatsApp Whitelist",
       ]);
+      if (user.deploymentFeatures?.notifications) {
+        disabled.delete("Notifications");
+        disabled.delete("Notification History");
+      }
       if (role !== "SUPER_ADMIN") { disabled.add("Analytics"); disabled.add("Billing"); }
       if (workspace === "CENTER") disabled.add("Dashboard");
       return tabs.filter((tab) => !disabled.has(tab));
     },
-    [workspace, role, client?.studySyncEnabled, user.portalRole, user.deploymentFeatures?.marengoMinimal],
+    [workspace, role, client?.studySyncEnabled, user.portalRole, user.deploymentFeatures?.marengoMinimal, user.deploymentFeatures?.notifications],
   );
-  const connectionLabel =
-    !hasLoadedData && loading
-      ? "CONNECTING"
-      : !hasLoadedData && error
-        ? "CONNECTION ISSUE"
-        : "PORTAL ONLINE";
-  const globalSearchMatch = useMemo(() => {
-    const query = globalSearch.trim().toLowerCase();
-    if (!query) return "";
-    return (
-      availableTabs.find((tab) => tab.toLowerCase() === query) ??
-      availableTabs.find((tab) => tab.toLowerCase().startsWith(query)) ??
-      availableTabs.find((tab) => tab.toLowerCase().includes(query)) ??
-      ""
-    );
-  }, [availableTabs, globalSearch]);
+
+
 
   async function loadData(showSpinner = true, forceFullAdmin = false, signal?: AbortSignal) {
     if (dataLoadingRef.current) return;
@@ -18046,21 +17741,8 @@ function AppShell({
     window.scrollTo({ top: 0 });
   }
 
-  function runGlobalSearch(event?: FormEvent) {
-    event?.preventDefault();
-    if (globalSearchMatch) {
-      selectSection(globalSearchMatch);
-      globalSearchRef.current?.blur();
-      return;
-    }
-    const query = globalSearch.trim();
-    if (query)
-      showNotice(
-        `No portal section found for "${query}". Available sections include ${availableTabs.slice(0, 5).join(", ")}.`,
-      );
-  }
 
-  if (hasLoadedData) {
+  {
     const workspaceClient: Client = client ?? {
       id: "", code: "MARENGO", name: role === "SUPER_ADMIN" ? "All authorized centers" : "Radiology workspace",
       kind: "GROUP", facilityType: "Hospital", primaryContact: user.name, email: user.email,
@@ -18077,263 +17759,9 @@ function AppShell({
         : role === "RADIOLOGIST" && radiologist
           ? <RadiologistContent active={active} profile={radiologist} token={token} reload={loadData} notice={showNotice}/>
           : providerDashboard ? <ProviderContent active={active} dashboard={providerDashboard} token={token} reload={loadData} notice={showNotice} user={user}/> : null;
-    return <MarengoUnifiedWorklist token={token} client={workspaceClient} user={user} reload={loadData} notice={showNotice} onNavigate={selectSection} availableTabs={availableTabs} activeSection={active} sectionContent={sectionContent} workspaceNotice={notice} workspaceSyncError={workspaceSyncError}/>;
+    return <MarengoUnifiedWorklist token={token} client={workspaceClient} user={user} reload={loadData} notice={showNotice} onNavigate={selectSection} availableTabs={availableTabs} activeSection={active} sectionContent={sectionContent} workspaceNotice={notice} workspaceSyncError={workspaceSyncError || (!hasLoadedData ? "Loading workspace?" : "")}/>;
   }
 
-  return (
-    <div className="app-shell">
-      <a
-        className="sr-only z-[100] rounded-lg bg-sky-800 px-4 py-3 font-bold text-white focus:not-sr-only focus:fixed focus:left-3 focus:top-3"
-        href="#portal-main-content"
-      >
-        Skip to portal content
-      </a>
-      <div className="flex min-h-screen">
-        <Sidebar
-          role={role}
-          active={active}
-          onSelect={selectSection}
-          client={client}
-          availableTabs={availableTabs}
-        />
-        <main
-          className="min-w-0 flex-1 outline-none"
-          id="portal-main-content"
-          tabIndex={-1}
-        >
-          <MobileNav
-            role={role}
-            active={active}
-            setActive={selectSection}
-            client={client}
-            onLogout={onLogout}
-            user={user}
-            availableTabs={availableTabs}
-          />
-          <div aria-busy={loading || refreshing || adminFullOverviewLoading} className="portal-content">
-            <h1 className="sr-only" id="portal-page-heading">
-              {active}
-            </h1>
-            {notice ? (
-              <div
-                aria-live="polite"
-                className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800 shadow-sm"
-                role="status"
-              >
-                <span className="flex min-w-0 items-start gap-2">
-                  <CheckCircle2
-                    aria-hidden="true"
-                    className="mt-0.5 shrink-0"
-                    size={17}
-                  />
-                  <span>{notice}</span>
-                </span>
-                <button
-                  aria-label="Dismiss notification"
-                  className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-emerald-700 hover:bg-emerald-100"
-                  onClick={() => setNotice("")}
-                  type="button"
-                >
-                  <X aria-hidden="true" size={15} />
-                </button>
-              </div>
-            ) : null}
-            {error && !hasLoadedData ? (
-              <div
-                className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-800 shadow-sm"
-                role="alert"
-              >
-                <span className="flex items-center gap-2">
-                  <AlertTriangle aria-hidden="true" size={17} />
-                  {error}
-                </span>
-                <button
-                  className="rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-extrabold text-rose-800"
-                  onClick={() => void loadData()}
-                  type="button"
-                >
-                  Try again
-                </button>
-              </div>
-            ) : null}
-            <div className="portal-page-title">
-              <div className="portal-console-context">
-                <nav aria-label="Breadcrumb" className="portal-breadcrumb">
-                  <span>Console</span>
-                  <span aria-hidden="true">/</span>
-                  <strong>{active}</strong>
-                </nav>
-                <form
-                  aria-label="Jump to a portal section"
-                  className="portal-global-search"
-                  onSubmit={runGlobalSearch}
-                  role="search"
-                >
-                  <Search aria-hidden="true" size={15} />
-                  <label className="sr-only" htmlFor="portal-section-search">
-                    Jump to a portal section
-                  </label>
-                  <input
-                    autoComplete="off"
-                    id="portal-section-search"
-                    ref={globalSearchRef}
-                    placeholder="Jump to Reports, Studies, Billing..."
-                    type="search"
-                    value={globalSearch}
-                    onChange={(event) => setGlobalSearch(event.target.value)}
-                  />
-                  <kbd aria-hidden="true">CTRL SHIFT F</kbd>
-                  {globalSearch.trim() ? (
-                    <button
-                      aria-live="polite"
-                      className="portal-search-result"
-                      type="submit"
-                    >
-                      {globalSearchMatch
-                        ? `Open ${globalSearchMatch}`
-                        : "No section match"}
-                    </button>
-                  ) : null}
-                </form>
-              </div>
-              <div className="portal-header-actions">
-                {user.deploymentFeatures?.notifications !== false ? <button
-                  aria-label={`${unreadNotifications} unread notifications`}
-                  className="portal-icon-button relative"
-                  onClick={() => selectSection(availableTabs.includes("Notifications") ? "Notifications" : "Notification History")}
-                  title="Open notifications"
-                  type="button"
-                >
-                  <Bell aria-hidden="true" size={18} />
-                  {unreadNotifications ? <span className="absolute -right-1 -top-1 min-w-5 rounded-full bg-rose-600 px-1 text-center text-[10px] font-bold leading-5 text-white">{unreadNotifications > 99 ? "99+" : unreadNotifications}</span> : null}
-                </button> : null}
-                <span
-                  aria-label={connectionLabel.toLowerCase()}
-                  className="portal-bridge-pill"
-                >
-                  <SignalIcon aria-hidden="true" /> {connectionLabel}
-                </span>
-                <span
-                  className="portal-user-pill"
-                  title={`${workspaceLabels[workspace]} - ${user.email}`}
-                >
-                  {brandText(user.name)}
-                </span>
-                <button
-                  aria-busy={refreshing}
-                  aria-label={
-                    refreshing
-                      ? "Refreshing portal data"
-                      : "Refresh portal data"
-                  }
-                  className="portal-icon-button"
-                  disabled={refreshing}
-                  onClick={() => void loadData()}
-                  title="Refresh portal data"
-                  type="button"
-                >
-                  <RefreshCw
-                    aria-hidden="true"
-                    className={cx(refreshing && "animate-spin")}
-                    size={18}
-                  />
-                </button>
-                <button
-                  aria-label="Secure logout"
-                  className="portal-icon-button portal-logout-button"
-                  onClick={onLogout}
-                  title="Secure logout"
-                  type="button"
-                >
-                  <LogOut aria-hidden="true" size={18} />
-                </button>
-              </div>
-              <div className="portal-workspace-title">
-                <p>{pageKicker}</p>
-                <h2>{active}</h2>
-              </div>
-            </div>
-            {loading || (adminSectionNeedsFullOverview && !adminFullOverviewError) ? (
-              <EmptyState
-                message={
-                  adminFullOverviewLoading
-                    ? "Loading center data..."
-                    : "Preparing center data..."
-                }
-              />
-            ) : null}
-            {!loading && adminSectionNeedsFullOverview && adminFullOverviewError ? (
-              <div
-                className="rounded-xl border border-rose-200 bg-rose-50 p-6 text-center text-rose-900 shadow-sm"
-                role="alert"
-              >
-                <h2 className="text-lg font-extrabold">Unable to load center data</h2>
-                <p className="mt-2 text-sm font-semibold">{adminFullOverviewError}</p>
-                <button
-                  className="mt-4 rounded-lg bg-rose-700 px-4 py-2 text-sm font-extrabold text-white"
-                  onClick={() => {
-                    setAdminFullOverviewError("");
-                    setAdminFullOverviewRetry((value) => value + 1);
-                  }}
-                  type="button"
-                >
-                  Try again
-                </button>
-              </div>
-            ) : null}
-            <div aria-labelledby="portal-page-heading">
-              {!loading &&
-              !adminSectionNeedsFullOverview &&
-              role === "SUPER_ADMIN" &&
-              overview ? (
-                <AdminContent
-                  active={active}
-                  overview={overview}
-                  token={token}
-                  reload={loadData}
-                  notice={showNotice}
-                  onNavigate={selectSection}
-                />
-              ) : null}
-              {!loading && role === "CLIENT_USER" && client ? (
-                <ClientContent
-                  active={active}
-                  token={token}
-                  client={client}
-                  user={user}
-                  reload={loadData}
-                  notice={showNotice}
-                  onNavigate={selectSection}
-                  availableTabs={availableTabs}
-                />
-              ) : null}
-              {!loading && role === "RADIOLOGIST" && radiologist ? (
-                <RadiologistContent
-                  active={active}
-                  profile={radiologist}
-                  token={token}
-                  reload={loadData}
-                  notice={showNotice}
-                />
-              ) : null}
-              {!loading &&
-              (role === "PROVIDER_ADMIN" || role === "PROVIDER_MANAGER") &&
-              providerDashboard ? (
-                <ProviderContent
-                  active={active}
-                  dashboard={providerDashboard}
-                  token={token}
-                  reload={loadData}
-                  notice={showNotice}
-                  user={user}
-                />
-              ) : null}
-            </div>
-          </div>
-        </main>
-      </div>
-    </div>
-  );
 }
 
 function App() {

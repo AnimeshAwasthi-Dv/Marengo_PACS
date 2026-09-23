@@ -29,6 +29,8 @@ The migration container completes before the app starts. Database files, uploads
 
 ## External DICOM viewer
 
+For referring-physician report links and radiologist callback requests, see [WhatsApp configuration](docs/WHATSAPP_REFERRING_PHYSICIAN.md).
+
 Leave `EXTERNAL_VIEWER_URL_TEMPLATE` blank until its URL contract is known. Viewer buttons then display an explicit unconfigured message.
 
 Example configuration, **only if supported by your viewer**:

@@ -16,9 +16,10 @@ type Dependencies = {
   canRadiologistAccessReport: (profile: any, report: any) => Promise<boolean>;
   isGroupRadiologistProfile: (profile: any) => Promise<boolean>;
   getDicomMetadataValue: (value: unknown, key: string) => string | null;
+  createBridgeStudyViewerUrl?: (studyId: string, req: any) => Promise<string | null> | string | null;
 };
 export function registerExternalViewerRoutes(app: Express, dependencies: Dependencies) {
-  const { prisma, requireAuth, requireRadiologist, accessibleClientIds, workspaceStudyScope, getAccessibleProcessingJob, extractQueuedMetadata, publicSharedReport, getAuthorizedReport, canRadiologistAccessReport, isGroupRadiologistProfile, getDicomMetadataValue } = dependencies;
+  const { prisma, requireAuth, requireRadiologist, accessibleClientIds, workspaceStudyScope, getAccessibleProcessingJob, extractQueuedMetadata, publicSharedReport, getAuthorizedReport, canRadiologistAccessReport, isGroupRadiologistProfile, getDicomMetadataValue, createBridgeStudyViewerUrl } = dependencies;
 app.get("/api/patient-study-archives/:archiveId/viewer-session", requireAuth, async (req, res) => {
   res.setHeader('Cache-Control', 'private, no-store');
   try {
@@ -37,6 +38,11 @@ app.get("/api/client/study-sync/available-studies/:studyId/viewer-session", requ
   try {
     const study = await prisma.availableBridgeStudy.findFirst({ where: { id: String(req.params.studyId), ...await workspaceStudyScope(req) } });
     if (!study) return res.status(404).json({ enabled: false, message: 'Study not found' });
+    if (createBridgeStudyViewerUrl) {
+      const viewerUrl = await createBridgeStudyViewerUrl(study.id, req);
+      if (!viewerUrl) return res.json({ enabled: false, message: 'DICOM study files are not available on this server yet.' });
+      return res.json({ enabled: true, viewerUrl, studyInstanceUid: study.studyInstanceUid });
+    }
     res.json(externalViewerSession({ studyInstanceUid: study.studyInstanceUid }));
   } catch (error) {
     const status = typeof (error as { status?: number }).status === 'number' ? (error as { status: number }).status : 503;

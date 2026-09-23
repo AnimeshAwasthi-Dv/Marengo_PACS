@@ -9,8 +9,34 @@ const sgstRatePercent = Number(process.env.BILLING_SGST_RATE_PERCENT ?? 9)
 const cgstRatePercent = Number(process.env.BILLING_CGST_RATE_PERCENT ?? 9)
 const paymentLinkExpiryDays = Number(process.env.RAZORPAY_PAYMENT_LINK_EXPIRY_DAYS ?? 15)
 const nonBillableSuiteServiceNames = new Set(['X-ray Suite', 'CT Suite', 'MRI Suite'])
-const manualBillingServiceNames = new Set(['CT Other', 'MRI Other'])
 const manualBillingLabel = 'Will be billed manually'
+const tariffFallbackRatesMinor: Record<string, number> = {
+  'X-Ray Chest': 2500,
+  'X-Ray Other - per additional view': 2500,
+  'Special X-ray (contrast media)': 15000,
+  Mammography: 5500,
+  'CT Brain / PNS / Orbit': 22500,
+  'CT Face': 22500,
+  'HRCT Temporal Bone': 22500,
+  'CT Head with Contrast': 22500,
+  'CT Body - with or without Contrast': 41000,
+  'CT Thorax': 41000,
+  'Triple Phase CT': 38500,
+  'CT Angio - all studies': 60000,
+  'CT Other': 41000,
+  'MRI Brain': 39000,
+  'MRI Brain w/ Contrast - Epilepsy': 39000,
+  'MRI Spine': 38000,
+  'MRI Whole Abdomen': 48500,
+  'MRI Body - Head-Neck, Upper/Lower Abdomen, Pelvis': 48500,
+  'MRI Joints / Limbs': 52500,
+  'MRI Prostate / Breast / Pituitary': 67500,
+  'MRI Other': 48500,
+  MRCP: 38000,
+  'MRA / MRV / MRS': 22500,
+  'MRI Screening': 15000,
+}
+const xrayAdditionalViewMinor = 2000
 
 export const billingRouter = express.Router()
 export const clientBillingRouter = express.Router()
@@ -160,6 +186,7 @@ billingRouter.post('/usage/:transactionId/reclassify', requireAuth, requireSuper
   const category = body.category ?? existing.category
   const units = body.units ?? existing.units
   const price = await findPricingRule(existing.serviceName, existing.workflowType, priority, category)
+  const amountMinor = billingAmountMinor(existing.serviceName, units, price.unitPriceMinor)
   const updated = await prisma.studyBillingTransaction.update({
     where: { id: existing.id },
     data: {
@@ -167,7 +194,7 @@ billingRouter.post('/usage/:transactionId/reclassify', requireAuth, requireSuper
       category,
       units,
       unitPriceMinor: price.unitPriceMinor,
-      amountMinor: units * price.unitPriceMinor,
+      amountMinor,
       currency: price.currency,
       metadata: { reclassifiedAt: new Date().toISOString(), previous: existing },
     },
@@ -543,7 +570,7 @@ export async function recordBillingEvent(input: BillingEventInput) {
   const priority = normalizePriority(input.priority)
   const price = await findPricingRule(input.serviceName, input.workflowType, priority, priority)
   const manualBilling = price.manualBilling === true
-  const amountMinor = input.units * price.unitPriceMinor
+  const amountMinor = billingAmountMinor(input.serviceName, input.units, price.unitPriceMinor)
   const transactionData = {
     studyId: input.studyId,
     serviceName: input.serviceName,
@@ -599,6 +626,43 @@ export async function recordBillingEvent(input: BillingEventInput) {
   }
 
   return transaction
+}
+
+export async function repriceUninvoicedZeroBillingTransactions(processingJobIds?: string[]) {
+  const transactions = await prisma.studyBillingTransaction.findMany({
+    where: {
+      status: 'UNINVOICED',
+      invoiceId: null,
+      ...(processingJobIds?.length ? { processingJobId: { in: processingJobIds } } : {}),
+      OR: [
+        { amountMinor: 0 },
+        { unitPriceMinor: 0 },
+      ],
+    },
+  })
+  let updated = 0
+  for (const transaction of transactions) {
+    const price = await findPricingRule(transaction.serviceName, transaction.workflowType, transaction.priority, transaction.category)
+    if (price.manualBilling || price.unitPriceMinor <= 0) continue
+    const amountMinor = billingAmountMinor(transaction.serviceName, transaction.units, price.unitPriceMinor)
+    await prisma.studyBillingTransaction.update({
+      where: { id: transaction.id },
+      data: {
+        unitPriceMinor: price.unitPriceMinor,
+        amountMinor,
+        currency: price.currency,
+        metadata: toPrismaJson({
+          ...(transaction.metadata && typeof transaction.metadata === 'object' && !Array.isArray(transaction.metadata) ? transaction.metadata as Record<string, unknown> : {}),
+          repricedAt: new Date().toISOString(),
+          repricedReason: 'Applied active/default tariff pricing to a zero billing row',
+          previousUnitPriceMinor: transaction.unitPriceMinor,
+          previousAmountMinor: transaction.amountMinor,
+        }),
+      },
+    })
+    updated++
+  }
+  return updated
 }
 
 async function generateInvoices(periodStart: Date, periodEnd: Date, clientId?: string) {
@@ -728,7 +792,6 @@ async function getInvoice(invoiceId: string) {
 }
 
 async function findPricingRule(serviceName: string, workflowType: string, priority: string, category: string) {
-  if (manualBillingServiceNames.has(serviceName)) return manualPricingRule(`No pricing is configured for ${serviceName}`)
   const now = new Date()
   const candidates = await prisma.pricingRule.findMany({
     where: {
@@ -743,9 +806,53 @@ async function findPricingRule(serviceName: string, workflowType: string, priori
   })
   const candidate = candidates.find((rule) => rule.workflowType === workflowType)
     ?? candidates.find((rule) => rule.workflowType === 'ANY')
-  return candidate
+  const fallback = tariffFallbackRule(serviceName)
+  return candidate && candidate.unitPriceMinor > 0
     ? { ...candidate, manualBilling: false, manualBillingReason: null }
-    : manualPricingRule(`No active pricing rule found for ${serviceName} (${priority})`)
+    : fallback ?? manualPricingRule(`No active pricing rule found for ${serviceName} (${priority})`)
+}
+
+function tariffFallbackRule(serviceName: string) {
+  const normalizedName = normalizeTariffServiceName(serviceName)
+  const unitPriceMinor = tariffFallbackRatesMinor[normalizedName]
+  return unitPriceMinor == null ? null : { unitPriceMinor, providerPayableMinor: 0, currency: 'INR', manualBilling: false, manualBillingReason: null }
+}
+
+function normalizeTariffServiceName(serviceName: string) {
+  if (tariffFallbackRatesMinor[serviceName] != null) return serviceName
+  const text = serviceName.toLowerCase()
+  if (text.includes('mammo') || text.includes('mammography')) return 'Mammography'
+  if (text.includes('special') && (text.includes('xray') || text.includes('x-ray') || /\bx\s*ray\b/.test(text))) return 'Special X-ray (contrast media)'
+  if (text.includes('xray') || text.includes('x-ray') || /\bx\s*ray\b/.test(text)) {
+    if (text.includes('chest') || text.includes('thorax') || /\bcxr\b/.test(text)) return 'X-Ray Chest'
+    return 'X-Ray Other - per additional view'
+  }
+  if (text.includes('ct')) {
+    if (text.includes('angio') || /\bcta\b/.test(text)) return 'CT Angio - all studies'
+    if (text.includes('triple')) return 'Triple Phase CT'
+    if (text.includes('thorax') || text.includes('chest')) return 'CT Thorax'
+    if (text.includes('face') || text.includes('pns') || text.includes('orbit') || text.includes('brain') || text.includes('head')) return 'CT Brain / PNS / Orbit'
+    if (text.includes('abdomen') || text.includes('pelvis') || text.includes('body')) return 'CT Body - with or without Contrast'
+    return 'CT Other'
+  }
+  if (text.includes('mri') || text.includes('mr ')) {
+    if (text.includes('brain')) return 'MRI Brain'
+    if (text.includes('spine') || text.includes('cervical') || text.includes('lumbar') || text.includes('dorsal') || text.includes('sacral')) return 'MRI Spine'
+    if (text.includes('mrcp')) return 'MRCP'
+    if (text.includes('screening')) return 'MRI Screening'
+    if (text.includes('abdomen') || text.includes('pelvis') || text.includes('neck')) return 'MRI Body - Head-Neck, Upper/Lower Abdomen, Pelvis'
+    if (/\b(knee|shoulder|elbow|wrist|hip|ankle|foot|joint|limb)\b/.test(text)) return 'MRI Joints / Limbs'
+    return 'MRI Other'
+  }
+  return serviceName
+}
+
+function billingAmountMinor(serviceName: string, units: number, unitPriceMinor: number) {
+  const normalizedName = normalizeTariffServiceName(serviceName)
+  if ((normalizedName === 'X-Ray Chest' || normalizedName === 'X-Ray Other - per additional view') && units > 1) {
+    return unitPriceMinor + (units - 1) * xrayAdditionalViewMinor
+  }
+  return units * unitPriceMinor
 }
 
 function manualPricingRule(reason: string) {

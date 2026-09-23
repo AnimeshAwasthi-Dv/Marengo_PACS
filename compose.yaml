@@ -12,7 +12,7 @@ x-app: &app
     NODE_ENV: production
     HOST: 0.0.0.0
     PORT: '4000'
-    DATABASE_URL: postgresql://marengo:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/marengo?schema=public&connection_limit=10&pool_timeout=20
+    DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
     NODE_OPTIONS: --max-old-space-size=4096
     UV_THREADPOOL_SIZE: '4'
     CHROMIUM_NO_SANDBOX: 'true'
@@ -20,28 +20,9 @@ x-app: &app
   logging: *logging
 
 services:
-  db:
-    image: postgres:16-bookworm
-    environment:
-      POSTGRES_USER: marengo
-      POSTGRES_DB: marengo
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-    command: [postgres, -c, shared_buffers=1GB, -c, effective_cache_size=4GB, -c, work_mem=8MB, -c, maintenance_work_mem=256MB, -c, max_connections=50]
-    volumes: [postgres-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: [CMD-SHELL, 'pg_isready -U marengo -d marengo']
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    restart: unless-stopped
-    mem_limit: 4g
-    cpus: 1.25
-    logging: *logging
   migrate:
     <<: *app
-    command: [node_modules/.bin/prisma, migrate, deploy]
-    depends_on:
-      db: {condition: service_healthy}
+    command: [node, scripts/migrate-deploy.cjs]
     restart: 'no'
     mem_limit: 1g
   app:
@@ -77,7 +58,6 @@ services:
     cpus: 0.25
     logging: *logging
 volumes:
-  postgres-data:
   uploads:
   caddy-data:
   caddy-config:

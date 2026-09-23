@@ -1,4 +1,6 @@
 import { findExecutable } from './platform/tools';
+import { classifyBreastXrayModalities } from '../src/mammography';
+import { isSpecialXrayStudy, hasSpecialXrayDescription } from '../src/specialXray';
 import Busboy from 'busboy'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
@@ -33,6 +35,7 @@ function positiveIntegerEnv(name: string, fallback: number) {
 const portalMaxUploadBytes = positiveIntegerEnv('PORTAL_MAX_UPLOAD_BYTES', 4 * 1024 * 1024 * 1024)
 
 export type DicomStudyMetadata = {
+  referringPhysician?: string
   patientName?: string
   patientId?: string
   accession?: string
@@ -166,8 +169,11 @@ export function aiServiceTypeForServiceType(serviceType: string) {
   return modalityServices.find((service) => service.slug === serviceType)?.aiServiceType
 }
 
-export function inferBridgeServiceType(study: { modalities: string[]; studyDescription?: string | null }) {
+export function inferBridgeServiceType(study: { modalities: string[]; studyDescription?: string | null; bodyPartExamined?: string | null }) {
+  study = { ...study, modalities: classifyBreastXrayModalities(study.modalities, study.bodyPartExamined) }
+  if (isSpecialXrayStudy(study)) return 'special-xray-contrast-media'
   const modalities = new Set(study.modalities.map((value) => value.toUpperCase()))
+  if (modalities.has('MG') && !['CT', 'MR', 'US', 'PT'].some(modality => modalities.has(modality))) return 'mammography'
   const text = `${study.modalities.join(' ')} ${study.studyDescription ?? ''}`.toLowerCase()
   if (modalities.has('US') || /\b(usg|ultrasound|sonography)\b/i.test(text)) return 'ultrasound'
   if (modalities.has('PT') || /\b(pet[\s-]?ct|pet|positron)\b/i.test(text)) return 'pet-ct'
@@ -314,7 +320,7 @@ function classifyXrayStudy(uploadName: string, options: {
     metadata.protocolName,
   ].filter(Boolean).join(' ').toLowerCase()
   if (metadata.modality === 'MG' || /\b(mammo|mammography|breast)\b/i.test(text)) return 'mammography'
-  if (/\b(special|contrast|fluoro|fluoroscopy|ivp|hsg|barium|ucg|rgu|mcu)\b/i.test(text)) return 'special-xray'
+  if (hasSpecialXrayDescription(text) || /\b(special|contrast|fluoro|fluoroscopy|ivp|hsg|barium|ucg|rgu|mcu)\b/i.test(text)) return 'special-xray'
   return 'general-xray'
 }
 
@@ -524,7 +530,7 @@ async function findFirstDicomFile(sourceDir: string) {
 }
 
 async function extractDicomFileMetadata(filePath: string): Promise<DicomStudyMetadata> {
-  const tags = ['0010,0010', '0010,0020', '0008,0050', '0010,0040', '0010,1010', '0010,0030', '0020,000D', '0020,000E', '0008,0018', '0008,0020', '0008,0030', '0008,0060', '0008,1030', '0008,103E', '0018,1030', '0018,0015']
+  const tags = ['0008,0090', '0010,0010', '0010,0020', '0008,0050', '0010,0040', '0010,1010', '0010,0030', '0020,000D', '0020,000E', '0008,0018', '0008,0020', '0008,0030', '0008,0060', '0008,1030', '0008,103E', '0018,1030', '0018,0015']
   const dcmdump = await findTool('dcmdump.exe')
   if (dcmdump) {
     const output = await new Promise<string>((resolve) => {
@@ -556,6 +562,7 @@ function dicomMetadataFromReader(read: (tag: string) => string | undefined): Dic
     studyTime: cleanDicomText(read('0008,0030')),
     modality: cleanDicomText(read('0008,0060'))?.toUpperCase(),
     studyDescription: cleanDicomText(read('0008,1030')),
+    referringPhysician: cleanDicomText(read('0008,0090')),
     seriesDescription: cleanDicomText(read('0008,103E')),
     protocolName: cleanDicomText(read('0018,1030')),
     bodyPartExamined: cleanDicomText(read('0018,0015')),

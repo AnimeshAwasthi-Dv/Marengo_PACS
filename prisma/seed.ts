@@ -5,6 +5,7 @@ import { modalityServices } from '../server/uploadPipeline';
 
 const prisma = new PrismaClient();
 async function main() {
+  if (process.env.DATABASE_READ_ONLY === 'true') throw new Error('Read-only database: seeding is disabled.');
   const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
   const password = process.env.ADMIN_PASSWORD;
   const userId = process.env.ADMIN_USER_ID?.trim() || 'admin';
