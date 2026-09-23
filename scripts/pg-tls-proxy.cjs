@@ -43,6 +43,18 @@ const server = net.createServer((client) => {
   })
 })
 
+server.on('error', (error) => {
+  console.error(`Postgres TLS proxy failed: ${error.message}`)
+  process.exit(1)
+})
+
 server.listen(listenPort, listenHost, () => {
   console.log(`Postgres TLS proxy listening on ${listenHost}:${listenPort} -> ${upstreamHost}:${upstreamPort}`)
 })
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    server.close(() => process.exit(0))
+    setTimeout(() => process.exit(0), 5000).unref()
+  })
+}

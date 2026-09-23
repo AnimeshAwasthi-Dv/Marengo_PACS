@@ -22,4 +22,4 @@ COPY --from=build --chown=node:node /app/dist ./dist
 RUN mkdir -p /app/uploads && chown node:node /app/uploads
 USER node
 EXPOSE 4000
-CMD ["node", "--import", "tsx", "server/index.ts"]
+CMD ["node", "scripts/with-pg-tls-proxy.cjs", "node", "--import", "tsx", "server/index.ts"]
