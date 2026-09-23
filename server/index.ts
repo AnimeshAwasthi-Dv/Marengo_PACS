@@ -52,7 +52,7 @@ import { ProviderSubmissionError } from './providerAdapters'
 import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
 import { readStoredObject, storeObject, uploadReportHtmlToS3, type StorageKind } from './reportStorage'
-import { redisGetJson, redisPing, redisSetJson } from './redisCache'
+import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
 import { AiProcessingError, AiUnavailableError, aiServiceTypeForServiceName, aiServiceTypeForServiceType, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, processCtUpload, processMammographyUpload, processMriUpload, processXrayUpload, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, XrayProcessingError, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
@@ -229,6 +229,7 @@ app.use('/api', (req, res, next) => {
     if (process.env.DATABASE_READ_ONLY === 'true') return
     if (req.path === '/health') return
     if (req.method === 'GET' && /\/dashboard$/.test(req.path)) return
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && res.statusCode < 400) void invalidateDashboardCaches()
     const user = req.user
     void prisma.auditLog.create({
       data: {
@@ -562,7 +563,7 @@ app.get('/api/admin/dashboard', requireAuth, requireSuperAdmin, async (_req, res
 app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) => {
   res.setHeader('Cache-Control', 'private, no-store')
   const dashboardOnly = req.query.scope === 'dashboard'
-  const dashboardCacheKey = dashboardOnly ? 'decxpert:admin-overview:dashboard' : 'decxpert:admin-overview'
+  const dashboardCacheKey = `${redisNamespace}:admin-overview:${dashboardOnly ? 'dashboard' : 'full'}`
   const cachedDashboard = req.query.fresh === '1' ? null : await redisGetJson<unknown>(dashboardCacheKey)
   if (cachedDashboard) return res.json(cachedDashboard)
 
@@ -1821,7 +1822,7 @@ app.post('/api/provider/call-bookings/:bookingId/complete', requireAuth, require
 app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res) => {
   if (!req.user!.clientId) return res.status(403).json({ message: 'Client account required' })
   const access = await workspaceAccess(req)
-  const dashboardCacheKey = `decxpert:client-dashboard:v2:${req.user!.clientId}:${req.user!.sub}:${req.user!.portalRole}`
+  const dashboardCacheKey = `${redisNamespace}:client-dashboard:v2:${req.user!.clientId}:${req.user!.sub}:${req.user!.portalRole}`
   res.setHeader('Cache-Control', 'private, no-store')
   const cachedDashboard = req.query.fresh === '1' ? null : await redisGetJson<unknown>(dashboardCacheKey)
   if (cachedDashboard) return res.json(cachedDashboard)
@@ -9295,6 +9296,6 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const child of receiverProcesses.values()) child.kill('SIGTERM');
-  httpServer.close(() => { void renewistSubmissionTail.finally(async () => { await prisma.$disconnect(); process.exit(0); }); });
+  httpServer.close(() => { void renewistSubmissionTail.finally(async () => { await closeRedis(); await prisma.$disconnect(); process.exit(0); }); });
   setTimeout(() => process.exit(1), 55000).unref();
 });

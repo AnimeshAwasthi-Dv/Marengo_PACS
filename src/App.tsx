@@ -17597,7 +17597,7 @@ function AppShell({
     try {
       if (role === "SUPER_ADMIN") {
         const fullOverview = forceFullAdmin || adminFullOverviewLoaded || active !== "Dashboard";
-        const data = await api<AdminOverview>(fullOverview ? "/api/admin/overview?fresh=1" : "/api/admin/overview?scope=dashboard&fresh=1", token, { cache: "no-store", signal });
+        const data = await api<AdminOverview>(fullOverview ? "/api/admin/overview" : "/api/admin/overview?scope=dashboard", token, { cache: "no-store", signal });
         if (signal?.aborted) return;
         setOverview(data);
         if (fullOverview) setAdminFullOverviewLoaded(true);
@@ -17610,7 +17610,7 @@ function AppShell({
         if (signal?.aborted) return;
         setProviderDashboard(data);
       } else {
-        const data = await api<Client>("/api/client/dashboard?fresh=1", token, { cache: "no-store", signal });
+        const data = await api<Client>("/api/client/dashboard", token, { cache: "no-store", signal });
         if (signal?.aborted) return;
         setClient(data);
       }
@@ -17677,7 +17677,15 @@ function AppShell({
   useEffect(() => {
     if (editorActive) return;
     if (user.deploymentFeatures?.notifications === false) return;
-    const loadUnread = () => api<{ count: number }>("/api/notifications/unread-count", token).then((result) => setUnreadNotifications(result.count)).catch(() => undefined);
+    let activeRequest = false;
+    const loadUnread = () => {
+      if (activeRequest || document.visibilityState !== "visible" || !navigator.onLine) return;
+      activeRequest = true;
+      void api<{ count: number }>("/api/notifications/unread-count", token)
+        .then((result) => setUnreadNotifications(result.count))
+        .catch(() => undefined)
+        .finally(() => { activeRequest = false; });
+    };
     void loadUnread();
     const timer = window.setInterval(() => void loadUnread(), 15000);
     return () => window.clearInterval(timer);

@@ -1,106 +1,115 @@
-import net from 'node:net'
-import tls from 'node:tls'
+import { createClient, createCluster, type RedisClientType, type RedisClusterType } from 'redis'
 
-type RedisReply = string | null
+type CacheClient = RedisClientType | RedisClusterType
+type CacheConfig = { url: string; cluster: boolean }
+let client: CacheClient | null = null
+let connection: Promise<CacheClient | null> | null = null
 let warnedUnavailable = false
+const inFlight = new Map<string, Promise<unknown>>()
+export const redisNamespace = `marengo:${process.env.NODE_ENV ?? 'development'}`
 
-function serializeJson(value: unknown) {
-  return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item)
+function warn(error: unknown) {
+  if (warnedUnavailable) return
+  warnedUnavailable = true
+  console.warn(`Redis cache unavailable; continuing without cache: ${error instanceof Error ? error.message : String(error)}`)
 }
 
-function config() {
-  const raw = process.env.REDIS_URL?.trim() || (process.env.REDIS_HOST ? `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT ?? '6379'}` : '')
-  if (!raw) return null
-  const url = new URL(raw)
-  return { host: url.hostname, port: Number(url.port || 6379), password: url.password || process.env.REDIS_PASSWORD, tls: process.env.REDIS_TLS === 'true' || url.protocol === 'rediss:' }
-}
-
-function command(parts: string[]) {
-  return `*${parts.length}\r\n${parts.map((part) => `$${Buffer.byteLength(part)}\r\n${part}\r\n`).join('')}`
-}
-
-async function execute(parts: string[]): Promise<RedisReply> {
-  const settings = config()
-  if (!settings) return null
-  return new Promise((resolve, reject) => {
-    const socket = settings.tls ? tls.connect({ host: settings.host, port: settings.port, servername: settings.host }) : net.connect(settings.port, settings.host)
-    const chunks: Buffer[] = []
-    const configuredTimeoutMs = Number(process.env.REDIS_TIMEOUT_MS ?? 250)
-    const timeoutMs = Number.isFinite(configuredTimeoutMs) ? Math.max(50, configuredTimeoutMs) : 250
-    const timer = setTimeout(() => socket.destroy(new Error('Redis request timed out')), timeoutMs)
-    socket.setNoDelay(true)
-    let settled = false
-    const finish = (callback: () => void) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      callback()
-      socket.end()
-    }
-    const parseResponse = () => {
-      const response = Buffer.concat(chunks).toString('utf8')
-      if (!response) return undefined
-      if (response.startsWith('+')) {
-        const end = response.indexOf('\r\n')
-        return end >= 0 ? { value: response.slice(1, end) } : undefined
-      }
-      if (response.startsWith('-')) {
-        const end = response.indexOf('\r\n')
-        return end >= 0 ? { error: new Error(response.slice(1, end)) } : undefined
-      }
-      if (response.startsWith('$-1\r\n')) return { value: null }
-      if (response.startsWith('$')) {
-        const end = response.indexOf('\r\n')
-        if (end < 0) return undefined
-        const length = Number(response.slice(1, end))
-        if (!Number.isFinite(length) || length < 0) return { value: null }
-        const start = end + 2
-        const stop = start + length
-        if (response.length < stop + 2) return undefined
-        return { value: response.slice(start, stop) }
-      }
-      return undefined
-    }
-    socket.once('connect', () => socket.write(command(settings.password ? ['AUTH', settings.password] : []).replace(/^\*0\r\n/, '') + command(parts)))
-    socket.on('data', (chunk) => {
-      chunks.push(Buffer.from(chunk))
-      const parsed = parseResponse()
-      if (!parsed) return
-      if ('error' in parsed && parsed.error) finish(() => reject(parsed.error))
-      else finish(() => resolve(parsed.value ?? null))
-    })
-    socket.once('error', (error) => finish(() => reject(error)))
-    socket.once('close', () => {
-      if (settled) return
-      const parsed = parseResponse()
-      if (parsed && 'error' in parsed && parsed.error) finish(() => reject(parsed.error))
-      else finish(() => resolve(parsed?.value ?? null))
-    })
-  })
-}
-
-export async function redisPing(): Promise<boolean> {
+function cacheConfig(): CacheConfig | null {
+  if (process.env.REDIS_CACHE_ENABLED !== 'true') return null
+  const url = process.env.REDIS_URL?.trim()
+  if (!url) return null
   try {
-    return (await execute(['PING'])) === 'PONG'
-  } catch (error) {
-    warn(error)
-    return false
+    const parsed = new URL(url)
+    if (!['redis:', 'rediss:'].includes(parsed.protocol) || !parsed.hostname) return null
+    return { url, cluster: process.env.REDIS_CLUSTER_MODE === 'true' }
+  } catch {
+    warn('Redis configuration is malformed; cache disabled')
+    return null
   }
 }
 
+async function getClient(): Promise<CacheClient | null> {
+  const config = cacheConfig()
+  if (!config) return null
+  if (client?.isReady) return client
+  if (connection) return connection
+  connection = (async () => {
+    const next = config.cluster ? createCluster({ rootNodes: [{ url: config.url }] }) : createClient({ url: config.url })
+    next.on('error', warn)
+    next.on('reconnecting', () => console.warn('Redis cache reconnecting'))
+    try {
+      await next.connect()
+      client = next
+      warnedUnavailable = false
+      console.info(`Redis cache connected (${config.cluster ? 'cluster' : 'single-node'})`)
+      return next
+    } catch (error) {
+      warn(error)
+      await next.disconnect().catch(() => undefined)
+      return null
+    }
+  })()
+  const result = await connection
+  connection = null
+  return result
+}
+
+async function withClient<T>(operation: (redis: CacheClient) => Promise<T>, fallback: T): Promise<T> {
+  const redis = await getClient()
+  if (!redis) return fallback
+  try {
+    return await Promise.race([operation(redis), new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Redis operation timed out')), Number(process.env.REDIS_TIMEOUT_MS ?? 500)))])
+  } catch (error) {
+    warn(error)
+    return fallback
+  }
+}
+
+export async function redisPing() { return withClient(async redis => (await redis.ping()) === 'PONG', false) }
+
 export async function redisGetJson<T>(key: string): Promise<T | null> {
-  try {
-    const value = await execute(['GET', key])
+  return withClient(async redis => {
+    const value = await redis.get(key)
     if (!value) return null
-    return JSON.parse(value) as T
-  } catch (error) { warn(error); return null }
+    try { return JSON.parse(value) as T } catch { return null }
+  }, null)
 }
 
-export async function redisSetJson(key: string, value: unknown, ttlSeconds = 300) {
-  try {
-    const serialized = serializeJson(value)
-    await execute(['SET', key, serialized, 'EX', String(ttlSeconds)])
-  } catch (error) { warn(error) }
+export async function redisSetJson(key: string, value: unknown, ttlSeconds = 60) {
+  const serialized = JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item)
+  await withClient(async redis => { await redis.set(key, serialized, { EX: Math.max(1, Math.round(ttlSeconds)) }); return true }, false)
 }
 
-function warn(error: unknown) { if (!warnedUnavailable) { warnedUnavailable = true; console.warn(`Redis cache unavailable; continuing without cache: ${error instanceof Error ? error.message : String(error)}`) } }
+export async function redisDeleteKeys(prefix: string) {
+  if (!prefix.trim()) return
+  await withClient(async redis => {
+    const keys: string[] = []
+    for await (const key of redis.scanIterator({ MATCH: `${prefix}*`, COUNT: 100 })) keys.push(key)
+    if (keys.length) await redis.del(keys)
+    return true
+  }, false)
+}
+
+export async function invalidateDashboardCaches() {
+  await Promise.all([
+    redisDeleteKeys(`${redisNamespace}:admin-overview:`),
+    redisDeleteKeys(`${redisNamespace}:client-dashboard:`),
+  ])
+}
+
+export async function cachedJson<T>(key: string, loader: () => Promise<T>, ttlSeconds = 60): Promise<T> {
+  const cached = await redisGetJson<T>(key)
+  if (cached !== null) return cached
+  const existing = inFlight.get(key) as Promise<T> | undefined
+  if (existing) return existing
+  const pending = loader().then(async value => { await redisSetJson(key, value, ttlSeconds); return value }).finally(() => inFlight.delete(key))
+  inFlight.set(key, pending)
+  return pending
+}
+
+export async function closeRedis() {
+  const redis = client
+  client = null
+  connection = null
+  if (redis?.isOpen) await redis.quit().catch(() => redis.disconnect().catch(() => undefined))
+}

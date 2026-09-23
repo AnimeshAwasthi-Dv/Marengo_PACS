@@ -5,7 +5,7 @@ import { marengoTariff } from './marengoTariff';
 import { studyTracking } from './studyTracking';
 import { telegramConfig, telegramAlertConfig } from './telegramPolicy';
 import { setWorklistPriority } from './worklistPriority';
-import { redisPing } from './redisCache';
+import { redisNamespace, redisPing } from './redisCache';
 import { requireWorkspaceCapability, workspaceAccess } from './workspaceAccess';
 import { csvDocument, durationSeconds, istTimestamp, statisticsRange, summarizeStudies, type StatisticsRow } from './workspaceStatistics';
 import { recordBillingEvent, repriceUninvoicedZeroBillingTransactions } from './billing';
