@@ -17,6 +17,7 @@ COPY --from=build --chown=node:node /app/package*.json ./
 COPY --from=build --chown=node:node /app/server ./server
 COPY --from=build --chown=node:node /app/src ./src
 COPY --from=build --chown=node:node /app/prisma ./prisma
+COPY --from=build --chown=node:node /app/scripts ./scripts
 COPY --from=build --chown=node:node /app/dist ./dist
 RUN mkdir -p /app/uploads && chown node:node /app/uploads
 USER node
