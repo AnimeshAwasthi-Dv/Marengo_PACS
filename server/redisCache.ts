@@ -1,9 +1,13 @@
-import { createClient, createCluster, type RedisClientType, type RedisClusterType } from 'redis'
+import { createClient, createCluster } from 'redis'
 
-type CacheClient = RedisClientType | RedisClusterType
+type StandaloneRedisClient = ReturnType<typeof createClient>
+type ClusterRedisClient = ReturnType<typeof createCluster>
+type CacheConnection =
+  | { mode: 'standalone'; client: StandaloneRedisClient }
+  | { mode: 'cluster'; client: ClusterRedisClient }
 type CacheConfig = { url: string; cluster: boolean }
-let client: CacheClient | null = null
-let connection: Promise<CacheClient | null> | null = null
+let connectionClient: CacheConnection | null = null
+let connection: Promise<CacheConnection | null> | null = null
 let warnedUnavailable = false
 const inFlight = new Map<string, Promise<unknown>>()
 export const redisNamespace = `marengo:${process.env.NODE_ENV ?? 'development'}`
@@ -28,33 +32,43 @@ function cacheConfig(): CacheConfig | null {
   }
 }
 
-async function getClient(): Promise<CacheClient | null> {
+function isReady(redis: CacheConnection) {
+  return redis.mode === 'standalone' ? redis.client.isReady : redis.client.isOpen
+}
+
+async function createCacheConnection(config: CacheConfig): Promise<CacheConnection | null> {
+  const next: CacheConnection = config.cluster
+    ? { mode: 'cluster', client: createCluster({ rootNodes: [{ url: config.url }] }) }
+    : { mode: 'standalone', client: createClient({ url: config.url }) }
+
+  next.client.on('error', warn)
+  next.client.on('reconnecting', () => console.warn('Redis cache reconnecting'))
+
+  try {
+    await next.client.connect()
+    warnedUnavailable = false
+    console.info(`Redis cache connected (${config.cluster ? 'cluster' : 'single-node'})`)
+    return next
+  } catch (error) {
+    warn(error)
+    await next.client.disconnect().catch(() => undefined)
+    return null
+  }
+}
+
+async function getClient(): Promise<CacheConnection | null> {
   const config = cacheConfig()
   if (!config) return null
-  if (client?.isReady) return client
+  if (connectionClient && isReady(connectionClient)) return connectionClient
   if (connection) return connection
-  connection = (async () => {
-    const next = config.cluster ? createCluster({ rootNodes: [{ url: config.url }] }) : createClient({ url: config.url })
-    next.on('error', warn)
-    next.on('reconnecting', () => console.warn('Redis cache reconnecting'))
-    try {
-      await next.connect()
-      client = next
-      warnedUnavailable = false
-      console.info(`Redis cache connected (${config.cluster ? 'cluster' : 'single-node'})`)
-      return next
-    } catch (error) {
-      warn(error)
-      await next.disconnect().catch(() => undefined)
-      return null
-    }
-  })()
+  connection = createCacheConnection(config)
   const result = await connection
+  connectionClient = result
   connection = null
   return result
 }
 
-async function withClient<T>(operation: (redis: CacheClient) => Promise<T>, fallback: T): Promise<T> {
+async function withClient<T>(operation: (redis: CacheConnection) => Promise<T>, fallback: T): Promise<T> {
   const redis = await getClient()
   if (!redis) return fallback
   try {
@@ -65,11 +79,67 @@ async function withClient<T>(operation: (redis: CacheClient) => Promise<T>, fall
   }
 }
 
-export async function redisPing() { return withClient(async redis => (await redis.ping()) === 'PONG', false) }
+async function cachePing(redis: CacheConnection) {
+  const reply = redis.mode === 'standalone'
+    ? await redis.client.ping()
+    : await redis.client.sendCommand(undefined, true, ['PING'])
+  return reply === 'PONG'
+}
+
+async function cacheGet(redis: CacheConnection, key: string) {
+  return redis.mode === 'standalone'
+    ? await redis.client.get(key)
+    : await redis.client.sendCommand<string | null>(key, true, ['GET', key])
+}
+
+async function cacheSet(redis: CacheConnection, key: string, value: string, ttlSeconds: number) {
+  if (redis.mode === 'standalone') {
+    await redis.client.set(key, value, { EX: ttlSeconds })
+    return
+  }
+  await redis.client.sendCommand(key, false, ['SET', key, value, 'EX', String(ttlSeconds)])
+}
+
+async function cacheDelete(redis: CacheConnection, keys: string[]) {
+  if (!keys.length) return
+  if (redis.mode === 'standalone') {
+    await redis.client.del(keys)
+    return
+  }
+  await Promise.all(keys.map(key => redis.client.del(key)))
+}
+
+async function scanStandalone(redis: StandaloneRedisClient, match: string) {
+  const keys: string[] = []
+  for await (const batch of redis.scanIterator({ MATCH: match, COUNT: 100 })) {
+    keys.push(...batch.map(key => key.toString()))
+  }
+  return keys
+}
+
+async function scanCluster(redis: ClusterRedisClient, match: string) {
+  const keys = new Set<string>()
+  await Promise.all(redis.masters.map(async master => {
+    const node = await redis.nodeClient(master)
+    for await (const batch of node.scanIterator({ MATCH: match, COUNT: 100 })) {
+      for (const key of batch) keys.add(key.toString())
+    }
+  }))
+  return [...keys]
+}
+
+async function cacheScan(redis: CacheConnection, match: string) {
+  return redis.mode === 'standalone'
+    ? scanStandalone(redis.client, match)
+    : scanCluster(redis.client, match)
+}
+
+export async function redisPing() { return withClient(cachePing, false) }
 
 export async function redisGetJson<T>(key: string): Promise<T | null> {
   return withClient(async redis => {
-    const value = await redis.get(key)
+    const value = await cacheGet(redis, key)
+    if (typeof value !== 'string') return null
     if (!value) return null
     try { return JSON.parse(value) as T } catch { return null }
   }, null)
@@ -77,15 +147,14 @@ export async function redisGetJson<T>(key: string): Promise<T | null> {
 
 export async function redisSetJson(key: string, value: unknown, ttlSeconds = 60) {
   const serialized = JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item)
-  await withClient(async redis => { await redis.set(key, serialized, { EX: Math.max(1, Math.round(ttlSeconds)) }); return true }, false)
+  await withClient(async redis => { await cacheSet(redis, key, serialized, Math.max(1, Math.round(ttlSeconds))); return true }, false)
 }
 
 export async function redisDeleteKeys(prefix: string) {
   if (!prefix.trim()) return
   await withClient(async redis => {
-    const keys: string[] = []
-    for await (const key of redis.scanIterator({ MATCH: `${prefix}*`, COUNT: 100 })) keys.push(key)
-    if (keys.length) await redis.del(keys)
+    const keys = await cacheScan(redis, `${prefix}*`)
+    await cacheDelete(redis, keys)
     return true
   }, false)
 }
@@ -108,8 +177,8 @@ export async function cachedJson<T>(key: string, loader: () => Promise<T>, ttlSe
 }
 
 export async function closeRedis() {
-  const redis = client
-  client = null
+  const redis = connectionClient
+  connectionClient = null
   connection = null
-  if (redis?.isOpen) await redis.quit().catch(() => redis.disconnect().catch(() => undefined))
+  if (redis?.client.isOpen) await redis.client.quit().catch(() => redis.client.disconnect().catch(() => undefined))
 }
