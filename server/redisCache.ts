@@ -9,6 +9,7 @@ type CacheConfig = { url: string; cluster: boolean }
 let connectionClient: CacheConnection | null = null
 let connection: Promise<CacheConnection | null> | null = null
 let warnedUnavailable = false
+let retryAfter = 0
 const inFlight = new Map<string, Promise<unknown>>()
 export const redisNamespace = `marengo:${process.env.NODE_ENV ?? 'development'}`
 
@@ -38,8 +39,8 @@ function isReady(redis: CacheConnection) {
 
 async function createCacheConnection(config: CacheConfig): Promise<CacheConnection | null> {
   const next: CacheConnection = config.cluster
-    ? { mode: 'cluster', client: createCluster({ rootNodes: [{ url: config.url }] }) }
-    : { mode: 'standalone', client: createClient({ url: config.url }) }
+    ? { mode: 'cluster', client: createCluster({ rootNodes: [{ url: config.url }], defaults: { socket: { connectTimeout: 1000, reconnectStrategy: false }, disableOfflineQueue: true } }) }
+    : { mode: 'standalone', client: createClient({ url: config.url, socket: { connectTimeout: 1000, reconnectStrategy: false }, disableOfflineQueue: true }) }
 
   next.client.on('error', warn)
   next.client.on('reconnecting', () => console.warn('Redis cache reconnecting'))
@@ -60,22 +61,26 @@ async function getClient(): Promise<CacheConnection | null> {
   const config = cacheConfig()
   if (!config) return null
   if (connectionClient && isReady(connectionClient)) return connectionClient
+  if (Date.now() < retryAfter) return null
   if (connection) return connection
   connection = createCacheConnection(config)
   const result = await connection
   connectionClient = result
+  if (!result) retryAfter = Date.now() + 30000
   connection = null
   return result
 }
 
 async function withClient<T>(operation: (redis: CacheConnection) => Promise<T>, fallback: T): Promise<T> {
-  const redis = await getClient()
-  if (!redis) return fallback
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    return await Promise.race([operation(redis), new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Redis operation timed out')), Number(process.env.REDIS_TIMEOUT_MS ?? 500)))])
+    const work = async () => { const redis = await getClient(); return redis ? operation(redis) : fallback }
+    return await Promise.race([work(), new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error('Redis operation timed out')), Number(process.env.REDIS_TIMEOUT_MS ?? 500)) })])
   } catch (error) {
     warn(error)
     return fallback
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
@@ -146,6 +151,7 @@ export async function redisGetJson<T>(key: string): Promise<T | null> {
 }
 
 export async function redisSetJson(key: string, value: unknown, ttlSeconds = 60) {
+  if (!cacheConfig()) return
   const serialized = JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item)
   await withClient(async redis => { await cacheSet(redis, key, serialized, Math.max(1, Math.round(ttlSeconds))); return true }, false)
 }

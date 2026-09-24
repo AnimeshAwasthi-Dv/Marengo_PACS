@@ -17,6 +17,7 @@ import { workspaceRouter } from './workspaceRouter'
 import { adminConsoleRouter } from './adminConsoleRouter'
 import { requireWorkspaceCapability, workspaceAccess } from './workspaceAccess'
 import cors from 'cors'
+import compression from 'compression'
 import crypto from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import dotenv from 'dotenv'
@@ -249,6 +250,7 @@ function requireDeploymentFeature(feature: 'billing' | 'calling' | 'notification
 }
 
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') ?? true }))
+app.use(compression({ threshold: 1024 }))
 app.use('/api', (req, res, next) => {
   if (process.env.DATABASE_READ_ONLY === 'true' && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)
     && !(req.method === 'POST' && req.path === '/auth/login')) return res.status(403).json({ message: 'Production database is read-only. Changes are disabled.' })
