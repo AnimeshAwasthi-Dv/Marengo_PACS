@@ -33,7 +33,7 @@ export function startLiveRefresh(refresh: (signal: AbortSignal) => Promise<void>
     finally {
       clearTimeout(deadline);
       running = false;
-      if (!stopped) schedule(pending ? 0 : Math.min(interval * 2 ** failures, 30_000));
+      if (!stopped) schedule(pending ? 0 : Math.min(interval * 2 ** failures, Math.max(interval, 30_000)));
       pending = false;
     }
   }

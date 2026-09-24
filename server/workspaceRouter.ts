@@ -1,11 +1,11 @@
+import { collectServiceHealth } from './serviceHealth';
 import { Router } from 'express';
 import { prisma } from './db';
 import { requireAuth } from './auth';
 import { marengoTariff } from './marengoTariff';
 import { studyTracking } from './studyTracking';
-import { telegramConfig, telegramAlertConfig } from './telegramPolicy';
 import { setWorklistPriority } from './worklistPriority';
-import { redisNamespace, redisPing } from './redisCache';
+import { redisNamespace } from './redisCache';
 import { requireWorkspaceCapability, workspaceAccess } from './workspaceAccess';
 import { csvDocument, durationSeconds, istTimestamp, statisticsRange, summarizeStudies, type StatisticsRow } from './workspaceStatistics';
 import { recordBillingEvent, repriceUninvoicedZeroBillingTransactions } from './billing';
@@ -125,7 +125,7 @@ async function collectStatistics(clientIds: string[] | null, range: ReturnType<t
   const periodReports = await prisma.reportReview.findMany({ where: { ...scope, status: { in: ['APPROVED', 'PUSHED'] }, OR: [{ approvedAt: period }, { approvedAt: null, pushedAt: period }, { approvedAt: null, pushedAt: null, generatedAt: period }] }, select: reportSelect, take: MAX_ROWS + 1 });
   const studies = await prisma.availableBridgeStudy.findMany({
     where: { ...scope, OR: [{ firstDetectedAt: period }, { firstDetectedAt: null, createdAt: period }, { processingJob: { completedAt: period } }, { studyInstanceUid: { in: periodReports.flatMap(r => r.studyUid ? [r.studyUid] : []) } }] },
-    select: { id: true, clientId: true, studyInstanceUid: true, patientName: true, patientId: true, accessionNumber: true, modalities: true, studyDescription: true, firstDetectedAt: true, createdAt: true,
+    select: { id: true, clientId: true, studyInstanceUid: true, patientName: true, patientId: true, accessionNumber: true, modalities: true, studyDescription: true, firstDetectedAt: true, createdAt: true, submittedAt: true,
       client: { select: { name: true } }, processingJob: { select: { id: true, completedAt: true, status: true, demoMode: true, serviceType: true, workflowType: true, priority: true, imageCount: true } } }, take: MAX_ROWS + 1,
   });
   const finalReports = studies.length ? await prisma.reportReview.findMany({ where: { ...scope, status: { in: ['APPROVED', 'PUSHED'] }, studyUid: { in: studies.map(s => s.studyInstanceUid) } }, select: reportSelect, take: MAX_ROWS + 1, orderBy: { generatedAt: 'desc' } }) : [];
@@ -177,7 +177,7 @@ async function collectStatistics(clientIds: string[] | null, range: ReturnType<t
     const billingServiceName = study.processingJob ? serviceNameForType(study.processingJob.serviceType) : null;
     return { id: study.id, clientId: study.clientId, center: study.client.name, patient: study.patientName ?? '', patientId: study.patientId ?? '', accession: study.accessionNumber ?? '', modality: study.modalities.join(', '), description: study.studyDescription ?? '', studyUid: study.studyInstanceUid, jobId: study.processingJob?.id ?? null, demo: study.processingJob?.demoMode ?? false,
       billingServiceName, billingUnits: xrayBillableUnits(billingServiceName, study.processingJob?.imageCount), workflowType: study.processingJob?.workflowType ?? null, priority: study.processingJob?.priority ?? null,
-      received, processed: processedAt(study.processingJob), reported, tatSeconds: durationSeconds(received, reported), tbScore: tbScore(report), replacementCount: replacement.count, replacementHistory: replacement.history };
+      received, processed: processedAt(study.processingJob), reported, tatSeconds: durationSeconds(iso(study.submittedAt), reported), tbScore: tbScore(report), replacementCount: replacement.count, replacementHistory: replacement.history };
   });
   for (const job of jobs) {
     const billingServiceName = serviceNameForType(job.serviceType);
@@ -251,7 +251,13 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
       if (ids !== null && !ids.includes(centerId)) return res.status(403).json({ message: 'Center is outside your account scope.' });
       ids = [centerId];
     }
-    const result = await collectStatistics(ids, range, view === 'analytics' ? 'received' : 'activity');
+    let result = await collectStatistics(ids, range, view === 'analytics' ? 'received' : 'activity');
+    const modalities = [...new Set(result.rows.flatMap(row => row.modality.split(',').map(value => value.trim()).filter(Boolean)))].sort();
+    const modality = String(req.query.modality ?? '').trim().toUpperCase();
+    if (modality) {
+      const rows = result.rows.filter(row => row.modality.split(',').some(value => value.trim().toUpperCase() === modality));
+      result = { rows, ...summarizeStudies(rows, rows.flatMap(row => row.reported ? [{ at: row.reported }] : []), range) };
+    }
     const centers = await prisma.client.findMany({ where: access.clientIds === null ? {} : { id: { in: access.clientIds } }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
     const processedRows = result.rows.filter(row => within(row.processed, range));
     const transactions = view === 'billing' ? await reconcileMissingBillingRows(ids, processedRows, await billingTransactionsForRows(ids, processedRows)) : [];
@@ -282,7 +288,7 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
     }
     const rows = view === 'billing' ? billingRows : result.rows;
     const page = Math.min(Math.max(1, Math.ceil(rows.length / 50)), Math.max(1, Number.parseInt(String(req.query.page ?? 1), 10) || 1));
-    res.json({ ...result, rows: rows.slice((page - 1) * 50, page * 50), total: rows.length, page, pageSize: 50, centers, charges, unrecorded: billingRows.filter(r => r.billingStatus === 'NOT_RECORDED').length, from: range.from, to: range.to, updatedAt: new Date().toISOString() });
+    res.json({ ...result, modalities, tatDaily: result.daily.map(day => { const samples = result.rows.filter(row => row.reported && row.tatSeconds !== null && new Date(Date.parse(row.reported) + 19800000).toISOString().slice(0, 10) === day.day); return { day: day.day, minutes: samples.length ? samples.reduce((sum, row) => sum + row.tatSeconds!, 0) / samples.length / 60 : null, samples: samples.length }; }), rows: rows.slice((page - 1) * 50, page * 50), total: rows.length, page, pageSize: 50, centers, charges, unrecorded: billingRows.filter(r => r.billingStatus === 'NOT_RECORDED').length, from: range.from, to: range.to, updatedAt: new Date().toISOString() });
   } catch (error) {
     if (error instanceof Error && 'status' in error && error.status === 422) return res.status(422).json({ message: error.message });
     next(error);
@@ -291,32 +297,5 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
 
 workspaceRouter.get('/healthcheck', requireWorkspaceCapability('healthcheck'), async (_req, res) => {
   const access: Awaited<ReturnType<typeof workspaceAccess>> = res.locals.workspaceAccess;
-  const scope = scoped(access.clientIds);
-  const started = Date.now();
-  await prisma.$queryRaw`SELECT 1`;
-  const rows = [
-    { id: 'api', service: 'Portal API', center: 'Shared platform', status: 'Healthy', detail: 'Authenticated request completed', observedAt: new Date().toISOString() },
-    { id: 'database', service: 'Database', center: 'Shared platform', status: 'Healthy', detail: `Read probe completed in ${Date.now() - started} ms`, observedAt: new Date().toISOString() },
-  ];
-  const cacheConfigured = Boolean(process.env.REDIS_URL?.trim() || process.env.REDIS_HOST);
-  const telegram = telegramConfig();
-  const tatAlerts = telegramAlertConfig();
-  rows.push({ id: 'telegram-tat', service: 'Telegram near-breach alerts', center: 'Scoped Marengo centers', status: !tatAlerts.enabled ? 'Disabled' : tatAlerts.missing.length ? 'Not configured' : 'Configured', detail: !tatAlerts.enabled ? 'Near-breach sending disabled' : tatAlerts.missing.length ? `Missing: ${tatAlerts.missing.join(', ')}` : `Warn ${tatAlerts.leadMinutes} minutes before TAT; configuration only, not a connectivity probe`, observedAt: null });
-  const telegramEvents = await prisma.notificationOutbox.findMany({ where: { eventType: 'TELEGRAM_STUDY_PROCESSING', ...(access.clientIds === null ? {} : { OR: access.clientIds.map(id => ({ payload: { path: ['clientId'], equals: id } })) }) }, orderBy: { createdAt: 'desc' }, take: 100 });
-  rows.push({ id: 'telegram', service: 'Telegram study alerts', center: 'Scoped centers', status: !telegram.enabled ? 'Disabled' : telegram.missing.length ? 'Not configured' : telegramEvents.some(e => ['FAILED', 'DEAD'].includes(e.status)) ? 'Needs attention' : 'Configured', detail: !telegram.enabled ? 'Sending disabled; no Telegram messages will be sent' : telegram.missing.length ? `Missing: ${telegram.missing.join(', ')}` : `${telegramEvents.filter(e => e.status === 'SENT').length} sent / ${telegramEvents.filter(e => ['PENDING', 'SENDING'].includes(e.status)).length} queued / ${telegramEvents.filter(e => ['FAILED', 'DEAD'].includes(e.status)).length} failed (latest 100); not a connectivity probe`, observedAt: iso(telegramEvents[0]?.processedAt) });
-  const cacheOk = cacheConfigured && await redisPing();
-  rows.push({ id: 'cache', service: 'Redis cache', center: 'Shared platform', status: !cacheConfigured ? 'Not configured' : cacheOk ? 'Healthy' : 'Needs attention', detail: !cacheConfigured ? 'Optional cache; database-backed live updates remain available' : cacheOk ? 'PING probe completed' : 'PING probe failed; database fallback active', observedAt: new Date().toISOString() });
-  const services = await prisma.clientService.findMany({ where: scope, select: { id: true, status: true, validFrom: true, validUntil: true, client: { select: { name: true } }, service: { select: { name: true, enabled: true } }, pacsConfig: { select: { id: true } } } });
-  for (const s of services) rows.push({ id: s.id, service: s.service.name, center: s.client.name, status: s.status !== 'ACTIVE' || !s.service.enabled ? 'Disabled' : s.validUntil < new Date() ? 'Expired' : s.validFrom > new Date() ? 'Not started' : 'Enabled', detail: s.pacsConfig ? 'PACS configured; network connectivity not verified' : 'PACS endpoint not configured', observedAt: new Date().toISOString() });
-  const centers = await prisma.client.findMany({ where: access.clientIds === null ? { kind: 'CENTER' } : { id: { in: access.clientIds }, kind: 'CENTER' }, select: { id: true, name: true, studySyncEnabled: true } });
-  for (const center of centers) {
-    const latest = await prisma.availableBridgeStudy.findFirst({ where: { clientId: center.id }, orderBy: { lastSyncedAt: 'desc' }, select: { lastSyncedAt: true } });
-    rows.push({ id: `${center.id}:sync`, service: 'Study synchronization', center: center.name, status: !center.studySyncEnabled ? 'Disabled' : latest ? 'Observed' : 'No activity', detail: 'Last study sync observation; not an agent heartbeat', observedAt: iso(latest?.lastSyncedAt) });
-    const jobs = await prisma.processingJob.groupBy({ by: ['status'], where: { clientId: center.id, updatedAt: { gte: new Date(Date.now() - 86400000) } }, _count: { _all: true } });
-    rows.push({ id: `${center.id}:jobs`, service: 'Processing activity (24h)', center: center.name, status: jobs.some(j => /fail|error/i.test(j.status)) ? 'Needs attention' : jobs.length ? 'Observed' : 'No activity', detail: jobs.map(j => `${j.status}: ${j._count._all}`).join(' / ') || 'No job updates in the last 24 hours', observedAt: new Date().toISOString() });
-    const reports = await prisma.reportReview.findMany({ where: { clientId: center.id }, select: { id: true } });
-    const delivery = await prisma.pacsReturnJob.findFirst({ where: { reportReviewId: { in: reports.map(r => r.id) } }, orderBy: { updatedAt: 'desc' }, select: { status: true, updatedAt: true, acknowledgedAt: true } });
-    rows.push({ id: `${center.id}:delivery`, service: 'PACS report delivery', center: center.name, status: delivery ? /fail|error/i.test(delivery.status) ? 'Needs attention' : 'Observed' : 'No activity', detail: delivery ? `Latest delivery: ${delivery.status}${delivery.acknowledgedAt ? ' / acknowledged' : ''}` : 'No delivery attempts recorded', observedAt: iso(delivery?.updatedAt) });
-  }
-  res.json({ rows, updatedAt: new Date().toISOString() });
+  res.json(await collectServiceHealth(access.clientIds));
 });

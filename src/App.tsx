@@ -1,7 +1,10 @@
+import { ProcessingActions } from './ProcessingActions';
+import { FollowUpsView } from './FollowUps';
 import { lazy } from 'react';
 import { isSpecialXrayStudy } from './specialXray';
 import { api } from './lib/api';
-import type { ClientStatus, ReturnFormat, WorkflowType, User, ClientPortalRole, Service, StudySyncConfig, ClientService, Client, BridgeStudy, Job, UsageLog, ProcessingJob, ReportSetting, RadiologistProfile, ReportReview, PatientProfile, PatientStudyArchive, PatientFollowUp, RadiologistFeedbackItem, BillingInvoice, PricingRule, RazorpayPaymentLinkResponse, ProviderSettlement, BillingSnapshot, ClientBillingUsage, TeleradiologyProvider, ProviderDashboard, RadiologistAvailability, AuditLog, CallOptions, ReportCallBooking, SupportTicketMessage, SupportTicket, NotificationRecipient, WhatsAppBotConfig, AdminOverview, ModalityTab, SortDirection, FilterOption, PasswordPromptState, PatientArchiveFile, PortalNotification, WorkspaceAction, WorklistMedia, BrowserSpeechRecognition, WindowWithSpeechRecognition } from './types/portal';
+import { loadStudyPages } from './lib/studyPages';
+import type { ClientStatus, ReturnFormat, WorkflowType, User, ClientPortalRole, Service, StudySyncConfig, ClientService, Client, BridgeStudy, Job, UsageLog, ProcessingJob, ReportSetting, RadiologistProfile, ReportReview, PatientProfile, PatientStudyArchive, RadiologistFeedbackItem, BillingInvoice, PricingRule, RazorpayPaymentLinkResponse, ProviderSettlement, BillingSnapshot, ClientBillingUsage, TeleradiologyProvider, ProviderDashboard, RadiologistAvailability, AuditLog, CallOptions, ReportCallBooking, SupportTicketMessage, SupportTicket, NotificationRecipient, WhatsAppBotConfig, AdminOverview, ModalityTab, SortDirection, FilterOption, PasswordPromptState, PatientArchiveFile, PortalNotification, WorkspaceAction, WorklistMedia, BrowserSpeechRecognition, WindowWithSpeechRecognition } from './types/portal';
 import { ExternalViewerPane } from "./features/viewer/ExternalViewerPane";
 import {
   Activity,
@@ -45,7 +48,7 @@ import {
   Share2,
   Send,
   ShieldCheck,
-  
+
   UploadCloud,
   UserCog,
   UserRound,
@@ -66,8 +69,9 @@ import { createPortal } from "react-dom";
 
 
 import dectrocelBrandLogo from "./assets/dectrocel-brand.jpeg";
-import marengoHospitalHero from "./assets/marengo-asia-hospital-login.png";
-import marengoBrandLogo from "./assets/marengo-asia-emblem.png";
+import marengoHospitalHero from "./assets/marengo-asia-hospital-login.webp";
+import marengoBrandLogo from "./assets/marengo-asia-emblem.webp";
+import marengoSmallLogo from "./assets/marengo-asia-emblem-small.webp";
 import { istTimestamp, worklistDuration, worklistTatStart, worklistTatEnd, worklistStatus, worklistPriority, worklistFacets, worklistModality, worklistModalityLabel } from "./pacsWorklist";
 import { workspacePermissions, assignableCenterRoles, clientWorkspaceTabs } from "./workspacePermissions";
 
@@ -100,6 +104,7 @@ const AdminConsole = lazy(() => import('./AdminConsole').then(module => ({ defau
 const AdminEvidence = lazy(() => import('./AdminConsole').then(module => ({ default: module.AdminEvidence })));
 const WorkspaceStatistics = lazy(() => import('./WorkspaceOperations').then(module => ({ default: module.WorkspaceStatistics })));
 const WorkspaceHealthcheck = lazy(() => import('./WorkspaceOperations').then(module => ({ default: module.WorkspaceHealthcheck })));
+const TechnicalAlerts = lazy(() => import('./TechnicalAlerts'));
 const WorkspaceBilling = lazy(() => import('./WorkspaceBilling').then(module => ({ default: module.WorkspaceBilling })));
 
 const clientPortalRoleOptions: Array<[ClientPortalRole, string]> = [
@@ -208,11 +213,6 @@ const workflowLabels: Record<WorkflowType, string> = {
   TELERADIOLOGY_ONLY: "Radiologist review",
   AI_TELERADIOLOGY: "AI + Teleradiology",
 };
-const workflowOptions: Array<[WorkflowType, string]> = [
-  ["AI_ONLY", workflowLabels.AI_ONLY],
-  ["TELERADIOLOGY_ONLY", workflowLabels.TELERADIOLOGY_ONLY],
-  ["AI_TELERADIOLOGY", workflowLabels.AI_TELERADIOLOGY],
-];
 const providerWorkflowLabels: Record<string, string> = {
   TELERADIOLOGY_ONLY: "Radiologist review",
   AI_TELERADIOLOGY: "Teleradiology review",
@@ -1530,9 +1530,7 @@ function ClientsView({
     email: "",
     portalRole: "FRONT_DESK" as ClientPortalRole,
   });
-  const [serviceForm, setServiceForm] = useState(
-    initialServiceForm(overview.services),
-  );
+
   const [discountPercent, setDiscountPercent] = useState("0");
   const [demoModeEnabled, setDemoModeEnabled] = useState(false);
   const [demoStudyLimit, setDemoStudyLimit] = useState("");
@@ -1588,10 +1586,7 @@ function ClientsView({
         ? ""
         : String(result.client.demoStudyLimit),
     );
-    setServiceForm({
-      ...initialServiceForm(overview.services),
-      clientId: result.client.id,
-    });
+
     notice(
       `Client login created for ${result.user.email}. The one-time password is shown in the account details.`,
     );
@@ -1617,34 +1612,6 @@ function ClientsView({
     notice(
       `${clientPortalRoleLabel(result.user.portalRole)} login created for ${result.user.email}.`,
     );
-    await reload();
-  }
-
-  async function assignService(
-    event: FormEvent,
-    clientId = serviceForm.clientId,
-  ) {
-    event.preventDefault();
-    const postpaidTeleradiology = isTeleradiologyWorkflowType(
-      serviceForm.workflowType,
-    );
-    await api<ClientService>(`/api/admin/clients/${clientId}/services`, token, {
-      method: "POST",
-      body: JSON.stringify({
-        serviceName: serviceForm.serviceName,
-        workflowType: serviceForm.workflowType,
-        teleradiologyProviderCode:
-          serviceForm.workflowType === "AI_ONLY" ? undefined : "RENEWIST",
-        credits: postpaidTeleradiology ? 0 : Number(serviceForm.credits),
-        validUntil: new Date(
-          `${postpaidTeleradiology ? "2099-12-31" : serviceForm.validUntil}T23:59:59Z`,
-        ).toISOString(),
-        returnFormat: serviceForm.returnFormat,
-        outsourceTeleradiology:
-          postpaidTeleradiology ? true : false,
-      }),
-    });
-    notice("Service assigned for Bridge processing.");
     await reload();
   }
 
@@ -1680,20 +1647,6 @@ function ClientsView({
     await reload();
   }
 
-  async function revokeClientService(client: Client, service: ClientService) {
-    const confirmed = window.confirm(
-      `Revoke ${service.service.name} for ${client.name}? The service will stop being available for this client.`,
-    );
-    if (!confirmed) return;
-    await api<ClientService>(
-      `/api/admin/clients/${client.id}/services/${service.id}/revoke`,
-      token,
-      { method: "PATCH" },
-    );
-    notice(`${service.service.name} revoked for ${client.name}.`);
-    await reload();
-  }
-
   function openClientProfile(client: Client) {
     setSelectedClientId(client.id);
     setGeneratedPassword("");
@@ -1702,10 +1655,7 @@ function ClientsView({
     setDemoStudyLimit(
       client.demoStudyLimit == null ? "" : String(client.demoStudyLimit),
     );
-    setServiceForm({
-      ...initialServiceForm(overview.services),
-      clientId: client.id,
-    });
+
   }
 
   async function saveBillingDiscount(client: Client, event: FormEvent) {
@@ -1851,8 +1801,7 @@ function ClientsView({
               Client accounts
             </h2>
             <p className="text-sm text-slate-500">
-              Create clients, open profiles, and allot PACS services from one
-              place.
+              Create center accounts and manage their profiles.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1881,7 +1830,6 @@ function ClientsView({
               <tr className="border-b border-slate-200 text-xs uppercase text-slate-500">
                 <th className="py-3 pr-4">Center</th>
                 <th className="py-3 pr-4">Login</th>
-                <th className="py-3 pr-4">Services</th>
                 <th className="py-3 pr-4">Status</th>
                 <th className="py-3 pr-4">Action</th>
               </tr>
@@ -1902,16 +1850,6 @@ function ClientsView({
                   </td>
                   <td className="py-4 pr-4 font-mono text-xs text-slate-600">
                     {client.email}
-                  </td>
-                  <td className="py-4 pr-4">
-                    {client.services.map((item) => (
-                      <span
-                        className="mr-1.5 inline-flex rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600"
-                        key={item.id}
-                      >
-                        {displayServiceName(item.service.name)}
-                      </span>
-                    ))}
                   </td>
                   <td className="py-4 pr-4">
                     <StatusBadge status={client.status} />
@@ -1973,9 +1911,8 @@ function ClientsView({
             setSelectedClientId("");
             setGeneratedPassword("");
           }}
-          wide
         >
-          <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
+          <div className="grid min-w-0 grid-cols-1 gap-5">
             <section className="soft-card rounded-lg p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -2274,203 +2211,9 @@ function ClientsView({
                   </button>
                 </div>
               </form>
-              <h3 className="mt-6 text-sm font-bold uppercase text-slate-500">
-                Allotted services
-              </h3>
-              <div className="mt-3 space-y-3">
-                {selectedClient.services.length ? (
-                  selectedClient.services.map((item) => {
-                    const postpaidTeleradiology = isTeleradiologyWorkflowType(
-                      item.workflowType ??
-                        item.pacsConfig?.workflowType ??
-                        "AI_ONLY",
-                    );
-                    return (
-                      <div
-                        className="rounded-lg border border-slate-200 bg-white p-4"
-                        key={item.id}
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <p className="font-semibold text-slate-950">
-                            {displayServiceName(item.service.name)}
-                          </p>
-                          <StatusBadge status={item.status} />
-                        </div>
-                        <div className="mt-3 grid gap-2 text-sm text-slate-600 md:grid-cols-2">
-                          {postpaidTeleradiology ? (
-                            <>
-                              <p>
-                                <span className="font-semibold">Billing:</span>{" "}
-                                Postpaid monthly
-                              </p>
-                              <p>
-                                <span className="font-semibold">Usage:</span>{" "}
-                                Active regardless of payment status
-                              </p>
-                            </>
-                          ) : (
-                            <>
-                              <p>
-                                <span className="font-semibold">
-                                  Credit left:
-                                </span>{" "}
-                                {creditLeft(item).toLocaleString()} /{" "}
-                                {item.credits.toLocaleString()}
-                              </p>
-                              <p>
-                                <span className="font-semibold">
-                                  Valid until:
-                                </span>{" "}
-                                {toDate(item.validUntil)}
-                              </p>
-                            </>
-                          )}
-                          <p>
-                            <span className="font-semibold">Workflow:</span>{" "}
-                            {
-                              workflowLabels[
-                                item.workflowType ??
-                                  item.pacsConfig?.workflowType ??
-                                  "AI_ONLY"
-                              ]
-                            }
-                          </p>
-                          {postpaidTeleradiology ? (
-                            <p>
-                              <span className="font-semibold">
-                                Review route:
-                              </span>{" "}
-                              Renewist workflow
-                            </p>
-                          ) : null}
-                          {item.pacsConfig ? (
-                            <>
-                              <p>
-                                <span className="font-semibold">
-                                  Portal receive:
-                                </span>{" "}
-                                {item.pacsConfig.ec2PublicIp}:
-                                {item.pacsConfig.receivingPort} /{" "}
-                                {item.pacsConfig.aeTitle}
-                              </p>
-                              <p>
-                                <span className="font-semibold">
-                                  Report push PACS:
-                                </span>{" "}
-                                {item.pacsConfig.clientPacsIp ?? "-"}:
-                                {item.pacsConfig.clientPacsPort ?? "-"} /{" "}
-                                {item.pacsConfig.clientPacsAeTitle ?? "-"}
-                              </p>
-                            </>
-                          ) : null}
-                        </div>
-                        <button
-                          className="mt-3 rounded-md border border-rose-200 px-3 py-2 text-xs font-bold text-rose-700 disabled:opacity-50"
-                          disabled={item.status === "REVOKED"}
-                          onClick={() =>
-                            revokeClientService(selectedClient, item)
-                          }
-                          type="button"
-                        >
-                          Revoke service
-                        </button>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <p className="rounded-lg border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-600">
-                    No service allotted yet.
-                  </p>
-                )}
-              </div>
+              <p className="pw-help">All Marengo services are available to this center.</p>
             </section>
-            <FormCard
-              title="Allot PACS service"
-              onSubmit={(event) => assignService(event, selectedClient.id)}
-              submitLabel="Allot service"
-            >
-              <div className="md:col-span-2">
-                <SelectInput
-                  label="Service"
-                  value={serviceForm.serviceName}
-                  onChange={(value) =>
-                    setServiceForm({ ...serviceForm, serviceName: value })
-                  }
-                  options={overview.services.map((service) => [
-                    service.name,
-                    displayServiceName(service.name),
-                  ])}
-                />
-              </div>
-              <SelectInput
-                label="Workflow"
-                value={serviceForm.workflowType}
-                onChange={(value) =>
-                  setServiceForm({
-                    ...serviceForm,
-                    workflowType: value as WorkflowType,
-                  })
-                }
-                options={workflowOptions}
-              />
-              <SelectInput
-                label="Return format"
-                value={serviceForm.returnFormat}
-                onChange={(value) =>
-                  setServiceForm({
-                    ...serviceForm,
-                    returnFormat: value as ReturnFormat,
-                  })
-                }
-                options={[
-                  ["DICOM_ENCAPSULATED_PDF", "DICOM Encapsulated PDF"],
-                  ["DICOM_SECONDARY_CAPTURE", "DICOM Secondary Capture"],
-                  ["HL7", "HL7"],
-                  ["PDF", "PDF"],
-                  ["DOCX", "DOCX"],
-                  ["HTML", "HTML"],
-                ]}
-              />
-              {!isTeleradiologyWorkflowType(serviceForm.workflowType) ? (
-                <>
-                  <TextInput
-                    label="Credits"
-                    value={serviceForm.credits}
-                    onChange={(value) =>
-                      setServiceForm({ ...serviceForm, credits: value })
-                    }
-                  />
-                  <TextInput
-                    label="Valid until"
-                    type="date"
-                    value={serviceForm.validUntil}
-                    onChange={(value) =>
-                      setServiceForm({ ...serviceForm, validUntil: value })
-                    }
-                  />
-                </>
-              ) : null}
-              {isTeleradiologyWorkflowType(serviceForm.workflowType) ? (
-                <>
-                  {serviceForm.workflowType === "AI_TELERADIOLOGY" ? (
-                    <div className="md:col-span-2 rounded-md border border-sky-100 bg-sky-50 px-3 py-2 text-sm font-semibold text-slate-700">
-                      AI + Teleradiology submits the AI report and study to
-                      Renewist API.
-                    </div>
-                  ) : (
-                    <div className="md:col-span-2 rounded-md border border-sky-100 bg-sky-50 px-3 py-2 text-sm font-semibold text-slate-700">
-                      Radiologist review submits the study directly to Renewist
-                      API.
-                    </div>
-                  )}
-                  <div className="md:col-span-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm font-semibold leading-6 text-emerald-800">
-                    Teleradiology is postpaid. Monthly invoices are generated at
-                    month end; usage remains active regardless of payment
-                    status.
-                  </div>
-                </>
-              ) : null}
-            </FormCard>
+
           </div>
         </Modal>
       ) : null}
@@ -2577,18 +2320,6 @@ function ClientsView({
       {passwordPrompt}
     </div>
   );
-}
-
-function initialServiceForm(services: Service[]) {
-  return {
-    clientId: "",
-    serviceName: services[0]?.name ?? "",
-    workflowType: "TELERADIOLOGY_ONLY" as WorkflowType,
-    credits: "1000",
-    validUntil: "2027-12-31",
-    returnFormat: "DICOM_ENCAPSULATED_PDF" as ReturnFormat,
-    outsourceTeleradiology: true,
-  };
 }
 
 function Modal({
@@ -5355,14 +5086,14 @@ function ShareReportButton({
     setError("");
     setCopied(false);
     try {
-      const result = await api<{ token: string; expiresAt?: string }>(`/api/reports/${encodeURIComponent(report.id)}/public-share${regenerate ? "?regenerate=true" : ""}`, token, {
+      const result = await api<{ token: string; expiresAt?: string; url?: string; qr?: string }>(`/api/reports/${encodeURIComponent(report.id)}/public-share${regenerate ? "?regenerate=true" : ""}`, token, {
         method: "POST",
         body: regenerate ? JSON.stringify({ regenerate: true }) : undefined,
       });
-      const url = `${window.location.origin}/shared/${encodeURIComponent(result.token)}`;
+      const url = result.url || `${window.location.origin}/shared/${encodeURIComponent(result.token)}`;
       setShareUrl(url);
       setExpiresAt(result.expiresAt ?? "");
-      setQrCode(await (await import("qrcode")).default.toDataURL(url, { width: 320, margin: 2, errorCorrectionLevel: "M" }));
+      setQrCode(result.qr ?? await (await import("qrcode")).default.toDataURL(url, { width: 320, margin: 2, errorCorrectionLevel: "M" }));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to create a share link.");
     } finally {
@@ -7501,8 +7232,8 @@ function WhatsAppBotView({
     return <EmptyState message="Loading WhatsApp bot configuration..." />;
 
   return (
-    <div className="grid gap-6">
-      <section className="soft-card rounded-lg p-5">
+    <div className="grid gap-6 pw-whatsapp-sections">
+      <details><summary>Connection and delivery settings</summary><section className="soft-card rounded-lg p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold text-slate-950">
@@ -7587,7 +7318,7 @@ function WhatsAppBotView({
             readOnly
           />
         </div>
-      </section>
+      </section></details>
 
       {physicianConfiguration && <section className="soft-card rounded-lg p-5">
         <h3 className="font-semibold">Referring physician reports</h3>
@@ -7601,7 +7332,7 @@ function WhatsAppBotView({
         </div>)}</div> : <p className="mt-3 text-sm text-slate-500">No physician call requests yet.</p>}
       </section>}
 
-      <FormCard
+      <details><summary>Add notification recipient</summary><FormCard
         title="Add WhatsApp recipient"
         onSubmit={addRecipient}
         submitLabel={saving ? "Saving..." : "Add recipient"}
@@ -7690,7 +7421,7 @@ function WhatsAppBotView({
             <option value="ALL">All authorized features</option>
           </select>
         </label>
-      </FormCard>
+      </FormCard></details>
 
       <SimpleTable
         title="Notification recipients"
@@ -8328,113 +8059,6 @@ function PatientsView({
   );
 }
 
-function FollowUpsView({
-  token,
-  notice,
-}: {
-  token: string;
-  notice: (message: string) => void;
-}) {
-  const [items, setItems] = useState<PatientFollowUp[]>([]);
-  const [status, setStatus] = useState("");
-  async function load() {
-    setItems(
-      await api<PatientFollowUp[]>(
-        `/api/follow-ups${status ? `?status=${status}` : ""}`,
-        token,
-      ),
-    );
-  }
-  useEffect(() => {
-    void load();
-  }, [token, status]);
-  async function update(item: PatientFollowUp, next: string) {
-    await api(`/api/follow-ups/${item.id}`, token, {
-      method: "PATCH",
-      body: JSON.stringify({ status: next }),
-    });
-    notice("Follow-up status updated.");
-    await load();
-  }
-  return (
-    <section className="soft-card rounded-lg p-5">
-      <div className="mb-4 flex items-end justify-between gap-4">
-        <div>
-          <h2 className="text-lg font-semibold">Patient follow-ups</h2>
-          <p className="text-sm text-slate-500">
-            Upcoming, due, overdue, and completed follow-up tracking.
-          </p>
-        </div>
-        <label className="text-sm font-semibold">
-          Status
-          <select
-            className="ml-2 rounded-md border border-slate-200 p-2"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-          >
-            <option value="">All</option>
-            {["PENDING", "SCHEDULED", "OVERDUE", "COMPLETED", "CANCELLED"].map(
-              (x) => (
-                <option key={x}>{x}</option>
-              ),
-            )}
-          </select>
-        </label>
-      </div>
-      <div className="table-scroll">
-        <table className="w-full text-left text-sm">
-          <thead>
-            <tr>
-              {[
-                "Patient",
-                "Due",
-                "Reason",
-                "Related report",
-                "Status",
-                "Update",
-              ].map((x) => (
-                <th className="border-b py-3 pr-4" key={x}>
-                  {x}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((x) => (
-              <tr className="border-b" key={x.id}>
-                <td className="py-4 pr-4">
-                  {x.patient?.name}
-                  <div className="text-xs text-slate-500">
-                    {x.patient?.patientIdentifier}
-                  </div>
-                </td>
-                <td>{toDate(x.followUpDate)}</td>
-                <td>{x.reason}</td>
-                <td>{x.reportId || "-"}</td>
-                <td>
-                  <StatusBadge status={x.status} />
-                </td>
-                <td>
-                  <select
-                    className="rounded border p-2"
-                    value={x.status}
-                    onChange={(e) => void update(x, e.target.value)}
-                  >
-                    {["PENDING", "SCHEDULED", "COMPLETED", "CANCELLED"].map(
-                      (v) => (
-                        <option key={v}>{v}</option>
-                      ),
-                    )}
-                  </select>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
 
 function FeedbackDashboard({
   token,
@@ -9959,7 +9583,7 @@ function AdminContent({
     return (
       <AdminProcessingView
         jobs={overview.processingJobs ?? []}
-        bridgeStudies={overview.availableBridgeStudies ?? []}
+        bridgeStudies={overview.availableBridgeStudies ?? []} reload={reload}
         token={token}
         notice={notice}
         mode="studies"
@@ -9969,7 +9593,7 @@ function AdminContent({
     return (
       <AdminProcessingView
         jobs={overview.processingJobs ?? []}
-        bridgeStudies={overview.availableBridgeStudies ?? []}
+        bridgeStudies={overview.availableBridgeStudies ?? []} reload={reload}
         token={token}
         notice={notice}
         mode="processing"
@@ -9990,7 +9614,7 @@ function AdminContent({
     return (
       <AdminProcessingView
         jobs={overview.processingJobs ?? []}
-        bridgeStudies={overview.availableBridgeStudies ?? []}
+        bridgeStudies={overview.availableBridgeStudies ?? []} reload={reload}
         token={token}
         notice={notice}
         mode="studies"
@@ -10034,12 +9658,14 @@ function AdminProcessingView({
   bridgeStudies,
   token,
   notice,
+  reload,
   mode = "both",
 }: {
   jobs: ProcessingJob[];
   bridgeStudies: BridgeStudy[];
   token: string;
   notice: (message: string) => void;
+  reload: () => Promise<void>;
   mode?: "studies" | "processing" | "both";
 }) {
   const [selectedStudy, setSelectedStudy] = useState<BridgeStudy | null>(null);
@@ -10344,6 +9970,7 @@ function AdminProcessingView({
           onClose={() => setSelectedJob(null)}
           wide
         >
+          <ProcessingActions key={selectedJob.id} study={bridgeStudies.find(study => study.processingJobId === selectedJob.id) ?? selectedJob.bridgeStudy} token={token} reload={reload}/>
           <div className="record-detail-grid">
             <DetailField
               label="Center"
@@ -10991,9 +10618,9 @@ function WorkspaceActionDialog({ action, token, onClose, onSaved }: { action: Wo
     event.preventDefault(); setBusy(true); setError(""); setSuccess("");
     try {
       if (action.kind === "share") {
-        const result = await api<{ token: string; expiresAt: string }>(`/api/reports/${reportId}/public-share`, token, { method: "POST", body: JSON.stringify({ includeViewer }) });
-        const url = `${window.location.origin}/shared/${encodeURIComponent(result.token)}`;
-        setShare({ url, qr: await (await import("qrcode")).default.toDataURL(url, { width: 320, margin: 2, errorCorrectionLevel: "M" }), expiresAt: result.expiresAt });
+        const result = await api<{ token: string; expiresAt: string; url: string; qr: string }>(`/api/reports/${reportId}/public-share`, token, { method: "POST", body: JSON.stringify({ includeViewer }) });
+        const url = result.url || `${window.location.origin}/shared/${encodeURIComponent(result.token)}`;
+        setShare({ url, qr: result.qr, expiresAt: result.expiresAt });
       } else if (action.kind === "attach") {
         if (!files.length || files.length > 5) throw new Error("Select between one and five supporting files.");
         const body = new FormData();
@@ -11004,7 +10631,7 @@ function WorkspaceActionDialog({ action, token, onClose, onSaved }: { action: Wo
         setFiles([]); setSuccess("Supporting investigations attached."); await onSaved();
       } else {
         const slot = options?.slots.find((item) => item.id === slotId);
-        if (!slot) throw new Error("Select an available appointment.");
+        if (!slot) throw new Error("Select a preferred time window.");
         const booking = await api<ReportCallBooking>(`/api/client/reports/${reportId}/call-bookings`, token, { method: "POST", body: JSON.stringify({ availabilityId: slot.id, slotStart: slot.slotStart, durationMinutes: duration, communicationMode: mode, phoneNumber: phone }) });
         setBookings((items) => [booking, ...items]); setSlotId(""); setSuccess("Call requested. Confirmation is pending."); await onSaved();
       }
@@ -11035,12 +10662,11 @@ function WorkspaceActionDialog({ action, token, onClose, onSaved }: { action: Wo
         <button type="button" className="pw-revoke" disabled={busy} onClick={() => void revoke()}>Revoke existing links</button></>}
       {action.kind === "attach" && <><label className="pw-upload-zone"><UploadCloud size={28}/><strong>Supporting files</strong><span>Up to 5 files, 512 MB per file</span><input aria-label="Supporting files" type="file" multiple disabled={busy} onChange={(e) => { const selected = Array.from(e.target.files ?? []); if (selected.length > 5 || selected.some((file) => file.size > 512 * 1024 * 1024)) { setError("Choose up to 5 files, each no larger than 512 MB."); setFiles([]); } else { setError(""); setFiles(selected); } }}/></label><ul className="pw-file-list">{files.map((file, index) => <li key={`${file.name}-${index}`}><FileText size={15}/><span>{file.name}</span><button type="button" aria-label={`Remove ${file.name}`} disabled={busy} onClick={() => setFiles(files.filter((_, i) => i !== index))}><X size={14}/></button></li>)}</ul></>}
       {action.kind === "call" && <><label className="pw-field">Duration<select value={duration} disabled={busy} onChange={(e) => setDuration(Number(e.target.value))}>{[5, 10, 15, 20, 30, 60].map((value) => <option key={value} value={value}>{value} minutes</option>)}</select></label>
-        <label className="pw-field">Appointment (IST)<select aria-label="Appointment (IST)" required value={slotId} disabled={busy || loadingSlots} onChange={(e) => setSlotId(e.target.value)}><option value="">{loadingSlots ? "Loading appointments..." : "Select appointment"}</option>{options?.slots.map((slot) => <option key={slot.id} value={slot.id}>{istTimestamp(slot.slotStart).full} - {slot.radiologist?.fullName || "Radiologist"}</option>)}</select></label>
+        <label className="pw-field">Preferred time window (IST)<select aria-label="Preferred time window (IST)" required value={slotId} disabled={busy || loadingSlots} onChange={(e) => setSlotId(e.target.value)}><option value="">{loadingSlots ? "Loading appointments..." : "Select preferred time"}</option>{options?.slots.map((slot) => <option key={slot.id} value={slot.id}>{istTimestamp(slot.slotStart).full} - {slot.radiologist?.fullName || "Radiologist"}</option>)}</select></label>
         {!loadingSlots && options && !options.slots.length && <p className="pw-help">No appointments available for this duration.</p>}
-        <label className="pw-field">Call type<select aria-label="Call type" value={mode} disabled={busy} onChange={(e) => setMode(e.target.value)}><option value="BUILT_IN_MEETING">Online meeting</option><option value="PHONE_CALL">Phone call</option></select></label>
+        <label className="pw-field">Call type<select aria-label="Call type" value={mode} disabled={busy} onChange={(e) => setMode(e.target.value)}><option value="BUILT_IN_MEETING">Screen call</option><option value="PHONE_CALL">Phone call</option></select></label>
         {mode === "PHONE_CALL" && <label className="pw-field">Phone number<input type="tel" required value={phone} onChange={(e) => setPhone(e.target.value)}/></label>}
-        {options && <div className="pw-call-price">Estimated charge <strong>{new Intl.NumberFormat("en-IN", { style: "currency", currency: options.currency }).format(options.pricePerMinuteMinor * duration / 100)}</strong></div>}
-        {bookings.length > 0 && <><h4>Call requests</h4><ul className="pw-file-list">{bookings.map((booking) => <li key={booking.id}><CalendarDays size={15}/><span>{istTimestamp(booking.slotStart).full}<small>{booking.status?.replaceAll("_", " ")}</small></span></li>)}</ul></>}
+        {bookings.length > 0 && <><h4>Call requests</h4><ul className="pw-file-list">{bookings.map((booking) => <li key={booking.id}><CalendarDays size={15}/><span>{istTimestamp(booking.slotStart).full}<small>{booking.status?.replaceAll("_", " ")}</small>{booking.communicationMode === "PHONE_CALL" ? <a href={`tel:${booking.phoneNumber}`}>Call {booking.phoneNumber}</a> : booking.meetingUrl && <a href={booking.meetingUrl} target="_blank" rel="noreferrer">Join screen call</a>}</span></li>)}</ul></>}
       </>}
     </div><footer className="pw-drawer-footer"><button type="button" disabled={busy} onClick={onClose}>Close</button><button className="pw-primary" disabled={busy || (action.kind === "attach" && !files.length) || (action.kind === "call" && (!slotId || loadingSlots))}>{busy ? <LoaderCircle size={16} className="pw-spinning"/> : action.kind === "share" ? <Share2 size={16}/> : action.kind === "call" ? <Phone size={16}/> : <UploadCloud size={16}/>}{action.kind === "share" ? "Generate link" : action.kind === "call" ? "Request call" : "Attach files"}</button></footer></form>
   </div></div>;
@@ -11102,8 +10728,8 @@ function MarengoUnifiedWorklist({
     () => client.availableBridgeStudies ?? client.organization?.bridgeStudies ?? [],
     [client.availableBridgeStudies, client.organization?.bridgeStudies],
   );
-  const jobs = [...new Map([...(client.processingJobs ?? []), ...(client.organization?.processingJobs ?? [])].map(job => [job.id, job])).values()];
-  const reports = [...new Map([...(client.reportReviews ?? []), ...(client.organization?.reports ?? [])].map(report => [report.id, report])).values()];
+  const jobs = useMemo(() => [...new Map([...(client.processingJobs ?? []), ...(client.organization?.processingJobs ?? [])].map(job => [job.id, job])).values()], [client.processingJobs, client.organization?.processingJobs]);
+  const reports = useMemo(() => [...new Map([...(client.reportReviews ?? []), ...(client.organization?.reports ?? [])].map(report => [report.id, report])).values()], [client.reportReviews, client.organization?.reports]);
   const [worklistStudies, setWorklistStudies] = useState<BridgeStudy[]>(initialStudies);
   const [prioritySaving, setPrioritySaving] = useState<Set<string>>(new Set());
   const priorityRequests = useRef(new Set<string>());
@@ -11153,25 +10779,23 @@ function MarengoUnifiedWorklist({
   }, [profileOpen]);
   const [feedback, setFeedback] = useState<{ text: string; error: boolean } | null>(null);
   const worklistLoadingRef = useRef(false);
+  const hasWorklistSnapshot = useRef(initialStudies.length > 0);
 
   const loadWorklistStudies = useCallback(async (silent = false, signal?: AbortSignal) => {
     if (!["SUPER_ADMIN", "CLIENT_USER"].includes(user.role)) { setStudyLoading(false); return; }
     if (worklistLoadingRef.current) return;
     worklistLoadingRef.current = true;
     const startedPriorityRevision = priorityRevision.current;
-    if (!silent) setStudyLoading(true);
+    setStudyLoading(true);
+    if (!silent) setStudyError("");
     try {
-      const studies: BridgeStudy[] = [];
-      let cursor = "";
-      do {
-        const params = new URLSearchParams({ limit: "100", includeProcessed: "1", _: String(Date.now()) });
+      const studies = await loadStudyPages<BridgeStudy>(async (cursor, limit) => {
+        const params = new URLSearchParams({ limit: String(limit), includeProcessed: "1" });
         if (cursor) params.set("cursor", cursor);
-        const result = await api<{ studies: BridgeStudy[]; nextCursor?: string | null }>(`/api/client/study-sync/available-studies?${params}`, token, { cache: "no-store", signal });
-        studies.push(...result.studies);
-        cursor = result.nextCursor ?? "";
-      } while (cursor);
+        return api<{ studies: BridgeStudy[]; nextCursor?: string | null }>(`/api/client/study-sync/available-studies?${params}`, token, { cache: "no-store", signal });
+      }, { signal, onFirstPage: firstPage => { if (!hasWorklistSnapshot.current && startedPriorityRevision === priorityRevision.current) { setWorklistStudies(firstPage); hasWorklistSnapshot.current = firstPage.length > 0; } } });
       if (signal?.aborted) return;
-      if (startedPriorityRevision === priorityRevision.current) setWorklistStudies(studies);
+      if (startedPriorityRevision === priorityRevision.current) { setWorklistStudies(studies); hasWorklistSnapshot.current = true; }
       setLastSync(new Date());
       setStudyError("");
     } catch (error) {
@@ -11181,7 +10805,7 @@ function MarengoUnifiedWorklist({
       if (signal) throw error;
     } finally {
       worklistLoadingRef.current = false;
-      if (!signal?.aborted) setStudyLoading(false);
+      if (!signal?.aborted || signal.reason?.name === "TimeoutError") setStudyLoading(false);
     }
   }, [token, user.role]);
 
@@ -11211,7 +10835,7 @@ function MarengoUnifiedWorklist({
   }), [jobByStudyId, reportByUid, worklistStudies]);
 
   const modalityOptions = useMemo(() => Array.from(new Set(['XR', 'CT', 'MR', 'SPECIALXRAY', ...rows.flatMap(({ study }) => (study.modalities ?? []).map(worklistModality).filter(Boolean))])).sort(), [rows]);
-  const searchedRows = rows.filter(({ study, referringDoctor }) => searchableText([
+  const searchedRows = useMemo(() => rows.filter(({ study, referringDoctor }) => searchableText([
         referringDoctor,
         study.patientName,
         study.patientId,
@@ -11219,12 +10843,13 @@ function MarengoUnifiedWorklist({
         study.studyDescription,
         study.studyInstanceUid,
         ...(study.modalities ?? []),
-      ]).includes(query.trim().toLowerCase()));
-  const { scopedRows, counts, modalityCounts, receivedCount } = worklistFacets(searchedRows, dateFilter, modalityFilter, clockTime);
-  const filtered = scopedRows.filter(({ state, needsAttention, priority }) =>
+      ]).includes(query.trim().toLowerCase())), [rows, query]);
+  const istDay = Math.floor((clockTime + 19800000) / 86400000);
+  const { scopedRows, counts, modalityCounts, receivedCount } = useMemo(() => worklistFacets(searchedRows, dateFilter, modalityFilter, istDay * 86400000 - 19800000), [searchedRows, dateFilter, modalityFilter, istDay]);
+  const filtered = useMemo(() => scopedRows.filter(({ state, needsAttention, priority }) =>
     (tab === "ALL" || (tab === "FAILED" ? needsAttention : tab === "URGENT" ? priority === "URGENT" : state === tab)) &&
     (statusFilter === "ALL" || state === statusFilter) &&
-    (priorityFilter === "ALL" || priority === priorityFilter));
+    (priorityFilter === "ALL" || priority === priorityFilter)), [scopedRows, tab, statusFilter, priorityFilter]);
 
   async function submitForReporting() {
     if (!sendStudy) return;
@@ -11309,7 +10934,7 @@ function MarengoUnifiedWorklist({
     { key: "URGENT", label: "Urgent", icon: AlertTriangle },
     { key: "FAILED", label: "Needs attention", icon: AlertTriangle },
   ] as const;
-  const ordered = [...filtered].sort((a, b) => {
+  const ordered = useMemo(() => [...filtered].sort((a, b) => {
     const comparison = sort.key === "received"
       ? new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime()
       : sort.key === "processed" ? (Date.parse(a.processedAt ?? "") || 0) - (Date.parse(b.processedAt ?? "") || 0)
@@ -11318,7 +10943,7 @@ function MarengoUnifiedWorklist({
         sort.key === "patient" ? b.study.patientName ?? "" : b.study.modalities.join(","));
     if (sort.key === "priority" && !comparison) return (Date.parse(b.receivedAt) - Date.parse(a.receivedAt)) || a.study.id.localeCompare(b.study.id);
     return sort.ascending ? comparison : -comparison;
-  });
+  }), [filtered, sort]);
   const pageCount = Math.max(1, Math.ceil(ordered.length / pageSize));
   const currentPage = Math.min(page, pageCount - 1);
   const visible = ordered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
@@ -11464,10 +11089,10 @@ function MarengoUnifiedWorklist({
     <section className={`pacs-workspace${sidebarCollapsed ? " pw-sidebar-collapsed" : ""}`} aria-label="Marengo PACS workstation">
       <header className="pw-header">
         <button className="pw-icon pw-sidebar-toggle" aria-label={sidebarCollapsed ? "Expand sidebar" : "Minimize sidebar"} title={sidebarCollapsed ? "Expand sidebar" : "Minimize sidebar"} aria-expanded={!sidebarCollapsed} aria-controls="pw-workspace-navigation" onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>{sidebarCollapsed ? <PanelLeftOpen size={18}/> : <PanelLeftClose size={18}/>}</button>
-        <div className="pw-brand"><img src={marengoBrandLogo} alt="" /><div><strong>Marengo Asia Hospitals</strong><span>RADIOLOGY WORKSPACE</span></div></div>
+        <div className="pw-brand"><img src={marengoSmallLogo} alt="" width={36} height={40} /><div><strong>Marengo Asia Hospitals</strong><span>RADIOLOGY WORKSPACE</span></div></div>
         <div className="pw-center"><Building2 size={16} /><span>{client.name}</span></div>
         <div className="pw-header-actions">
-          <span className={!online || studyError || workspaceSyncError ? "pw-connection error" : "pw-connection"} title="Automatic updates every 5 seconds while this window is active"><i />{!online ? "Offline" : studyError || workspaceSyncError ? "Reconnecting" : !["SUPER_ADMIN", "CLIENT_USER"].includes(user.role) ? "Live updates" : lastSync ? "Connected" : "Connecting"}</span>
+          <span className={!online || studyError || workspaceSyncError ? "pw-connection error" : "pw-connection"} title="Automatic updates while this window is active"><i />{!online ? "Offline" : studyError || workspaceSyncError ? "Reconnecting" : !["SUPER_ADMIN", "CLIENT_USER"].includes(user.role) ? "Live updates" : lastSync ? "Connected" : "Connecting"}</span>
           {permissions.upload && <button className="pw-primary" onClick={() => setUploadOpen(true)}><Plus size={16} />Upload study</button>}
           <div className="pw-account-wrap" ref={accountRef} onBlur={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) setProfileOpen(false); }}>
             <button ref={accountButtonRef} className="pw-account" aria-label="Open account" aria-expanded={profileOpen} aria-controls="pw-account-dropdown" aria-haspopup="dialog" title={user.name} onClick={() => setProfileOpen(!profileOpen)}><b>{initials}</b><span>{user.name}<small>{roleLabel}</small></span><ChevronDown size={14} /></button>
@@ -11491,6 +11116,7 @@ function MarengoUnifiedWorklist({
           : activeSection === "Analytics" && permissions.analytics ? <WorkspaceStatistics key="analytics" token={token} mode="analytics"/>
           : activeSection === "Billing" && permissions.billing ? <WorkspaceBilling token={token} adminContent={user.role === "SUPER_ADMIN" ? sectionContent : undefined}/>
           : activeSection === "Healthcheck" && permissions.healthcheck ? <WorkspaceHealthcheck token={token}/>
+          : activeSection === "Technical Alerts" && user.role === "SUPER_ADMIN" ? <TechnicalAlerts token={token}/>
           : user.role === "SUPER_ADMIN" && activeSection === "Dashboard" ? <AdminConsole token={token} onNavigate={onNavigate}/>
           : user.role === "SUPER_ADMIN" && activeSection === "Audit Logs" ? <AdminEvidence token={token}/>
           : !isWorklist ? <><div className="pw-heading"><h1>{activeSection}</h1></div><div className="pw-legacy">{sectionContent}</div></>
@@ -11555,7 +11181,7 @@ function MarengoUnifiedWorklist({
           {!visible.length && <div className="pw-empty">{studyLoading ? <LoaderCircle className="pw-spinning" size={28}/> : <Search size={28}/>}<h2>{studyLoading ? "Loading studies" : hasFilters ? "No matching studies" : "No studies in this queue"}</h2>{hasFilters && <button onClick={resetFilters}>Clear filters</button>}</div>}
         </div>
         <footer className="pw-footer">
-          <span className="pw-results">{ordered.length ? currentPage * pageSize + 1 : 0}-{Math.min((currentPage + 1) * pageSize, ordered.length)} of {ordered.length} studies</span>
+          <span className="pw-results">{ordered.length ? currentPage * pageSize + 1 : 0}-{Math.min((currentPage + 1) * pageSize, ordered.length)} of {ordered.length} studies{studyLoading && !lastSync ? " (loading more...)" : ""}</span>
           <span className="pw-sync">{studyError ? "Refresh interrupted" : lastSync ? `Updated ${istTimestamp(lastSync.toISOString()).time + " IST"}` : "Awaiting sync"}</span>
           <div className="pw-pagination"><label>Rows<select aria-label="Rows per page" value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{[10,25,50,100].map((size) => <option key={size}>{size}</option>)}</select></label><button title="Previous page" aria-label="Previous page" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}><ChevronLeft size={16}/></button><span>{currentPage + 1} / {pageCount}</span><button title="Next page" aria-label="Next page" disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}><ChevronRight size={16}/></button></div>
         </footer>
@@ -12454,7 +12080,7 @@ function ProviderCallsView({
         <table className="w-full text-left text-sm">
           <thead>
             <tr className="border-b border-slate-200 text-xs uppercase text-slate-500">
-              {["Time", "Center", "Patient", "Status", "Amount", "Action"].map(
+              {["Time", "Center", "Patient", "Status", "Action"].map(
                 (column) => (
                   <th className="py-3 pr-4" key={column}>
                     {column}
@@ -12487,14 +12113,7 @@ function ProviderCallsView({
                 <td className="py-4 pr-4">
                   <StatusBadge status={booking.status} />
                 </td>
-                <td className="py-4 pr-4 text-slate-700">
-                  {moneyMinor(
-                    booking.finalAmountMinor ??
-                      booking.estimatedAmountMinor ??
-                      0,
-                    "INR",
-                  )}
-                </td>
+
                 <td className="py-4 pr-4">
                   <button
                     className="table-view-button"
@@ -12553,15 +12172,7 @@ function ProviderCallsView({
                   : "Built-in meeting"
               }
             />
-            <DetailField
-              label="Amount"
-              value={moneyMinor(
-                selectedBooking.finalAmountMinor ??
-                  selectedBooking.estimatedAmountMinor ??
-                  0,
-                "INR",
-              )}
-            />
+
             <DetailField
               label="Status"
               value={<StatusBadge status={selectedBooking.status} />}
@@ -16269,8 +15880,7 @@ function ScheduleCallModal({
     callOptions?.slots.find((item) => item.id === selectedAvailabilityId) ??
     null;
   const selectedSlot = selectedAvailability?.slotStart ?? "";
-  const estimatedAmountMinor =
-    selectedDuration * (callOptions?.pricePerMinuteMinor ?? 1000);
+
   const confirmedBooking =
     booking ??
     bookings
@@ -16291,9 +15901,7 @@ function ScheduleCallModal({
   const selectedIsFuture = selectedSlot
     ? new Date(selectedSlot).getTime() > Date.now()
     : false;
-  const selectedIsInstant = selectedSlot
-    ? new Date(selectedSlot).getTime() - Date.now() <= 2 * 60 * 60 * 1000
-    : false;
+
 
   useEffect(() => {
     let cancelled = false;
@@ -16408,11 +16016,11 @@ function ScheduleCallModal({
               }}
             />
             <SelectInput
-              label="Available radiologist slot"
+              label="Preferred time window (IST)"
               value={selectedAvailabilityId}
               onChange={selectAvailability}
               options={[
-                ["", "Select available start"],
+                ["", "Select preferred start"],
                 ...(callOptions?.slots ?? []).map((slot) => {
                   return [
                     slot.id,
@@ -16428,7 +16036,7 @@ function ScheduleCallModal({
                 setCommunicationMode(value as "BUILT_IN_MEETING" | "PHONE_CALL")
               }
               options={[
-                ["BUILT_IN_MEETING", "Built-in meeting"],
+                ["BUILT_IN_MEETING", "Screen call"],
                 ["PHONE_CALL", "Phone call"],
               ]}
             />
@@ -16439,30 +16047,8 @@ function ScheduleCallModal({
                 onChange={setPhoneNumber}
               />
             ) : null}
-            <div className="rounded-lg border border-sky-100 bg-sky-50 p-4 text-sm font-semibold text-sky-900">
-              Selected slot:{" "}
-              {selectedAvailability
-                ? `${toDate(selectedAvailability.slotStart)} ${new Date(selectedAvailability.slotStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} - ${new Date(selectedAvailability.slotEnd).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-                : "Select an available slot"}
-              <span className="mt-1 block text-xs text-sky-700">
-                Call pricing:{" "}
-                {moneyMinor(
-                  callOptions?.pricePerMinuteMinor ?? 1000,
-                  callOptions?.currency ?? "INR",
-                )}{" "}
-                / min. Estimated amount:{" "}
-                {moneyMinor(
-                  estimatedAmountMinor,
-                  callOptions?.currency ?? "INR",
-                )}
-                .
-              </span>
-              {selectedIsInstant ? (
-                <span className="mt-1 block text-xs text-sky-700">
-                  Instant/nearby slot can be booked if available.
-                </span>
-              ) : null}
-            </div>
+            <p className="pw-help">Preferred time window; confirmation is pending.</p>
+
             {confirmedBooking && !canRescheduleExisting ? (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">
                 This call is within 2 hours. Rescheduling is locked.
@@ -17767,7 +17353,7 @@ function AppShell({
         : role === "RADIOLOGIST" && radiologist
           ? <RadiologistContent active={active} profile={radiologist} token={token} reload={loadData} notice={showNotice}/>
           : providerDashboard ? <ProviderContent active={active} dashboard={providerDashboard} token={token} reload={loadData} notice={showNotice} user={user}/> : null;
-    return <MarengoUnifiedWorklist token={token} client={workspaceClient} user={user} reload={loadData} notice={showNotice} onNavigate={selectSection} availableTabs={availableTabs} activeSection={active} sectionContent={sectionContent} workspaceNotice={notice} workspaceSyncError={workspaceSyncError || (!hasLoadedData ? "Loading workspace?" : "")}/>;
+    return <MarengoUnifiedWorklist token={token} client={workspaceClient} user={user} reload={loadData} notice={showNotice} onNavigate={selectSection} availableTabs={availableTabs} activeSection={active} sectionContent={sectionContent} workspaceNotice={notice} workspaceSyncError={workspaceSyncError}/>;
   }
 
 }

@@ -12,8 +12,7 @@ const superAdminNavigation: PortalNavigationGroup[] = [
   { label: 'Command', items: ['Dashboard'] },
   { label: 'Access Management', items: ['Group Admins', 'Radiologists'] },
   { label: 'Operations', items: ['Centers', 'Patients', 'Follow-ups', 'Studies', 'Processing', 'Reports', 'Processing Notifications', 'Queries', 'Demo Requests', 'Call Requests', 'AI Report Feedback'] },
-  { label: 'Partners', items: ['Renewist'] },
-  { label: 'Platform', items: ['Services', 'WhatsApp Configuration'] },
+  { label: 'Platform', items: ['WhatsApp Configuration', 'Technical Alerts'] },
   { label: 'Intelligence', items: ['Analytics', 'Billing'] },
   { label: 'Governance', items: ['Notification History', 'Support', 'WhatsApp Whitelist', 'Audit Logs'] },
 ]

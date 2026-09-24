@@ -272,8 +272,12 @@ export async function enqueueCallBookingNotification(db: DbClient, input: {
 }) {
   const features = getDeploymentFeatures()
   if (!features.notifications && !features.whatsapp) return
-  const recipients = input.radiologistId ? await radiologistPhoneRecipients(db, input.radiologistId) : []
+  const radiologistPhones = input.radiologistId ? await radiologistPhoneRecipients(db, input.radiologistId) : []
+  const administrators = await db.notificationRecipient.findMany({ where: { active: true, organization: 'DECTROCEL', role: { not: PHYSICIAN_ROLE }, verificationStatus: 'VERIFIED', consentStatus: { in: ['OPTED_IN', 'APPROVED', 'ACTIVE'] }, OR: [{ notificationCategories: { has: 'ALL' } }, { notificationCategories: { has: 'CALL_BOOKING' } }] }, select: { phoneE164: true } })
+  const recipients = [...radiologistPhones, ...administrators.flatMap(person => person.phoneE164 ? [person.phoneE164] : [])]
   const when = formatIndiaDateTime(input.slotStart)
+  const contact = input.communicationMode === 'PHONE_CALL' ? 'Phone call: ' + input.phoneNumber : 'Screen call: ' + input.meetingUrl
+  const radiologist = input.radiologistId ? await db.radiologistProfile.findUnique({ where: { id: input.radiologistId }, select: { userId: true } }) : null
   await enqueueNotification(db, {
     eventType: input.eventType,
     aggregateType: 'ReportCallBooking',
@@ -285,7 +289,7 @@ export async function enqueueCallBookingNotification(db: DbClient, input: {
       reportId: input.reportId,
       bookingId: input.bookingId,
       to: recipients,
-      message: 'A consultation request changed. Sign in to the secure Dectrocel portal to view scheduling and case details. Do not share patient information on WhatsApp.',
+      message: `Consultation requested for ${when}. ${contact}. Confirm the preferred window in the portal.`,
       metadata: { eventType: input.eventType, status: input.status, category: 'CALL_BOOKING' },
     },
   })
@@ -297,10 +301,11 @@ export async function enqueueCallBookingNotification(db: DbClient, input: {
     clientId: input.clientId,
     status: input.status,
     title: `Radiologist call ${humanStatus(input.status)}`,
-    message: `Call request for report ${input.reportId}: ${humanStatus(input.status)} at ${when}`,
+    message: `Call request: ${humanStatus(input.status)} at ${when}. ${contact}`,
     category: 'CALL_BOOKING',
-    organizations: ['DECTROCEL', 'RENEWIST'],
-    metadata: { bookingId: input.bookingId, reportId: input.reportId, slotStart: input.slotStart.toISOString(), communicationMode: input.communicationMode },
+    organizations: ['DECTROCEL'],
+    recipientUserIds: radiologist?.userId ? [radiologist.userId] : [],
+    metadata: { phoneNumber: input.phoneNumber, meetingUrl: input.meetingUrl, bookingId: input.bookingId, reportId: input.reportId, slotStart: input.slotStart.toISOString(), communicationMode: input.communicationMode },
   })
 }
 

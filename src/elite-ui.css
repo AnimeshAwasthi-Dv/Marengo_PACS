@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&family=Sora:wght@600;700;800&display=swap');
+/* Use native font fallbacks: no blocking external font stylesheet on startup. */
 
 /* Lovable-inspired clinical command UI. Loaded last on purpose. */
 :root {

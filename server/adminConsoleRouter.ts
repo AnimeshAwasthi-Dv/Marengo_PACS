@@ -1,3 +1,4 @@
+import { evidencePage } from './evidencePaging';
 import { Router } from 'express';
 import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
@@ -42,16 +43,19 @@ adminConsoleRouter.get('/evidence', async (req, res) => {
   const reportIds = study ? (await prisma.reportReview.findMany({ where: { clientId: study.clientId, studyUid: study.studyInstanceUid }, select: { id: true } })).map(r => r.id) : [];
   const createdAt = { gte: range.start, lt: range.end };
   const cap = 10001;
+  const requestedPage = Math.min(100000, Math.max(1, Math.floor(Number(req.query.page) || 1)));
+  const indexedPage = !study && req.query.format !== 'csv' ? await evidencePage(range.start, range.end, requestedPage, String(req.query.source ?? ''), String(req.query.q ?? '').slice(0, 150)) : null;
+  const pageIds = (kind: string) => indexedPage ? { id: { in: indexedPage.ids(kind) } } : {};
   const auditWhere: Prisma.AuditLogWhereInput = { createdAt, ...(study ? { clientId: study.clientId, OR: [{ metadata: { path: ['studyId'], equals: study.id } }, ...(study.processingJobId ? [{ metadata: { path: ['processingJobId'], equals: study.processingJobId } }] : [])] } : {}) };
   const historyWhere: Prisma.JobStatusHistoryWhereInput = { createdAt, ...(study ? { OR: [...(study.processingJobId ? [{ processingJobId: study.processingJobId }] : []), { reportReviewId: { in: reportIds } }] } : {}) };
   const requestWhere: Prisma.ProviderApiRequestWhereInput = { createdAt, ...(study ? { OR: mappings.flatMap(m => [{ idempotencyKey: m.dectrocelJobId }, { metadata: { path: ['dectrocelJobId'], equals: m.dectrocelJobId } }, { metadata: { path: ['dectrocel_job_id'], equals: m.dectrocelJobId } }]) } : {}) };
-  const audits = await prisma.auditLog.findMany({ where: auditWhere, orderBy: { createdAt: 'desc' }, take: cap });
-  const history = await prisma.jobStatusHistory.findMany({ where: historyWhere, orderBy: { createdAt: 'desc' }, take: cap });
-  const requests = await prisma.providerApiRequest.findMany({ where: requestWhere, orderBy: { createdAt: 'desc' }, take: cap });
-  const submissions = await prisma.providerReportSubmission.findMany({ where: { receivedAt: createdAt, ...(study ? { OR: [{ reportReviewId: { in: reportIds } }, { dectrocelJobId: { in: mappings.map(m => m.dectrocelJobId) } }] } : {}) }, orderBy: { receivedAt: 'desc' }, take: cap });
-  const deliveries = await prisma.pacsReturnJob.findMany({ where: { updatedAt: createdAt, ...(study ? { reportReviewId: { in: reportIds } } : {}) }, orderBy: { updatedAt: 'desc' }, take: cap });
-  const versions = await prisma.reportVersion.findMany({ where: { createdAt, ...(study ? { reportReviewId: { in: reportIds } } : {}) }, select: { id: true, reportReviewId: true, version: true, status: true, source: true, checksum: true, immutable: true, metadata: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: cap });
-  const reportAudits = await prisma.reportAuditLog.findMany({ where: { createdAt, ...(study ? { reportId: { in: reportIds } } : {}) }, orderBy: { createdAt: 'desc' }, take: cap });
+  const audits = await prisma.auditLog.findMany({ where: { ...auditWhere, ...pageIds('audit') }, orderBy: { createdAt: 'desc' }, take: cap });
+  const history = await prisma.jobStatusHistory.findMany({ where: { ...historyWhere, ...pageIds('history') }, orderBy: { createdAt: 'desc' }, take: cap });
+  const requests = await prisma.providerApiRequest.findMany({ where: { ...requestWhere, ...pageIds('request') }, orderBy: { createdAt: 'desc' }, take: cap });
+  const submissions = await prisma.providerReportSubmission.findMany({ where: { ...pageIds('submission'), receivedAt: createdAt, ...(study ? { OR: [{ reportReviewId: { in: reportIds } }, { dectrocelJobId: { in: mappings.map(m => m.dectrocelJobId) } }] } : {}) }, orderBy: { receivedAt: 'desc' }, take: cap });
+  const deliveries = await prisma.pacsReturnJob.findMany({ where: { ...pageIds('delivery'), updatedAt: createdAt, ...(study ? { reportReviewId: { in: reportIds } } : {}) }, orderBy: { updatedAt: 'desc' }, take: cap });
+  const versions = await prisma.reportVersion.findMany({ where: { ...pageIds('version'), createdAt, ...(study ? { reportReviewId: { in: reportIds } } : {}) }, select: { id: true, reportReviewId: true, version: true, status: true, source: true, checksum: true, immutable: true, metadata: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: cap });
+  const reportAudits = await prisma.reportAuditLog.findMany({ where: { ...pageIds('reportAudit'), createdAt, ...(study ? { reportId: { in: reportIds } } : {}) }, orderBy: { createdAt: 'desc' }, take: cap });
   if ([audits, history, requests, submissions, deliveries, versions, reportAudits].some(rows => rows.length === cap)) return res.status(413).json({ message: 'Too many records. Narrow the date range or select a study; no partial export was generated.' });
   let rows = [
     ...audits.map(a => evidenceRecord({ id: a.id, source: 'Audit log', at: a.createdAt, action: a.action, actorId: a.actorUserId, centerId: a.clientId, details: { ipAddress: a.ipAddress, metadata: a.metadata } })),
@@ -66,7 +70,7 @@ adminConsoleRouter.get('/evidence', async (req, res) => {
   const source = String(req.query.source ?? '');
   const sources = [...new Set(rows.map(r => r.source))].sort();
   if (source) rows = rows.filter(r => r.source === source);
-  if (q) rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(q));
+  if (q && !indexedPage) rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(q));
   const actors = await prisma.user.findMany({ where: { id: { in: [...new Set(rows.flatMap(r => r.actorId ? [r.actorId] : []))] } }, select: { id: true, name: true } });
   const names = new Map(actors.map(a => [a.id, a.name]));
   const named = rows.map(r => ({ ...r, actor: r.actorId ? names.get(r.actorId) ?? 'Unknown/deleted user' : 'System / not recorded' }));
@@ -78,5 +82,5 @@ adminConsoleRouter.get('/evidence', async (req, res) => {
     return res.type('text/csv').attachment(`marengo-audit-${range.from}-${range.to}.csv`).send(content);
   }
   const page = Math.min(100000, Math.max(1, Math.floor(Number(req.query.page) || 1)));
-  res.json({ rows: named.slice((page - 1) * 50, page * 50), total: named.length, page, sources, study, statuses: adminStatuses, generatedAt: new Date().toISOString() });
+  res.json({ rows: indexedPage ? named : named.slice((page - 1) * 50, page * 50), total: indexedPage?.total ?? named.length, page, sources, study, statuses: adminStatuses, generatedAt: new Date().toISOString() });
 });

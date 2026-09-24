@@ -10,6 +10,7 @@ type StudyRow = {
   service?: string; units?: number | null; amountMinor?: number | null; currency?: string; billingStatus?: string; invoice?: string;
 };
 type Statistics = {
+  modalities: string[]; tatDaily: { day: string; minutes: number | null; samples: number }[];
   rows: StudyRow[]; daily: { day: string; received: number; processed: number; reported: number }[];
   hourly: { hour: string; studies: number }[]; modalityDistribution: { modality: string; count: number; percentage: number }[];
   totals: { received: number; processed: number; reported: number; averageTatSeconds: number | null; tatSampleSize: number; averageTbScore?: number | null; tbScoreSampleSize?: number; reportsReplaced?: number };
@@ -33,6 +34,7 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
   const [from, setFrom] = useState(istDay(new Date(Date.now() - 6 * 86400000)));
   const [to, setTo] = useState(istDay(new Date()));
   const [centerId, setCenterId] = useState('');
+  const [modality, setModality] = useState('');
   const [page, setPage] = useState(1);
   const [preset, setPreset] = useState('7');
   const [view, setView] = useState<'studies' | 'daily'>('studies');
@@ -40,7 +42,7 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
   const [error, setError] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [refresh, setRefresh] = useState(0);
-  const query = new URLSearchParams({ from, to, centerId, page: String(page) }).toString();
+  const query = new URLSearchParams({ from, to, centerId, modality, page: String(page) }).toString();
   const key = `${mode}?${query}`;
   const data = result?.key === key ? result.data : null;
   useLiveRefresh(async signal => {
@@ -65,6 +67,7 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
     <div className="pw-toolbar pw-stats-toolbar"><label><CalendarDays size={15}/>From <input aria-label="From date IST" type="date" value={from} max={to} onChange={e => { setFrom(e.target.value); setPreset('custom'); setPage(1); }}/></label><label>To <input aria-label="To date IST" type="date" value={to} min={from} onChange={e => { setTo(e.target.value); setPreset('custom'); setPage(1); }}/><span>IST</span></label>
       <select aria-label="Statistics date preset" value={preset} onChange={e => { setPreset(e.target.value); const days = Number(e.target.value); setFrom(istDay(new Date(Date.now() - (days - 1) * 86400000))); setTo(istDay(new Date())); setPage(1); }}><option value="custom" disabled>Custom range</option><option value="1">Today</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select>
       {(result?.data.centers.length ?? 0) > 1 && <select aria-label="Statistics center" value={centerId} onChange={e => { setCenterId(e.target.value); setPage(1); }}><option value="">All linked centers</option>{result?.data.centers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
+      <select aria-label="Statistics modality" value={modality} onChange={event => { setModality(event.target.value); setPage(1); }}><option value="">All modalities</option>{(result?.data.modalities ?? []).map(value => <option key={value}>{value}</option>)}</select>
       <div className="pw-stats-exports"><button disabled={!data || downloading} onClick={() => void download('studies')}><Download size={15}/>{mode === 'billing' ? 'Billing CSV' : 'Download MIS CSV'}</button><button disabled={!data || downloading} onClick={() => void download('daily', 'analytics')}><Download size={15}/>{mode === 'billing' ? 'Usage CSV' : 'Daily totals CSV'}</button></div>
     </div>
     {error && <div className="pw-alert" role="alert">{error}{data && ' Showing the last received data.'}</div>}
@@ -82,6 +85,7 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
         </>}
       </section>
       {mode === 'analytics' && <div className="pw-stats-switch" role="tablist" aria-label="Analytics view"><button role="tab" aria-selected={view === 'studies'} className={view === 'studies' ? 'active' : ''} onClick={() => setView('studies')}>Study TAT</button><button role="tab" aria-selected={view === 'daily'} className={view === 'daily' ? 'active' : ''} onClick={() => setView('daily')}><BarChart3 size={15}/>Daily activity</button></div>}
+      {mode === 'analytics' && view === 'studies' && <section className="pw-tat-chart" aria-label="Reporting turnaround time chart"><h2>Reporting TAT by day - average minutes</h2><ResponsiveContainer width="100%" height={250}><BarChart data={data.tatDaily} margin={{ top: 16, right: 16, left: 24, bottom: 8 }}><CartesianGrid stroke="#465364" vertical={false}/><XAxis dataKey="day" tick={{ fill: '#c3ccd9', fontSize: 11 }}/><YAxis tick={{ fill: '#c3ccd9', fontSize: 11 }} label={{ value: 'Time taken (minutes)', angle: -90, position: 'insideLeft', fill: '#c3ccd9' }}/><Tooltip contentStyle={{ background: '#252d37', color: '#edf2f8' }}/><Bar dataKey="minutes" name="Average reporting time (minutes)" fill="#75a5ef" isAnimationActive={false}/></BarChart></ResponsiveContainer><p className="pw-help">Time from submission for reporting to finalized report. Studies without recorded submission and completion times are excluded.</p></section>}
       {mode === 'analytics' && view === 'daily' ? <div className="pw-stats-scroll">
         <div className="pw-chart-legend"><span><i style={{ background: '#75a5ef' }}/>Received</span><span><i style={{ background: '#66c4ac' }}/>Hourly volume</span><span><i style={{ background: '#d8b778' }}/>Modality share</span></div>
         <div className="pw-analytics-grid">

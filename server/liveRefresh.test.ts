@@ -4,6 +4,16 @@ import { startLiveRefresh } from '../src/liveRefresh';
 
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
+test('configured slow polling intervals are not shortened to thirty seconds', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let count = 0;
+  const live = startLiveRefresh(async () => { count++; }, { intervalMs: 60_000 });
+  t.mock.timers.tick(0); await flush();
+  t.mock.timers.tick(30_000); await flush(); assert.equal(count, 1);
+  t.mock.timers.tick(30_000); await flush(); assert.equal(count, 2);
+  live.stop();
+});
+
 test('live refresh repeats at five seconds and stops cleanly', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let count = 0;

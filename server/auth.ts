@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import { withoutCharges } from './callScheduling'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import type { NextFunction, Request, Response } from 'express'
@@ -91,11 +92,15 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     }
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, role: true, clientId: true, providerCode: true, active: true, client: { select: { status: true } } },
+      select: { id: true, role: true, clientId: true, providerCode: true, active: true, client: { select: { status: true, kind: true } } },
     })
     if (!user?.active || user.client?.status === 'BLOCKED') return res.status(401).json({ message: 'Account is inactive' })
     if (user.role !== payload.role || user.clientId !== (payload.clientId ?? null) || user.providerCode !== (payload.providerCode ?? null)) {
       return res.status(401).json({ message: 'Session permissions have changed. Please sign in again.' })
+    }
+    if (user.role !== 'SUPER_ADMIN' && !(user.role === 'CLIENT_USER' && user.client?.kind === 'GROUP')) {
+      const sendJson = res.json.bind(res)
+      res.json = body => sendJson(withoutCharges(body))
     }
     const portalRole = await getPortalRole(user.id, user.role)
     req.user = { sub: user.id, role: user.role, clientId: user.clientId ?? undefined, providerCode: user.providerCode ?? undefined, portalRole: portalRole ?? undefined }

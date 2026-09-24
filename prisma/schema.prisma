@@ -1280,6 +1280,53 @@ model PacsReturnJob {
   @@map("pacs_return_jobs")
 }
 
+model TechnicalIncident {
+  id String @id
+  probeId String
+  service String
+  center String
+  detail String
+  status String @default("OPEN")
+  observedStatus String
+  openedAt DateTime @default(now())
+  lastObservedAt DateTime
+  acknowledgedAt DateTime?
+  acknowledgedBy String?
+  resolvedAt DateTime?
+  resolvedBy String?
+  resolution String?
+  nextReminderAt DateTime @default(now())
+  reminderCount Int @default(0)
+  events TechnicalAlertEvent[]
+  // Partial active-probe uniqueness and status constraint are defined in SQL.
+  @@index([status, nextReminderAt], map: "technical_incidents_reminders")
+  @@map("technical_incidents")
+}
+
+model TechnicalAlertEvent {
+  id String @id
+  incidentId String
+  incident TechnicalIncident @relation(fields: [incidentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  event String
+  actor String
+  detail String
+  chatId String?
+  messageId Int?
+  createdAt DateTime @default(now())
+  @@index([incidentId, createdAt], map: "technical_alert_events_incident")
+  @@map("technical_alert_events")
+}
+
+model TechnicalMonitorState {
+  id String @id
+  lastCheckAt DateTime?
+  lastTickAt DateTime?
+  updateOffset BigInt @default(0)
+  lastError String?
+  checks Json @default("[]")
+  @@map("technical_monitor_state")
+}
+
 model JobStatusHistory {
   id                    String   @id @default(cuid())
   processingJobId       String?

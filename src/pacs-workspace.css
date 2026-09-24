@@ -436,3 +436,29 @@ body.pacs-reference-mode .app-shell .mobile-nav { display: none !important; }
 .pacs-workspace .pw-shared-drawer .pw-legacy :is(h3,h4) { font-size: 14px !important; font-weight: 600 !important; line-height: 1.5; }
 .pacs-workspace .pw-shared-drawer .pw-legacy label { font-size: 11px !important; font-weight: 500 !important; line-height: 1.5; }
 @media(max-width: 640px) { .pw-shared-drawer.pw-shared-wide { width: 100vw; }.pw-shared-drawer .pw-drawer-body { padding: 16px; }.pw-shared-drawer .pw-legacy table { min-width: 580px !important; } }
+
+/* Readable shared record drawers and long integration/notification values. */
+.pacs-workspace .record-detail-field { min-width: 0; background: #252d37; border-color: #465364; }
+.pacs-workspace .record-detail-field > :last-child { color: #edf2f8 !important; overflow-wrap: anywhere; white-space: normal; }
+.pacs-workspace .record-detail-field > :first-child { color: #b7c5d7 !important; }
+.pacs-workspace .pw-legacy, .pacs-workspace .pw-legacy > *, .pacs-workspace .soft-card, .pacs-workspace .table-scroll { min-width: 0; max-width: 100%; }
+.pacs-workspace .pw-legacy :is(td,pre,p,dd,code), .pacs-workspace .record-detail-field { overflow-wrap: anywhere; word-break: normal; }
+.pacs-workspace .pw-legacy pre { white-space: pre-wrap; color: #edf2f8 !important; }
+.pacs-workspace .pw-legacy table { table-layout: fixed; width: 100%; }
+.pacs-workspace .pw-legacy td { white-space: normal !important; }
+.pacs-workspace .pw-legacy :is(input,select,textarea) { max-width: 100%; min-width: 0; }
+.pw-whatsapp-sections > details { border: 1px solid #465364; border-radius: 6px; padding: 16px; }
+.pw-whatsapp-sections summary { cursor: pointer; font-weight: 600; color: #edf2f8; margin-bottom: 12px; }
+.pw-tat-chart { min-height: 300px; padding: 16px 24px; }
+.ta-monitor { margin: 12px 20px; padding: 14px 16px; border: 1px solid #465162; border-radius: 8px; background: #252d37; color: #e4ebf5; }
+.ta-monitor p { margin-top: 6px; color: #b9c6d7; line-height: 1.5; }
+.ta-details { display: grid; gap: 20px; min-width: 0; color: #e4ebf5; overflow-wrap: anywhere; }
+.ta-summary, .ta-resolution { padding: 16px; border: 1px solid #465162; border-radius: 8px; background: #252d37; }
+.ta-details p { margin: 8px 0; line-height: 1.55; color: #c7d3e3; }
+.ta-details small, .ta-details time { color: #aebdd0; font-size: 12px; }
+.ta-details .ta-resolution h3 { margin-top: 0; }
+.ta-resolution .pw-field { margin: 16px 0 12px; }
+.ta-resolution button { min-height: 40px; white-space: normal; }
+.ta-timeline { list-style: none; padding: 0; margin: 0; }
+.ta-timeline li { border-left: 2px solid #526682; padding: 0 0 22px 16px; margin-left: 4px; }
+.ta-timeline li > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }

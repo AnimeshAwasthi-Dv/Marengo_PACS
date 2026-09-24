@@ -20,13 +20,20 @@ type Dependencies = {
 };
 export function registerExternalViewerRoutes(app: Express, dependencies: Dependencies) {
   const { prisma, requireAuth, requireRadiologist, accessibleClientIds, workspaceStudyScope, getAccessibleProcessingJob, extractQueuedMetadata, publicSharedReport, getAuthorizedReport, canRadiologistAccessReport, isGroupRadiologistProfile, getDicomMetadataValue, createBridgeStudyViewerUrl } = dependencies;
+async function sessionForUid(studyInstanceUid: string | null | undefined, clientId: string, req: any, reportId?: string) {
+  if (createBridgeStudyViewerUrl && studyInstanceUid) {
+    const linked = await prisma.availableBridgeStudy.findFirst({ where: { clientId, studyInstanceUid }, select: { id: true } });
+    if (linked) { const viewerUrl = await createBridgeStudyViewerUrl(linked.id, req); if (viewerUrl) return { enabled: true, viewerUrl, studyInstanceUid }; }
+  }
+  return externalViewerSession({ studyInstanceUid, reportId });
+}
 app.get("/api/patient-study-archives/:archiveId/viewer-session", requireAuth, async (req, res) => {
   res.setHeader('Cache-Control', 'private, no-store');
   try {
     const archive = await prisma.patientStudyArchive.findUnique({ where: { id: String(req.params.archiveId) } });
     const ids = await accessibleClientIds(req);
     if (!archive || (ids !== null && !ids.includes(archive.clientId))) return res.status(404).json({ enabled: false, message: 'Archived study was not found' });
-    res.json(externalViewerSession({ studyInstanceUid: archive.studyInstanceUid }));
+    res.json(await sessionForUid(archive.studyInstanceUid, archive.clientId, req));
   } catch (error) {
     const status = typeof (error as { status?: number }).status === 'number' ? (error as { status: number }).status : 503;
     res.status(status).json({ enabled: false, message: status === 503 ? 'Unable to open the external viewer' : (error as Error).message });
@@ -40,7 +47,7 @@ app.get("/api/client/study-sync/available-studies/:studyId/viewer-session", requ
     if (!study) return res.status(404).json({ enabled: false, message: 'Study not found' });
     if (createBridgeStudyViewerUrl) {
       const viewerUrl = await createBridgeStudyViewerUrl(study.id, req);
-      if (!viewerUrl) return res.json({ enabled: false, message: 'DICOM study files are not available on this server yet.' });
+      if (!viewerUrl) return res.json({ enabled: false, message: 'The study record exists, but its original DICOM archive could not be found in configured storage. Restore or re-upload the original study archive to open images.' });
       return res.json({ enabled: true, viewerUrl, studyInstanceUid: study.studyInstanceUid });
     }
     res.json(externalViewerSession({ studyInstanceUid: study.studyInstanceUid }));
@@ -56,7 +63,7 @@ app.get("/api/public/reports/:token/viewer-session", async (req, res) => {
     const report = await publicSharedReport(String(req.params.token), true);
     if (!report) return res.status(404).json({ enabled: false, message: 'This shared report link is invalid or no longer available.' });
     const studyInstanceUid = report.studyUid || getDicomMetadataValue(report.editedReportJson, 'studyInstanceUid') || getDicomMetadataValue(report.aiReportJson, 'studyInstanceUid');
-    res.json(externalViewerSession({ studyInstanceUid, reportId: report.id }));
+    res.json(await sessionForUid(studyInstanceUid, report.clientId, req, report.id));
   } catch (error) {
     const status = typeof (error as { status?: number }).status === 'number' ? (error as { status: number }).status : 503;
     res.status(status).json({ enabled: false, message: status === 503 ? 'Unable to open the external viewer' : (error as Error).message });
@@ -69,7 +76,7 @@ app.get("/api/processing-jobs/:jobId/viewer-session", requireAuth, async (req, r
     const job = await getAccessibleProcessingJob(String(req.params.jobId), req.user!);
     if (!job) return res.status(404).json({ enabled: false, message: 'Study was not found' });
     const metadata = extractQueuedMetadata(job.upstreamStatus);
-    res.json(externalViewerSession({ studyInstanceUid: metadata.studyInstanceUid }));
+    res.json(await sessionForUid(metadata.studyInstanceUid, job.clientId, req));
   } catch (error) {
     const status = typeof (error as { status?: number }).status === 'number' ? (error as { status: number }).status : 503;
     res.status(status).json({ enabled: false, message: status === 503 ? 'Unable to open the external viewer' : (error as Error).message });
@@ -81,7 +88,7 @@ app.get("/api/reports/:reportId/viewer-session", requireAuth, async (req, res) =
   try {
     const report = await getAuthorizedReport(req);
     const studyInstanceUid = report.studyUid || getDicomMetadataValue(report.editedReportJson, 'studyInstanceUid') || getDicomMetadataValue(report.aiReportJson, 'studyInstanceUid');
-    res.json(externalViewerSession({ studyInstanceUid, reportId: report.id }));
+    res.json(await sessionForUid(studyInstanceUid, report.clientId, req, report.id));
   } catch (error) {
     const status = typeof (error as { status?: number }).status === 'number' ? (error as { status: number }).status : 503;
     res.status(status).json({ enabled: false, message: status === 503 ? 'Unable to open the external viewer' : (error as Error).message });
@@ -95,7 +102,7 @@ app.get("/api/radiologist/reports/:reportId/viewer-session", requireAuth, requir
     const report = await prisma.reportReview.findUniqueOrThrow({ where: { id: String(req.params.reportId) } });
     if (!(await canRadiologistAccessReport(profile, report)) || (!(await isGroupRadiologistProfile(profile)) && report.radiologistId && report.radiologistId !== profile.id)) return res.status(403).json({ enabled: false, message: 'Report cannot be opened' });
     const studyInstanceUid = report.studyUid || getDicomMetadataValue(report.editedReportJson, 'studyInstanceUid') || getDicomMetadataValue(report.aiReportJson, 'studyInstanceUid');
-    res.json(externalViewerSession({ studyInstanceUid, reportId: report.id }));
+    res.json(await sessionForUid(studyInstanceUid, report.clientId, req, report.id));
   } catch (error) {
     const status = typeof (error as { status?: number }).status === 'number' ? (error as { status: number }).status : 503;
     res.status(status).json({ enabled: false, message: status === 503 ? 'Unable to open the external viewer' : (error as Error).message });

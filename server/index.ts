@@ -1,3 +1,9 @@
+import { followUpStatusFilter } from './followUps'
+import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
+import { ensureMarengoServices } from './marengoServices'
+import { resolveArchivePath } from './viewer/archivePaths'
+import QRCode from 'qrcode'
+import { preferredCallWindows, normalizeCallPhone } from './callScheduling'
 import { externalViewerOrigin } from './viewer/externalViewer';
 import { classifyBreastXrayModalities } from '../src/mammography';
 import { holdSpecialXrayForManualSubmission, isSpecialXrayStudy } from '../src/specialXray';
@@ -55,7 +61,7 @@ import { findStoredStudyObject, readStoredObject, storeObject, uploadReportHtmlT
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
-import { AiProcessingError, AiUnavailableError, aiServiceTypeForServiceName, aiServiceTypeForServiceType, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, processCtUpload, processMammographyUpload, processMriUpload, processXrayUpload, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, XrayProcessingError, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
+import { aiServiceTypeForServiceName, aiServiceTypeForServiceType, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
 
 dotenv.config({
   path: process.env.LOAD_STORAGE_ENV === 'true' ? ['.env', '.env.storage'] : ['.env'],
@@ -114,6 +120,7 @@ async function viewerServiceRequest<T>(pathName: string, init: RequestInit = {})
   const response = await fetch(new URL(pathName, config.baseUrl), {
     ...init,
     headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json', ...init.headers },
+    signal: init.signal ?? AbortSignal.timeout(20_000),
   })
   if (!response.ok) throw new Error(`DICOM viewer service returned ${response.status}: ${await response.text()}`)
   return response.json() as Promise<T>
@@ -149,7 +156,7 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
   const archivePath = await resolveSafeBundleFile(study.archivePath)
   const kind = studyViewerStorageKind(study.modalities)
   const discoveredStudy = storedStudy?.key ? null : await findStoredStudyObject({
-    kinds: [kind, 'original-studies', 'cleaned-dicoms'],
+    kinds: [kind, 'original-studies', 'cleaned-dicoms', 'ct-studies', 'mri-studies', 'xray-studies', 'mammography-studies'],
     keys: bridgeStudyS3KeyCandidates(study),
   }).catch((error) => {
     console.warn(`Unable to search S3 for bridge study ${study.id}:`, error instanceof Error ? error.message : error)
@@ -157,11 +164,11 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
   })
   if (!storedStudy?.key && !discoveredStudy?.key && !archivePath) return null
   const cached = externalViewerImports.get(study.id)
-  const sourceIdentity = storedStudy?.key ?? discoveredStudy?.key ?? archivePath ?? ''
+  const sourceIdentity = storedStudy ? `${storedStudy.bucket}/${storedStudy.key}` : discoveredStudy ? `${discoveredStudy.bucket}/${discoveredStudy.key}` : archivePath ?? ''
   if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return cached.viewerUrl
   let importId = cached?.archivePath === sourceIdentity ? cached.importId : ''
   if (!importId) {
-    const storage = storedStudy?.key || discoveredStudy?.key ? { key: storedStudy?.key ?? discoveredStudy!.key } : await storeObject({
+    const storage = storedStudy?.key || discoveredStudy?.key ? { key: storedStudy?.key ?? discoveredStudy!.key, bucket: storedStudy?.bucket ?? discoveredStudy!.bucket } : await storeObject({
       kind,
       keyParts: ['viewer-imports', study.id, study.archiveName || path.basename(archivePath!)],
       body: fsSync.createReadStream(archivePath!),
@@ -171,7 +178,7 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
     if (!storage?.key) throw new Error('Unable to upload the study ZIP for DICOM viewer import')
     const imported = await viewerServiceRequest<ViewerImportStatus>('/api/v1/studies', {
       method: 'POST',
-      body: JSON.stringify({ zipKey: storage.key, modality: viewerModality(kind) }),
+      body: JSON.stringify({ zipKey: storage.key, bucket: storage.bucket, studyInstanceUid: study.studyInstanceUid, modality: study.modalities.includes('US') && !study.modalities.includes('CT') ? 'US' : viewerModality(kind) }),
     })
     importId = imported.id
     externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: imported.status, expiresAt: Date.now() + 60 * 60 * 1000 })
@@ -317,6 +324,7 @@ app.use('/api/teleradiology/dectrocel', renewistIntegrationRouter)
 app.use('/api/v1/billing', requireDeploymentFeature('billing'), billingRouter)
 app.use('/api/v1/client', requireAuth, requireWorkspaceCapability('billing'), requireDeploymentFeature('billing'), clientBillingRouter)
 app.use('/api/workspace', workspaceRouter)
+app.use('/api/technical-alerts', technicalAlertsRouter)
 app.use('/api/admin/console', adminConsoleRouter)
 app.use('/api/v1/whatsapp', requireDeploymentFeature('whatsapp'), whatsappRouter)
 app.use('/api/v1/support', requireDeploymentFeature('support'), supportRouter)
@@ -527,9 +535,10 @@ const followUpSchema = z.object({ patientId: z.string().min(1), reportId: z.stri
 app.get('/api/follow-ups', requireAuth, async (req, res) => {
   const ids = await accessibleClientIds(req)
   const status = String(req.query.status ?? '').toUpperCase()
-  const where = { ...(ids === null ? {} : { clientId: { in: ids } }), ...(status ? { status } : {}) }
+  const now = new Date()
+  const where = { ...(ids === null ? {} : { clientId: { in: ids } }), ...followUpStatusFilter(status, now) }
   const items = await prisma.patientFollowUp.findMany({ where, include: { patient: true, client: { select: { id: true, name: true, code: true } }, report: true }, orderBy: { followUpDate: 'asc' }, take: 500 })
-  res.json(items.map((item) => item.status === 'PENDING' && item.followUpDate < new Date() ? { ...item, status: 'OVERDUE' } : item))
+  res.json(items.map((item) => ['PENDING', 'SCHEDULED'].includes(item.status) && item.followUpDate < now ? { ...item, status: 'OVERDUE' } : item))
 })
 app.post('/api/follow-ups', requireAuth, async (req, res) => {
   if (!['CLIENT_USER', 'RADIOLOGIST', 'SUPER_ADMIN'].includes(req.user!.role)) return res.status(403).json({ message: 'Follow-up permission required' })
@@ -825,7 +834,7 @@ app.post('/api/admin/clients', requireAuth, requireSuperAdmin, async (req, res) 
 
   const temporaryPassword = generatePortalPassword()
   const passwordHash = await bcrypt.hash(temporaryPassword, 12)
-  const isMarengoCenter = /\bmarengo\b/i.test(`${body.name} ${body.email}`)
+  const isMarengoCenter = getDeploymentFeatures().marengoMinimal || /\bmarengo\b/i.test(`${body.name} ${body.email}`)
   const marengoGroup = isMarengoCenter
     ? await prisma.client.findFirst({ where: { code: 'MARENGO', kind: 'GROUP' }, select: { id: true } })
     : null
@@ -871,6 +880,7 @@ app.post('/api/admin/clients', requireAuth, requireSuperAdmin, async (req, res) 
         metadata: { code, hospitalSlug, email: body.email, generatedLogin: true },
       },
     })
+    await ensureMarengoServices(tx, client.id)
     return { client, user }
   })
 
@@ -2070,6 +2080,7 @@ app.post('/api/client/organization/centers', requireAuth, requireClientUser, asy
         metadata: { centerClientId: client.id, code, hospitalSlug, email: body.email },
       },
     })
+    await ensureMarengoServices(tx, client.id)
     return { client, user }
   })
 
@@ -2173,7 +2184,8 @@ app.get('/api/client/study-sync/available-studies', requireAuth, async (req, res
   res.setHeader('Pragma', 'no-cache')
   res.setHeader('Expires', '0')
   const scope = await workspaceStudyScope(req)
-  const take = Math.min(100, Math.max(1, Number(req.query.limit ?? 50)))
+  const requestedLimit = Number(req.query.limit ?? 50)
+  const take = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 50
   const requestedSince = req.query.updatedSince ? new Date(String(req.query.updatedSince)) : null
   const updatedSince = requestedSince && !Number.isNaN(requestedSince.getTime()) ? requestedSince : null
   const asOf = new Date()
@@ -3294,6 +3306,12 @@ app.post('/api/admin/reports/:reportId/manual-pdf', requireAuth, requireSuperAdm
   }
 })
 
+async function publicShareResponse(reportId: string, token: string, expiresAt: Date, includeViewer: boolean) {
+  const scopedToken = scopedShareToken(reportId, token, includeViewer)
+  const url = new URL('/shared/' + encodeURIComponent(scopedToken), publicPortalBaseUrl()).toString()
+  return { token: scopedToken, expiresAt, includeViewer, url, qr: await QRCode.toDataURL(url, { width: 320, margin: 2, errorCorrectionLevel: 'M' }) }
+}
+
 // A share token is deliberately opaque and is the only credential accepted by
 // the public routes below. Report IDs and authenticated viewer routes remain private.
 app.post('/api/reports/:reportId/public-share', requireAuth, requireWorkspaceAction('share'), async (req, res) => {
@@ -3309,7 +3327,7 @@ app.post('/api/reports/:reportId/public-share', requireAuth, requireWorkspaceAct
     const expiresAt = new Date(now.getTime() + reportPublicShareTtlMs)
     const existing = forceRegenerate ? null : await prisma.reportPublicShare.findUnique({ where: { reportId: report.id } })
     if (existing && existing.expiresAt > now) {
-      return res.json({ token: scopedShareToken(report.id, existing.token, includeViewer), expiresAt: existing.expiresAt, includeViewer })
+      return res.json(await publicShareResponse(report.id, existing.token, existing.expiresAt, includeViewer))
     }
     const token = crypto.randomBytes(32).toString('base64url')
     const share = await prisma.reportPublicShare.upsert({
@@ -3317,7 +3335,7 @@ app.post('/api/reports/:reportId/public-share', requireAuth, requireWorkspaceAct
       create: { reportId: report.id, token, expiresAt },
       update: { token, expiresAt },
     })
-    res.json({ token: scopedShareToken(report.id, share.token, includeViewer), expiresAt: share.expiresAt, includeViewer })
+    res.json(await publicShareResponse(report.id, share.token, share.expiresAt, includeViewer))
   } catch (error) {
     const status = (error as Error & { status?: number }).status ?? 404
     res.status(status).json({ message: error instanceof Error ? error.message : 'Report is not available' })
@@ -3749,49 +3767,9 @@ app.get('/api/client/reports/:reportId/call-bookings', requireAuth, requireWorks
 
 app.get('/api/client/reports/:reportId/call-options', requireAuth, requireWorkspaceAction('schedule'), async (req, res) => {
   const report = await getAuthorizedReport(req)
-  const providerCode = await getReportProviderCode(report)
-  if (!providerCode) return res.json({ pricePerMinuteMinor: 1000, currency: 'INR', slots: [] })
   const requestedDuration = Number(req.query.durationMinutes ?? 15)
-  const durationMinutes = Number.isInteger(requestedDuration) && requestedDuration >= 5 && requestedDuration <= 120 ? requestedDuration : 15
-  const slots = await prisma.radiologistAvailability.findMany({
-    where: {
-      providerCode,
-      status: 'AVAILABLE',
-      slotEnd: { gt: new Date() },
-      radiologist: { active: true },
-    },
-    include: { radiologist: true },
-    orderBy: { slotStart: 'asc' },
-    take: 100,
-  })
-  const booked = await prisma.reportCallBooking.findMany({
-    where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] }, slotEnd: { gt: new Date() } },
-    select: { radiologistId: true, slotStart: true, slotEnd: true },
-  })
-  const availableSlots = slots.flatMap((slot) => {
-    const generated = []
-    const stepMs = 15 * 60 * 1000
-    const callMs = durationMinutes * 60 * 1000
-    for (let cursor = Math.max(Math.ceil(slot.slotStart.getTime() / stepMs) * stepMs, Math.ceil(new Date().getTime() / stepMs) * stepMs); cursor + callMs <= slot.slotEnd.getTime(); cursor += stepMs) {
-      const optionStart = new Date(cursor)
-      const optionEnd = new Date(cursor + callMs)
-      const overlapsBooking = booked.some((item) => item.radiologistId === slot.radiologistId && item.slotStart < optionEnd && item.slotEnd > optionStart)
-      if (!overlapsBooking) {
-        generated.push({
-          ...slot,
-          id: `${slot.id}__${optionStart.toISOString()}__${durationMinutes}`,
-          slotStart: optionStart,
-          slotEnd: optionEnd,
-          durationMinutes,
-          availabilityWindowId: slot.id,
-          availabilityWindowStart: slot.slotStart,
-          availabilityWindowEnd: slot.slotEnd,
-        })
-      }
-    }
-    return generated
-  })
-  res.json({ pricePerMinuteMinor: 1000, currency: 'INR', slots: availableSlots })
+  const duration = Number.isInteger(requestedDuration) && requestedDuration >= 5 && requestedDuration <= 120 ? requestedDuration : 15
+  res.json({ pricePerMinuteMinor: 1000, currency: 'INR', preferredWindows: true, slots: preferredCallWindows(duration) })
 })
 
 app.post('/api/client/reports/:reportId/call-bookings', requireAuth, requireWorkspaceAction('schedule'), async (req, res) => {
@@ -3810,26 +3788,14 @@ app.post('/api/client/reports/:reportId/call-bookings', requireAuth, requireWork
   const now = new Date()
   if (slotStart <= now) return res.status(400).json({ message: 'Choose a future slot' })
   const providerCode = await getReportProviderCode(report)
-  if (!providerCode) return res.status(400).json({ message: 'This report is not assigned to a teleradiology provider' })
-  const availabilityId = body.availabilityId?.split('__')[0]
-  const availability = availabilityId
-    ? await prisma.radiologistAvailability.findFirst({ where: { id: availabilityId, providerCode, status: 'AVAILABLE' }, include: { radiologist: true } })
-    : null
-  const radiologistId = availability?.radiologistId ?? body.radiologistId ?? report.radiologistId
-  if (!availability || !availability.radiologist.active) return res.status(409).json({ message: 'Select a currently available radiologist appointment' })
-  if (!radiologistId) return res.status(400).json({ message: 'Select an available radiologist slot' })
-  if (availability && (availability.slotStart > slotStart || availability.slotEnd < slotEnd)) {
-    return res.status(400).json({ message: 'Requested duration must fit inside the selected availability slot' })
+
+  // A requested window is a preference, not a reservation against availability.
+  const radiologistId = report.radiologistId ?? null
+  let phoneNumber = ''
+  if (body.communicationMode === 'PHONE_CALL') {
+    try { phoneNumber = normalizeCallPhone(body.phoneNumber) }
+    catch (error) { return res.status(400).json({ message: (error as Error).message }) }
   }
-  const conflict = await prisma.reportCallBooking.findFirst({
-    where: {
-      radiologistId,
-      status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] },
-      slotStart: { lt: slotEnd },
-      slotEnd: { gt: slotStart },
-    },
-  })
-  if (conflict) return res.status(409).json({ message: 'This slot is already booked' })
   const existing = await prisma.reportCallBooking.findFirst({
     where: { reportId: report.id, status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] }, slotEnd: { gt: now } },
     orderBy: { slotStart: 'asc' },
@@ -3852,7 +3818,7 @@ app.post('/api/client/reports/:reportId/call-bookings', requireAuth, requireWork
         status: 'REQUESTED',
         requestedDurationMinutes: body.durationMinutes,
         communicationMode: body.communicationMode,
-        phoneNumber: body.communicationMode === 'PHONE_CALL' ? body.phoneNumber.trim() : null,
+        phoneNumber: body.communicationMode === 'PHONE_CALL' ? phoneNumber : null,
         pricePerMinuteMinor: 1000,
         estimatedAmountMinor: body.durationMinutes * 1000,
         meetingRoom: room,
@@ -4514,6 +4480,8 @@ app.get(/^(?!\/api).*/, (_req, res) => {
 })
 
 const httpServer = app.listen(port, host, () => {
+  // Technical monitoring has its own explicit enable flag, independent of clinical workers.
+  startTechnicalMonitor()
   console.log(`DecXpert API listening on http://${host}:${port}`)
   if (process.env.DISABLE_STARTUP_WORKERS === 'true' || process.env.DATABASE_READ_ONLY === 'true') {
     console.log('Startup workers disabled by DISABLE_STARTUP_WORKERS=true')
@@ -5351,7 +5319,6 @@ async function processApplicationJob(jobId: string) {
   })
 
   try {
-    const jobFolder = path.dirname(job.uploadPath)
     const serviceName = serviceNameForType(serviceType)
     const clientService = await prisma.clientService.findFirstOrThrow({
       where: { clientId: job.clientId, service: { name: serviceName }, status: 'ACTIVE' },
@@ -5363,8 +5330,6 @@ async function processApplicationJob(jobId: string) {
       uniqueSegment: job.id,
     })
     const workflowType: string = directRenewistWorkflowType
-    const aiServiceType = aiServiceTypeForServiceType(serviceType)
-    const mammographyResumeJobId = aiServiceType === 'mammography' ? getMammographyUpstreamJobId(queuedState) : undefined
     await queueTeleradiologyOnlyJob({
       job,
       clientService: { ...clientService, workflowType },
@@ -5377,417 +5342,9 @@ async function processApplicationJob(jobId: string) {
       reason: 'Study submitted directly to Renewist for signed reporting. Local AI processing is disabled.',
     })
     return
-    const result = aiServiceType === 'xray'
-      ? await processXrayUpload(job.uploadPath, job.uploadName, reportId, { serviceType, dicomMetadata })
-      : aiServiceType === 'mri'
-        ? await processMriUpload(job.uploadPath, job.uploadName, jobFolder, reportId)
-        : aiServiceType === 'mammography'
-          ? await processMammographyUpload(job.uploadPath, job.uploadName, jobFolder, reportId, {
-            resumeJobId: mammographyResumeJobId,
-            onPrepared: async ({ cleanedPath, imageCount }) => {
-              await prisma.processingJob.update({
-                where: { id: job.id },
-                data: {
-                  imageCount,
-                  cleanedPath,
-                  upstreamStatus: {
-                    state: 'mammography-prepared',
-                    workflowType: job.workflowType,
-                    priority: job.priority ?? 'REGULAR',
-                    clinicalIndication,
-                    dicomMetadata,
-                    imageCount,
-                    cleanedPath,
-                    upstreamJobId: mammographyResumeJobId,
-                  },
-                },
-              })
-            },
-            onStored: async ({ cleanedPath, storage }) => {
-              await prisma.processingJob.update({
-                where: { id: job.id },
-                data: { upstreamStatus: toPrismaJsonObject({
-                  state: storage ? 'mammography-cleaned-study-stored' : 'mammography-cleaned-study-local',
-                  workflowType: job.workflowType, priority: job.priority ?? 'REGULAR', clinicalIndication, dicomMetadata,
-                  cleanedPath, cleanedDicomStorage: storage ?? { localPath: cleanedPath },
-                }) },
-              })
-            },
-            onSubmitted: async ({ jobId, response, endpointId, submittedAt }) => {
-              await prisma.processingJob.update({
-                where: { id: job.id },
-                data: {
-                  upstreamStatus: toPrismaJsonObject({
-                    state: 'mammography-upstream-submitted',
-                    workflowType: job.workflowType,
-                    priority: job.priority ?? 'REGULAR',
-                    clinicalIndication,
-                    dicomMetadata,
-                    upstreamJobId: jobId,
-                    endpointId,
-                    submittedAt,
-                    upstreamResponse: response,
-                  }),
-                },
-              })
-            },
-            onPolled: async ({ jobId, response, endpointId, polledAt, status }) => {
-              await prisma.processingJob.update({
-                where: { id: job.id },
-                data: {
-                  upstreamStatus: toPrismaJsonObject({
-                    state: isFinalMammographyPollStatus(status) ? 'mammography-upstream-final' : 'mammography-upstream-processing',
-                    workflowType: job.workflowType,
-                    priority: job.priority ?? 'REGULAR',
-                    clinicalIndication,
-                    dicomMetadata,
-                    upstreamJobId: jobId,
-                    endpointId,
-                    polledAt,
-                    upstreamStatus: status,
-                    upstreamResponse: response,
-                  }),
-                },
-              })
-            },
-          })
-          : await processCtUpload(job.uploadPath, job.uploadName, jobFolder, reportId, { serviceName, serviceType, dicomMetadata, clinicalIndication })
-    result.html = applyReportMetadata(result.html, dicomMetadata)
-    const billableUnits = billableUnitsForStudy(serviceName, serviceType, result.imageCount)
-    if (!job.demoMode && !isTeleradiologyWorkflow(workflowType) && clientService.credits - clientService.usedCredits < billableUnits) {
-      throw new Error(`Insufficient credits: ${billableUnits} required, ${clientService.credits - clientService.usedCredits} available`)
-    }
-
-    const studyUid = dicomMetadata.studyInstanceUid ?? `APP-${job.id}`
-    const studyData = {
-        clientId: job.clientId,
-        patientId: patientProfileId,
-        studyUid,
-        modality: dicomMetadata.modality ?? defaultModalityForServiceType(serviceType),
-        status: 'SUCCESS',
-        aiResponse: { upstreamStatus: summarizeUpstream(result.upstreamResults) },
-        reportJson: { serviceType, uploadName: job.uploadName, dicomMetadata },
-    } as const
-    const study = await prisma.study.upsert({
-      where: { studyUid },
-      update: studyData,
-      create: studyData,
-    })
-
-    const reportSetting = await getProcessingReportSetting(job.clientId, serviceName)
-    const templatedReport = applyReportTemplate(result.html, result.sections, reportSetting)
-    result.html = templatedReport.html
-    result.sections = templatedReport.sections
-    const teleradiologyProviderCode = isTeleradiologyWorkflow(workflowType)
-      ? clientService.pacsConfig?.teleradiologyProviderCode ?? process.env.TELERADIOLOGY_DEFAULT_PROVIDER ?? 'RENEWIST'
-      : null
-    const outsourceTeleradiology = Boolean(
-      teleradiologyProviderCode
-      && (workflowType === 'AI_TELERADIOLOGY' || clientService.pacsConfig?.outsourceTeleradiology)
-    )
-    const requiresRadiologistReview = Boolean(reportSetting?.radiologistReviewEnabled || teleradiologyProviderCode)
-    const activeRadiologistCount = requiresRadiologistReview
-      ? outsourceTeleradiology ? 0 : await prisma.radiologistProfile.count({ where: teleradiologyProviderCode ? { providerCode: teleradiologyProviderCode, active: true } : { clientId: job.clientId, active: true } })
-      : 0
-    const deliverDirectToPacs = !requiresRadiologistReview && workflowType !== 'AI_ONLY'
-    const finalStatus = requiresRadiologistReview
-      ? outsourceTeleradiology ? 'submitted_to_outsourced_teleradiology' : activeRadiologistCount ? 'sent_to_radiologist' : 'awaiting_radiologist'
-      : deliverDirectToPacs ? 'sent_to_pacs' : 'completed'
-    const finalMessage = requiresRadiologistReview
-      ? outsourceTeleradiology ? 'AI report generated and submitted to outsourced teleradiology' : activeRadiologistCount ? `Report completed and sent to ${activeRadiologistCount} radiologist profile(s) for review` : 'Report completed but no active radiologist is available'
-      : deliverDirectToPacs ? 'Report completed and sent to PACS' : 'AI report generated and ready for client'
-    const reportGeneratedAt = new Date()
-    const reportReviewStatus = requiresRadiologistReview
-      ? outsourceTeleradiology || activeRadiologistCount ? 'PENDING' : 'FAILED'
-      : 'PUSHED'
-    const originalStudyStorage = await storeObject({
-      kind: studyStorageKind(serviceType), keyParts: ['studies', job.id, job.uploadName], body: fsSync.createReadStream(job.uploadPath), contentType: 'application/zip', localPath: job.uploadPath,
-    }).catch((error) => { console.error(`Unable to archive original study ${job.id}`, error); return null })
-    const resultWithCleanedPath = result as typeof result & { cleanedPath?: string }
-    const cleanedStudyPath = resultWithCleanedPath.cleanedPath
-    const cleanedStudyStorage = cleanedStudyPath
-      ? await storeObject({ kind: studyStorageKind(serviceType), keyParts: ['studies', job.id, path.basename(cleanedStudyPath)], body: fsSync.createReadStream(cleanedStudyPath), contentType: 'application/zip', localPath: cleanedStudyPath }).catch((error) => { console.error(`Unable to archive cleaned study ${job.id}`, error); return null })
-      : null
-    const aiInitialStorage = await uploadReportHtmlToS3({ reportId, version: 'ai-initial', html: result.html }).catch((error) => {
-      console.error(`Unable to archive initial AI report ${reportId}`, error)
-      return null
-    })
-    const directFinalStorage = requiresRadiologistReview
-      ? null
-      : await uploadReportHtmlToS3({ reportId, version: 'final', html: result.html }).catch((error) => {
-        console.error(`Unable to archive direct final report ${reportId}`, error)
-        return null
-      })
-    const directPacsDelivery = !deliverDirectToPacs
-      ? null
-      : await sendApprovedReportToPacs({
-        report: {
-          id: reportId,
-          clientId: job.clientId,
-          serviceName,
-          patientName: dicomMetadata.patientName || null,
-          patientId: dicomMetadata.patientId || null,
-          studyUid: study.studyUid,
-          accession: dicomMetadata.accession || null,
-          modality: dicomMetadata.modality ?? defaultModalityForServiceType(serviceType),
-          outputFormat: reportSetting?.dicomReturnFormat ?? 'DICOM_ENCAPSULATED_PDF',
-          aiReportJson: { dicomMetadata },
-          editedReportJson: { dicomMetadata },
-        },
-        htmlReport: result.html,
-        requestedFormat: reportSetting?.dicomReturnFormat ?? 'DICOM_ENCAPSULATED_PDF',
-      })
-    const effectivePriority = await getLatestProcessingPriority(job.id, job.priority)
-    const reportLedgerMetadata = {
-      reportId,
-      generatedAt: reportGeneratedAt.toISOString(),
-      client: {
-        id: clientService.client.id,
-        code: clientService.client.code,
-        name: clientService.client.name,
-        email: clientService.client.email,
-        hospitalSlug: 'marengo',
-      },
-      service: {
-        id: clientService.service.id,
-        code: clientService.service.code,
-        name: serviceName,
-        type: serviceType,
-      },
-      study: {
-        id: study.id,
-        studyUid: study.studyUid,
-        uploadName: job.uploadName,
-        modality: dicomMetadata.modality ?? defaultModalityForServiceType(serviceType),
-        dicomMetadata,
-      },
-      processingJob: {
-        id: job.id,
-        workflowType: job.workflowType ?? clientService.workflowType,
-        clinicalStatus: finalStatus,
-        priority: effectivePriority,
-        imageCount: result.imageCount,
-        billableUnits,
-      },
-      workflow: {
-        radiologistReviewEnabled: requiresRadiologistReview,
-        radiologistId: null,
-        radiologistName: null,
-        providerCode: teleradiologyProviderCode,
-        outsourceTeleradiology,
-        activeRadiologistCount,
-        outputFormat: reportSetting?.dicomReturnFormat ?? 'DICOM_ENCAPSULATED_PDF',
-        status: reportReviewStatus,
-          enabledSections: getEnabledReportSections(reportSetting),
-          clientReportReady: !requiresRadiologistReview,
-        },
-      storage: {
-        originalStudy: originalStudyStorage ?? { localPath: job.uploadPath },
-        cleanedDicoms: cleanedStudyStorage ?? (cleanedStudyPath ? { localPath: cleanedStudyPath } : null),
-        s3InitialReport: aiInitialStorage,
-        s3FinalReport: directFinalStorage,
-      },
-      pacsDelivery: directPacsDelivery,
-      upstreamStatus: summarizeUpstream(result.upstreamResults),
-    }
-
-    await prisma.$transaction([
-      ...result.upstreamResults.map((upstream) => prisma.usageLog.create({
-        data: {
-          clientId: job.clientId,
-          serviceName,
-          studyUid: `APP-${job.id}`,
-          creditsUsed: 0,
-          success: upstream.ok,
-          message: `${upstream.sourceName ?? job.uploadName} sent to ${upstream.name}: ${upstream.ok ? `accepted${upstream.status ? ` (${upstream.status})` : ''}` : upstream.error ?? upstream.status ?? 'rejected'}${upstream.latencyMs ? ` in ${(upstream.latencyMs / 1000).toFixed(1)}s` : ''}`,
-        },
-      })),
-      ...(!job.demoMode && !isTeleradiologyWorkflow(workflowType) ? [prisma.clientService.update({
-        where: { id: clientService.id },
-        data: { usedCredits: { increment: billableUnits } },
-      })] : []),
-      prisma.usageLog.create({
-        data: {
-          clientId: job.clientId,
-          serviceName,
-          studyUid: study.studyUid,
-          creditsUsed: job.demoMode || isTeleradiologyWorkflow(workflowType) ? 0 : billableUnits,
-          success: true,
-          message: job.demoMode ? `${serviceName} demo study processed without billing` : `${serviceName} study processed`,
-        },
-      }),
-      prisma.usageLog.create({
-        data: {
-          clientId: job.clientId,
-          serviceName,
-          studyUid: study.studyUid,
-          creditsUsed: 0,
-          success: Boolean(!requiresRadiologistReview || activeRadiologistCount),
-          message: finalMessage,
-        },
-      }),
-      prisma.job.create({
-        data: {
-          clientId: job.clientId,
-          studyId: study.id,
-          serviceName,
-          status: 'SUCCESS',
-          attempts: 1,
-        },
-      }),
-      prisma.processingJob.update({
-        where: { id: job.id },
-        data: {
-          status: finalStatus,
-          clinicalStatus: reportReviewStatus,
-          upstreamStatus: summarizeUpstream(result.upstreamResults),
-          imageCount: result.imageCount,
-          cleanedPath: resultWithCleanedPath.cleanedPath,
-          reportHtml: result.html,
-          completedAt: new Date(),
-          error: null,
-        },
-      }),
-      prisma.availableBridgeStudy.updateMany({
-        where: { processingJobId: job.id },
-        data: { workflowStatus: 'ReportGenerated' },
-      }),
-      prisma.reportReview.create({
-        data: {
-          id: reportId,
-          clientId: job.clientId,
-          studyId: study.id,
-          radiologistId: null,
-          serviceName,
-          studyUid: study.studyUid,
-          patientName: dicomMetadata.patientName || null,
-          patientId: dicomMetadata.patientId || null,
-          patientProfileId,
-          accession: dicomMetadata.accession || null,
-          modality: dicomMetadata.modality ?? defaultModalityForServiceType(serviceType),
-          status: reportReviewStatus,
-          outputFormat: reportSetting?.dicomReturnFormat ?? 'DICOM_ENCAPSULATED_PDF',
-          locked: !requiresRadiologistReview,
-          generatedAt: reportGeneratedAt,
-          pushedAt: requiresRadiologistReview ? null : reportGeneratedAt,
-          aiReportJson: {
-            htmlReport: result.html,
-            ...result.sections,
-            ...reportLedgerMetadata,
-          },
-          editedReportJson: {
-            htmlReport: result.html,
-            ...result.sections,
-            s3FinalReport: directFinalStorage,
-            pacsDelivery: directPacsDelivery,
-            dicomMetadata,
-            generatedAt: reportGeneratedAt.toISOString(),
-            enabledSections: getEnabledReportSections(reportSetting),
-          },
-        },
-      }),
-      prisma.reportAuditLog.create({
-        data: { reportId, action: 'REPORT_GENERATED_BY_AI', metadata: reportLedgerMetadata },
-      }),
-      prisma.reportAuditLog.create({
-        data: {
-          reportId,
-          action: requiresRadiologistReview
-            ? outsourceTeleradiology ? 'REPORT_SUBMITTED_TO_OUTSOURCED_TELERADIOLOGY' : activeRadiologistCount ? 'REPORT_PARKED_FOR_REVIEW' : 'NO_RADIOLOGIST_AVAILABLE'
-            : deliverDirectToPacs ? 'REPORT_SENT_DIRECT_TO_PACS' : 'AI_REPORT_READY_FOR_CLIENT',
-          metadata: {
-            ...reportLedgerMetadata,
-            finalMessage,
-          },
-        },
-      }),
-    ])
-    await enqueueStudyStatusNotification(prisma, {
-      eventType: 'REPORT_GENERATED',
-      clientId: job.clientId,
-      reportId,
-      processingJobId: job.id,
-      status: reportReviewStatus,
-      patientName: dicomMetadata.patientName,
-      patientId: dicomMetadata.patientId,
-      accession: dicomMetadata.accession,
-      modality: dicomMetadata.modality ?? defaultModalityForServiceType(serviceType),
-      serviceName,
-      idempotencyKey: `study-status:report-generated:${reportId}:${reportReviewStatus}`,
-    })
-    if (outsourceTeleradiology && teleradiologyProviderCode) {
-      await submitOutsourcedTeleradiologyStudy({
-        providerCode: teleradiologyProviderCode,
-        dectrocelJobId: job.id,
-        processingJobId: job.id,
-        reportReviewId: reportId,
-        studyInstanceUid: study.studyUid,
-        accessionNumber: dicomMetadata.accession ?? null,
-        patientId: dicomMetadata.patientId ?? null,
-        modality: dicomMetadata.modality ?? defaultModalityForServiceType(serviceType),
-        workflowType: workflowType as 'AI_ONLY' | 'TELERADIOLOGY_ONLY' | 'AI_TELERADIOLOGY',
-        priority: effectivePriority,
-        aiReportHtml: result.html,
-        studyZipPath: job.uploadPath,
-        metadata: {
-          client: reportLedgerMetadata.client,
-          service: reportLedgerMetadata.service,
-          hospitalSlug: 'marengo',
-          priority: effectivePriority,
-          patientName: dicomMetadata.patientName,
-          patientAge: dicomMetadata.patientAge,
-          patientSex: dicomMetadata.patientSex,
-          clinicalHistory: clinicalIndication,
-          clinicalIndication,
-          clinicalIndicationAttachments,
-          dicomMetadata,
-          aiReportJson: rawRenewistAiReportJson(result.upstreamResults, result.sections, renewistModalityForStudy({ serviceName, serviceType, dicomMetadata })),
-        },
-      })
-    }
-    if (!job.demoMode && getDeploymentFeatures().billing) {
-      const billableServiceName = resolveBillableServiceName({ serviceName, serviceType, dicomMetadata, reportJson: result.sections })
-      await recordBillingEvent({
-        clientId: job.clientId,
-        processingJobId: job.id,
-        studyId: study.id,
-        serviceName: billableServiceName,
-        workflowType: job.workflowType ?? clientService.workflowType,
-        units: billableUnits,
-        studyUid: study.studyUid,
-        modality: dicomMetadata.modality ?? defaultModalityForServiceType(serviceType),
-        priority: effectivePriority,
-        providerCode: clientService.pacsConfig?.teleradiologyProviderCode ?? null,
-        outsourceTeleradiology,
-        assignedServiceName: serviceName,
-      }).catch((billingError) => {
-        console.error(`Billing transaction creation failed for job ${job.id}`, billingError)
-      })
-    }
   } catch (error) {
-    if (error instanceof AiUnavailableError) {
-      await routeFailedAiJobToTeleradiology({ job, serviceType, dicomMetadata: { ...dicomMetadata, modality: dicomMetadata.modality ?? error.modality }, clinicalIndication, clinicalIndicationAttachments, reason: error.message, upstreamResults: error.upstreamResults })
-      return
-    }
-    const workflowType = job.workflowType ?? ''
-    if (isTeleradiologyWorkflow(workflowType)) {
-      const message = error instanceof Error ? error.message : 'AI processing failed'
-      await routeFailedAiJobToTeleradiology({ job, serviceType, dicomMetadata, clinicalIndication, clinicalIndicationAttachments, reason: `AI processing failed; routed to teleradiology without AI report. ${message}` })
-      return
-    }
     const message = error instanceof Error ? error.message : 'Processing failed'
-    const failedAi = error instanceof XrayProcessingError || error instanceof AiProcessingError ? error : null
     await prisma.$transaction([
-      ...(failedAi?.upstreamResults ?? []).map((upstream) => prisma.usageLog.create({
-        data: {
-          clientId: job.clientId,
-          serviceName: serviceNameForType(serviceType),
-          studyUid: `APP-${job.id}`,
-          creditsUsed: 0,
-          success: upstream.ok,
-          message: `${upstream.sourceName ?? job.uploadName} sent to ${upstream.name}: ${upstream.ok ? `accepted${upstream.status ? ` (${upstream.status})` : ''}` : upstream.error ?? upstream.status ?? 'rejected'}${upstream.latencyMs ? ` in ${(upstream.latencyMs / 1000).toFixed(1)}s` : ''}`,
-        },
-      })),
       prisma.usageLog.create({
         data: {
           clientId: job.clientId,
@@ -5812,8 +5369,7 @@ async function processApplicationJob(jobId: string) {
         data: {
           status: 'failed',
           clinicalStatus: 'FAILED',
-          upstreamStatus: failedAi ? summarizeUpstream(failedAi.upstreamResults) : { state: 'failed' },
-          imageCount: failedAi?.imageCount,
+          upstreamStatus: { state: 'failed' },
           error: message,
           completedAt: new Date(),
         },
@@ -5837,39 +5393,6 @@ async function processApplicationJob(jobId: string) {
       error: message,
     })
   }
-}
-
-async function routeFailedAiJobToTeleradiology(input: {
-  job: Awaited<ReturnType<typeof prisma.processingJob.findUniqueOrThrow>>
-  serviceType: string
-  dicomMetadata: DicomMetadata
-  clinicalIndication?: string
-  clinicalIndicationAttachments?: Array<{ filePath: string; originalName: string; mimeType?: string | null; sizeBytes: string }>
-  reason: string
-  upstreamResults?: Array<{ name: string; sourceName?: string; uploadName?: string; ok: boolean; status?: number; latencyMs?: number; error?: string }>
-}) {
-  const serviceName = serviceNameForType(input.serviceType)
-  const clientService = await prisma.clientService.findFirstOrThrow({
-    where: { clientId: input.job.clientId, service: { name: serviceName }, status: 'ACTIVE' },
-    include: { service: true, client: true, pacsConfig: true },
-  })
-  const reportId = await nextReportId({
-    clientCode: clientService.client.code,
-    serviceCode: clientService.service.code,
-    uniqueSegment: input.job.id,
-  })
-  await queueTeleradiologyOnlyJob({
-    job: input.job,
-    clientService,
-    serviceName,
-    serviceType: input.serviceType,
-    reportId,
-    dicomMetadata: input.dicomMetadata,
-    clinicalIndication: input.clinicalIndication,
-    clinicalIndicationAttachments: input.clinicalIndicationAttachments,
-    reason: input.reason,
-    upstreamResults: input.upstreamResults,
-  })
 }
 
 type TeleradiologyQueueClientService = {
@@ -8601,6 +8124,7 @@ function bridgeStudyWithMetadata<T extends { modalities: string[]; studyDescript
 }
 
 async function resolveBridgeStudyService(clientId: string, study: { modalities: string[]; studyDescription?: string | null }, requestedServiceType?: string) {
+  await ensureMarengoServices(prisma, clientId)
   const requested = requestedServiceType ? parseServiceType(requestedServiceType) : null
   const services = await prisma.clientService.findMany({
     where: { clientId, status: 'ACTIVE' },
@@ -9087,14 +8611,7 @@ function getProviderBundleAttachmentReferences(value: unknown, createdAt: Date):
 }
 
 async function resolveSafeBundleFile(candidate: string | null | undefined) {
-  if (!candidate) return null
-  const [realUploadsRoot, realCandidate] = await Promise.all([
-    fs.realpath(uploadsPath).catch(() => path.resolve(uploadsPath)),
-    fs.realpath(path.resolve(candidate)).catch(() => null),
-  ])
-  if (!realCandidate || !isPathInside(realUploadsRoot, realCandidate)) return null
-  const stats = await fs.stat(realCandidate).catch(() => null)
-  return stats?.isFile() ? realCandidate : null
+  return resolveArchivePath(candidate, [uploadsPath, ...(process.env.LEGACY_UPLOAD_ROOTS || '').split(';').filter(Boolean)])
 }
 
 async function sendBridgeStudyBundle(res: Response, study: BridgeBundleStudy) {

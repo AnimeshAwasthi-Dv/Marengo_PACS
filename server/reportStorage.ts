@@ -1,4 +1,4 @@
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { GetObjectCommand, ListObjectsV2Command, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 export type StorageKind = 'original-studies' | 'cleaned-dicoms' | 'ct-studies' | 'mri-studies' | 'xray-studies' | 'mammography-studies' | 'ai-reports' | 'final-reports' | 'provider-reports' | 'clinical-indications'
 export type StoredObject = { key: string; url: string; bucket: string; localPath?: string }
@@ -79,24 +79,37 @@ export async function findStoredStudyObject(input: { kinds: StorageKind[]; keys:
   if (!config) return null
   const buckets = getStudyBuckets(input.kinds)
   if (!buckets.length) return null
-  const prefixes = unique(['', process.env.S3_VIEWER_STUDY_PREFIX, process.env.S3_STUDY_PREFIX, ...input.kinds.map(getS3Prefix)])
+  const prefixes = ['', ...unique([ process.env.S3_VIEWER_STUDY_PREFIX, process.env.S3_STUDY_PREFIX, ...input.kinds.map(getS3Prefix)])]
   const keys = unique(input.keys).flatMap((key) => {
     const cleanKey = key.replace(/^\/+/, '')
     return prefixes.map(prefix => prefix ? `${prefix}/${cleanKey.replace(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`), '')}` : cleanKey)
   })
   const client = new S3Client(config)
+  const signal = AbortSignal.timeout(25_000)
+  const candidates = buckets.flatMap(bucket => unique(keys).map(key => ({ bucket, key })))
+  for (let offset = 0; offset < candidates.length; offset += 8) {
+    signal.throwIfAborted()
+    const found = await Promise.all(candidates.slice(offset, offset + 8).map(async candidate => {
+      try { await client.send(new HeadObjectCommand({ Bucket: candidate.bucket, Key: candidate.key }), { abortSignal: signal }); return { ...candidate, url: 's3://' + candidate.bucket + '/' + candidate.key } }
+      catch (error) { const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode; if (status !== 403 && status !== 404) throw error; return null }
+    }))
+    const match = found.find(Boolean)
+    if (match) return match
+  }
+  // Legacy imports used different directory layouts. Match exact ZIP names,
+  // require a unique object, and never select a different study by partial UID.
+  const names = new Set(input.keys.map(key => key.replaceAll('\\', '/').split('/').at(-1)).filter(name => !!name && /^\d+(?:\.\d+)+\.zip$/i.test(name)))
   for (const bucket of buckets) {
-    for (const key of unique(keys)) {
-      try {
-        await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
-        const base = (process.env.S3_PUBLIC_BASE_URL || process.env.S3_REPORT_PUBLIC_BASE_URL)?.replace(/\/+$/g, '')
-        const url = process.env.S3_URL_MODE === 'public' && base ? `${base}/${key}` : `s3://${bucket}/${key}`
-        return { bucket, key, url }
-      } catch (error) {
-        const status = typeof (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 'number'
-          ? (error as { $metadata: { httpStatusCode: number } }).$metadata.httpStatusCode
-          : undefined
-        if (status && status !== 403 && status !== 404) throw error
+    signal.throwIfAborted()
+    let continuation: string | undefined
+    const matches: string[] = []
+    for (let page = 0; page < 20; page++) {
+      const listed = await client.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: 1000, ContinuationToken: continuation }), { abortSignal: signal })
+      for (const item of listed.Contents ?? []) if (item.Key && names.has(item.Key.split('/').at(-1))) matches.push(item.Key)
+      continuation = listed.NextContinuationToken
+      if (!listed.IsTruncated) {
+        if (matches.length === 1) return { bucket, key: matches[0], url: 's3://' + bucket + '/' + matches[0] }
+        break
       }
     }
   }
