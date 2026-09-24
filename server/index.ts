@@ -51,7 +51,7 @@ import type { ProviderStudySubmission } from './providerAdapters'
 import { ProviderSubmissionError } from './providerAdapters'
 import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
-import { readStoredObject, storeObject, uploadReportHtmlToS3, type StorageKind } from './reportStorage'
+import { findStoredStudyObject, readStoredObject, storeObject, uploadReportHtmlToS3, type StorageKind } from './reportStorage'
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
@@ -137,23 +137,31 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
     select: {
       id: true,
       publicStudyId: true,
+      studyInstanceUid: true,
       archivePath: true,
       archiveName: true,
       modalities: true,
-      processingJob: { select: { upstreamStatus: true } },
+      processingJob: { select: { id: true, uploadName: true, upstreamStatus: true } },
     },
   })
   if (!study) return null
   const storedStudy = getOriginalStudyStorage(study.processingJob?.upstreamStatus)
   const archivePath = await resolveSafeBundleFile(study.archivePath)
-  if (!storedStudy?.key && !archivePath) return null
+  const kind = studyViewerStorageKind(study.modalities)
+  const discoveredStudy = storedStudy?.key ? null : await findStoredStudyObject({
+    kinds: [kind, 'original-studies', 'cleaned-dicoms'],
+    keys: bridgeStudyS3KeyCandidates(study),
+  }).catch((error) => {
+    console.warn(`Unable to search S3 for bridge study ${study.id}:`, error instanceof Error ? error.message : error)
+    return null
+  })
+  if (!storedStudy?.key && !discoveredStudy?.key && !archivePath) return null
   const cached = externalViewerImports.get(study.id)
-  const sourceIdentity = storedStudy?.key ?? archivePath ?? ''
+  const sourceIdentity = storedStudy?.key ?? discoveredStudy?.key ?? archivePath ?? ''
   if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return cached.viewerUrl
   let importId = cached?.archivePath === sourceIdentity ? cached.importId : ''
-  const kind = studyViewerStorageKind(study.modalities)
   if (!importId) {
-    const storage = storedStudy?.key ? { key: storedStudy.key } : await storeObject({
+    const storage = storedStudy?.key || discoveredStudy?.key ? { key: storedStudy?.key ?? discoveredStudy!.key } : await storeObject({
       kind,
       keyParts: ['viewer-imports', study.id, study.archiveName || path.basename(archivePath!)],
       body: fsSync.createReadStream(archivePath!),
@@ -177,6 +185,37 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
   if (!session.viewerUrl) throw new Error('DICOM viewer service did not return a viewer URL')
   externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: 'completed', viewerUrl: session.viewerUrl, expiresAt: session.expiresAt ?? Date.now() + 55 * 60 * 1000 })
   return session.viewerUrl
+}
+
+function bridgeStudyS3KeyCandidates(study: {
+  id: string
+  publicStudyId: string
+  studyInstanceUid: string
+  archivePath: string | null
+  archiveName: string | null
+  processingJob: { id: string; uploadName: string; upstreamStatus: unknown } | null
+}) {
+  const names = [
+    study.archiveName,
+    study.processingJob?.uploadName,
+    `${study.studyInstanceUid}.zip`,
+    `${study.publicStudyId}.zip`,
+    `${study.id}.zip`,
+  ].filter((value): value is string => Boolean(value))
+  const archivePath = study.archivePath?.trim()
+  const pathKey = archivePath
+    ? archivePath.match(/^s3:\/\/[^/]+\/(.+)$/i)?.[1] ?? archivePath.replace(/\\/g, '/').replace(/^[A-Za-z]:\//, '').replace(/^\/+/, '')
+    : ''
+  return [
+    pathKey,
+    ...names,
+    ...names.flatMap(name => [
+      `studies/${study.processingJob?.id ?? study.id}/${name}`,
+      `studies/${study.id}/${name}`,
+      `studies/${study.publicStudyId}/${name}`,
+      `viewer-imports/${study.id}/${name}`,
+    ]),
+  ]
 }
 
 function userIdForEmail(email: string) {

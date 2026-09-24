@@ -1,4 +1,4 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 export type StorageKind = 'original-studies' | 'cleaned-dicoms' | 'ct-studies' | 'mri-studies' | 'xray-studies' | 'mammography-studies' | 'ai-reports' | 'final-reports' | 'provider-reports' | 'clinical-indications'
 export type StoredObject = { key: string; url: string; bucket: string; localPath?: string }
@@ -29,6 +29,28 @@ function getS3Config(kind: StorageKind) {
   }
 }
 
+function unique(values: Array<string | undefined | null>) {
+  return Array.from(new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value))))
+}
+
+function getS3Prefix(kind: StorageKind) {
+  return (prefixVariables[kind] && process.env[prefixVariables[kind]!] || process.env.S3_PREFIX || process.env.S3_REPORT_PREFIX || '').replace(/^\/+|\/+$/g, '')
+}
+
+function getStudyBuckets(kinds: StorageKind[]) {
+  return unique([
+    process.env.S3_VIEWER_STUDY_BUCKETS,
+    process.env.S3_STUDY_BUCKETS,
+  ].flatMap(value => value?.split(',') ?? []).concat(
+    kinds.map(kind => process.env[bucketVariables[kind]]),
+    process.env.S3_ORIGINAL_STUDIES_BUCKET,
+    process.env.S3_CT_STUDIES_BUCKET,
+    process.env.S3_MRI_STUDIES_BUCKET,
+    process.env.S3_XRAY_STUDIES_BUCKET,
+    process.env.S3_MAMMOGRAPHY_STUDIES_BUCKET,
+  ))
+}
+
 function getS3ClientConfig() {
   const accessKeyId = process.env.S3_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID
   const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY
@@ -50,6 +72,35 @@ export async function storeObject(input: { kind: StorageKind; keyParts: string[]
   const base = config.publicBaseUrl?.replace(/\/+$/g, '')
   const url = config.public && base ? `${base}/${key}` : `s3://${config.bucket}/${key}`
   return { key, url, bucket: config.bucket, localPath: input.localPath }
+}
+
+export async function findStoredStudyObject(input: { kinds: StorageKind[]; keys: string[] }): Promise<StoredObject | null> {
+  const config = getS3ClientConfig()
+  if (!config) return null
+  const buckets = getStudyBuckets(input.kinds)
+  if (!buckets.length) return null
+  const prefixes = unique(['', process.env.S3_VIEWER_STUDY_PREFIX, process.env.S3_STUDY_PREFIX, ...input.kinds.map(getS3Prefix)])
+  const keys = unique(input.keys).flatMap((key) => {
+    const cleanKey = key.replace(/^\/+/, '')
+    return prefixes.map(prefix => prefix ? `${prefix}/${cleanKey.replace(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`), '')}` : cleanKey)
+  })
+  const client = new S3Client(config)
+  for (const bucket of buckets) {
+    for (const key of unique(keys)) {
+      try {
+        await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+        const base = (process.env.S3_PUBLIC_BASE_URL || process.env.S3_REPORT_PUBLIC_BASE_URL)?.replace(/\/+$/g, '')
+        const url = process.env.S3_URL_MODE === 'public' && base ? `${base}/${key}` : `s3://${bucket}/${key}`
+        return { bucket, key, url }
+      } catch (error) {
+        const status = typeof (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 'number'
+          ? (error as { $metadata: { httpStatusCode: number } }).$metadata.httpStatusCode
+          : undefined
+        if (status && status !== 403 && status !== 404) throw error
+      }
+    }
+  }
+  return null
 }
 
 export async function readStoredObject(input: Pick<StoredObject, 'bucket' | 'key'>): Promise<Buffer | null> {

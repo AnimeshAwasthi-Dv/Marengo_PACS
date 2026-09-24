@@ -1,0 +1,33 @@
+*   Trying 13.232.14.234...
+* TCP_NODELAY set
+* Connected to 13.232.14.234 (13.232.14.234) port 80 (#0)
+> GET / HTTP/1.1
+> Host: 13.232.14.234
+> User-Agent: curl/7.55.1
+> Accept: */*
+> 
+< HTTP/1.1 200 OK
+< Accept-Ranges: bytes
+< Cache-Control: public, max-age=0
+< Content-Length: 491
+< Content-Security-Policy: frame-src 'self' blob: http://13.206.223.5:3000;default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests
+< Content-Type: text/html; charset=utf-8
+< Cross-Origin-Opener-Policy: same-origin
+< Cross-Origin-Resource-Policy: same-origin
+< Date: Wed, 23 Sep 2026 23:04:09 GMT
+< Etag: W/"1eb-1a0d07a63c8"
+< Last-Modified: Wed, 23 Sep 2026 22:54:37 GMT
+< Origin-Agent-Cluster: ?1
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000; includeSubDomains
+< Vary: Origin
+< Via: 1.1 Caddy
+< X-Content-Type-Options: nosniff
+< X-Dns-Prefetch-Control: off
+< X-Download-Options: noopen
+< X-Frame-Options: SAMEORIGIN
+< X-Permitted-Cross-Domain-Policies: none
+< X-Xss-Protection: 0
+< 
+{ [491 bytes data]
+* Connection #0 to host 13.232.14.234 left intact
