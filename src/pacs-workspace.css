@@ -198,6 +198,8 @@ body.pacs-reference-mode .app-shell .mobile-nav { display: none !important; }
 .pw-media-body > img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; margin: auto; }
 .pw-media-body > pre { margin: 0; padding: 24px; white-space: pre-wrap; overflow-wrap: anywhere; color: #e0e7f2; font-size: 14px; }
 @media (max-width: 640px) { .pw-media-overlay { padding: 0; }.pw-media { border-radius: 0; }.pw-media > header { padding: 10px; }.pw-media h2 { font-size: 13px; } }
+/* Phones in landscape: give the viewer every pixel of height. */
+@media (max-height: 500px) { .pw-media-overlay { padding: 0; }.pw-media { border-radius: 0; }.pw-media > header { padding: 4px 10px; }.pw-media > header button { height: 30px; }.pw-media h2 { font-size: 13px; } }
 .pw-received span { display: block; margin-left: 0; color: #8f9cad; font-size: 12px; font-variant-numeric: tabular-nums; }
 .pw-status { display: inline-flex; align-items: center; gap: 6px; height: 23px; padding: 0 7px; border-radius: 4px; color: #a9c7f3; background: #2a3649; font-size: 11px; font-weight: 500; }
 .pw-status i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }

@@ -59,6 +59,7 @@ import { ProviderSubmissionError } from './providerAdapters'
 import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
 import { findStoredStudyObject, readStoredObject, storeObject, uploadReportHtmlToS3, type StorageKind } from './reportStorage'
+import { bridgeStudyS3KeyCandidates, studyViewerStorageKind } from './lib/studyStorage'
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
@@ -101,13 +102,6 @@ function viewerServiceConfig() {
   return { baseUrl: viewerBaseUrl.replace(/\/+$/g, ''), apiKey }
 }
 
-function studyViewerStorageKind(modalities: string[] | null | undefined): Extract<StorageKind, 'ct-studies' | 'mri-studies' | 'xray-studies' | 'mammography-studies'> {
-  const values = new Set((modalities ?? []).map(value => value.toUpperCase()))
-  if (values.has('CT')) return 'ct-studies'
-  if (values.has('MRI') || values.has('MR')) return 'mri-studies'
-  if (values.has('MG') || values.has('MAMMOGRAPHY')) return 'mammography-studies'
-  return 'xray-studies'
-}
 
 function viewerModality(kind: ReturnType<typeof studyViewerStorageKind>) {
   if (kind === 'ct-studies') return 'CT'
@@ -195,36 +189,6 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
   return session.viewerUrl
 }
 
-function bridgeStudyS3KeyCandidates(study: {
-  id: string
-  publicStudyId: string
-  studyInstanceUid: string
-  archivePath: string | null
-  archiveName: string | null
-  processingJob: { id: string; uploadName: string; upstreamStatus: unknown } | null
-}) {
-  const names = [
-    study.archiveName,
-    study.processingJob?.uploadName,
-    `${study.studyInstanceUid}.zip`,
-    `${study.publicStudyId}.zip`,
-    `${study.id}.zip`,
-  ].filter((value): value is string => Boolean(value))
-  const archivePath = study.archivePath?.trim()
-  const pathKey = archivePath
-    ? archivePath.match(/^s3:\/\/[^/]+\/(.+)$/i)?.[1] ?? archivePath.replace(/\\/g, '/').replace(/^[A-Za-z]:\//, '').replace(/^\/+/, '')
-    : ''
-  return [
-    pathKey,
-    ...names,
-    ...names.flatMap(name => [
-      `studies/${study.processingJob?.id ?? study.id}/${name}`,
-      `studies/${study.id}/${name}`,
-      `studies/${study.publicStudyId}/${name}`,
-      `viewer-imports/${study.id}/${name}`,
-    ]),
-  ]
-}
 
 function userIdForEmail(email: string) {
   const prefix = email.split('@')[0]!.toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40) || 'user'
@@ -256,7 +220,8 @@ app.use('/api', (req, res, next) => {
     && !(req.method === 'POST' && req.path === '/auth/login')) return res.status(403).json({ message: 'Production database is read-only. Changes are disabled.' })
   next()
 })
-app.use(helmet({ contentSecurityPolicy: { directives: { frameSrc: ["'self'", 'blob:', ...(externalViewerOrigin() ? [externalViewerOrigin()!] : [])] } } }))
+// 'wasm-unsafe-eval' lets the QuickView worker compile its WebAssembly image decoders; it does not allow JavaScript eval.
+app.use(helmet({ contentSecurityPolicy: { directives: { frameSrc: ["'self'", 'blob:', ...(externalViewerOrigin() ? [externalViewerOrigin()!] : [])], scriptSrc: ["'self'", "'wasm-unsafe-eval'"] } } }))
 app.post('/api/v1/billing/razorpay/webhook', requireDeploymentFeature('billing'), express.raw({ type: 'application/json', limit: '2mb' }), handleRazorpayWebhook)
 app.use(express.json({
   limit: '12mb',

@@ -12,3 +12,11 @@ tmp/
 *.sql.gz
 *.dump
 .DS_Store
+
+# Local-only: agent harness docs and test files are not pushed
+Harness/
+CLAUDE.md
+Faller.md
+*.test.ts
+*.test.tsx
+server/testing/

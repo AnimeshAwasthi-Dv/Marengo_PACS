@@ -43,6 +43,17 @@ EXTERNAL_VIEWER_URL_TEMPLATE=https://viewer.example.com/viewer?StudyInstanceUIDs
 
 The external viewer must independently authenticate users and already be able to retrieve the study, for example from its own DICOMweb/PACS source. This URL adapter does not upload studies, proxy a manifest, implement remote SSO or configure DICOMweb. Those details must be connected once the viewer's interface is provided. Public report sharing does not grant anonymous access to the remote viewer. The viewer must allow the portal origin in its `frame-ancestors` policy for embedding; a new-tab link is also provided. The portal's CSP automatically allows the configured viewer origin.
 
+### QuickView (in-app viewer for small 2D studies)
+
+With `QUICKVIEW_ENABLED=true`, X-ray (CR/DX/DR), mammography (MG), ultrasound (US), XA and secondary-capture studies up to `QUICKVIEW_MAX_BYTES` (default 150 MB) open inside the portal instead of the external viewer. **CT, MR, PET and NM studies, and studies with an unknown modality or size, always open in the external viewer.** If QuickView cannot load a study, it switches to the full viewer automatically.
+
+- The server reads only DICOM headers to build the image list, and then streams single images out of the stored study ZIP (local `uploads/`, or S3 found the same way as the external viewer import). It uses the same authorization as each viewer entry point.
+- A ~1024 px JPEG preview of each image (rendered in a `worker_threads` thread) is shown first, then full resolution replaces it. Big uncompressed images get a lossless JPEG copy (DCMTK `dcmcjpeg`, started as soon as the study is indexed); image requests wait up to 4 s for it, which cuts real X-ray downloads 2–4×. S3 downloads, previews and lossless copies are cached under `uploads/quickview-cache/` for 24 hours.
+- The browser decodes images in a Web Worker (`dcmjs-imaging`, WebAssembly codecs: uncompressed, JPEG baseline/extended/lossless, JPEG-LS, JPEG 2000, RLE). Window/level, zoom, pan, invert, rotate and flip run locally.
+- Tools: Window/Level, Pan, Zoom, Length, Note, Angle, Rectangle/Ellipse ROI (area, mean, SD, min, max from real pixel values), Probe, Invert, Rotate, Flip, Undo, Cine, Export study (ZIP of the original DICOM) and DICOM tags. MPR is for CT/MR, which always open in the full viewer.
+- "Open viewer in a new tab" opens `/viewer?session=…`, which applies the same choice: QuickView studies open there full-screen, and all others redirect to the external viewer.
+- The CSP allows `'wasm-unsafe-eval'` so the worker can compile its WebAssembly decoders. JavaScript `eval` stays blocked.
+
 After configuration changes:
 
 ```bash

@@ -77,6 +77,7 @@ import { istTimestamp, worklistDuration, worklistTatStart, worklistTatEnd, workl
 import { workspacePermissions, assignableCenterRoles, clientWorkspaceTabs } from "./workspacePermissions";
 
 import { StudyStatusPage } from "./StudyStatusPage";
+import { PORTAL_TOKEN_KEY } from "./lib/session";
 
 import { WorkspaceDrawer, WorkspaceDrawerContext } from "./WorkspaceDrawer";
 import {
@@ -200,7 +201,7 @@ function clientPortalRoleLabel(role?: ClientPortalRole | null) {
 
 
 
-const tokenKey = "decxpert_portal_token";
+const tokenKey = PORTAL_TOKEN_KEY;
 const formatLabels: Record<ReturnFormat, string> = {
   DICOM_ENCAPSULATED_PDF: "DICOM Encapsulated PDF",
   DICOM_SECONDARY_CAPTURE: "DICOM Secondary Capture",

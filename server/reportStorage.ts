@@ -1,3 +1,8 @@
+import fs from 'node:fs'
+import fsp from 'node:fs/promises'
+import path from 'node:path'
+import { Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { GetObjectCommand, ListObjectsV2Command, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 export type StorageKind = 'original-studies' | 'cleaned-dicoms' | 'ct-studies' | 'mri-studies' | 'xray-studies' | 'mammography-studies' | 'ai-reports' | 'final-reports' | 'provider-reports' | 'clinical-indications'
@@ -131,6 +136,33 @@ export async function readStoredObject(input: Pick<StoredObject, 'bucket' | 'key
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
   }
   return Buffer.concat(chunks)
+}
+
+/** Streams an S3 object to a local file without holding it in memory. Refuses objects above maxBytes. */
+export async function downloadStoredObjectToFile(input: Pick<StoredObject, 'bucket' | 'key'>, destination: string, maxBytes: number): Promise<boolean> {
+  const config = getS3ClientConfig()
+  if (!config || !input.bucket || !input.key) return false
+  const client = new S3Client(config)
+  const response = await client.send(new GetObjectCommand({ Bucket: input.bucket, Key: input.key }), { abortSignal: AbortSignal.timeout(120_000) })
+  if (!response.Body) return false
+  if (typeof response.ContentLength === 'number' && response.ContentLength > maxBytes) throw new Error('Stored study is larger than the QuickView limit')
+  await fsp.mkdir(path.dirname(destination), { recursive: true })
+  const partial = `${destination}.${process.pid}.${Date.now()}.part`
+  let received = 0
+  const limiter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      received += chunk.length
+      callback(received > maxBytes ? new Error('Stored study is larger than the QuickView limit') : null, chunk)
+    },
+  })
+  try {
+    await pipeline(response.Body as NodeJS.ReadableStream, limiter, fs.createWriteStream(partial))
+    await fsp.rename(partial, destination)
+    return true
+  } catch (error) {
+    await fsp.rm(partial, { force: true })
+    throw error
+  }
 }
 
 export async function uploadReportHtmlToS3(input: { reportId: string; version: 'ai-initial' | 'final'; html: string }): Promise<StoredObject | null> {

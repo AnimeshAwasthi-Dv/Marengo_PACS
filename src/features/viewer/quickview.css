@@ -1,0 +1,226 @@
+/* QuickView: matches the DecXpert Viewer design tokens. Everything is namespaced under .qv-shell so the
+   portal's global button/input styles never leak in. */
+.qv-shell {
+  --qv-line: #1b2834;
+  --qv-panel: #0b1117;
+  --qv-text: #d9e4ef;
+  --qv-muted: #8195a7;
+  --qv-accent: #6cc8ff;
+  --qv-chip: #8fd8ff;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 60vh;
+  color: var(--qv-text);
+  background: linear-gradient(#0d1319, #06080c 42%, #030405);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+}
+/* The viewer modal renders inside .pacs-workspace, whose global control rules (fixed 34px height, padding,
+   !important borders/backgrounds on inputs) must not apply here. This sheet loads after the portal CSS,
+   so equal-specificity resets win; the !important ones match the portal's own !important rules. */
+.qv-shell button { display: inline-flex; align-items: center; justify-content: flex-start; gap: 0; height: auto; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; color: inherit; font: inherit; white-space: normal; box-shadow: none; cursor: pointer; }
+.qv-shell :is(input, select) { height: auto; min-height: 0 !important; max-width: none; margin: 0; padding: 0; border: 0 !important; border-radius: 0 !important; background: transparent !important; color: inherit !important; box-shadow: none !important; font: inherit; }
+.qv-shell button:disabled { cursor: not-allowed; opacity: .45; }
+.qv-shell :focus-visible { outline: 2px solid var(--qv-accent); outline-offset: 1px; }
+
+/* Patient header */
+/* Same columns as the full viewer: brand | patient (1fr) | study (1.2fr, left-aligned) | date + modality. */
+.qv-patient-header { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: center; column-gap: 18px; min-height: 44px; padding: 0 18px; line-height: 18px; background: var(--qv-panel); border-bottom: 1px solid var(--qv-line); color: #a8b8c7; }
+.qv-patient-header > div { display: flex; align-items: baseline; gap: 10px; min-width: 0; white-space: nowrap; }
+.qv-patient-header strong { font-size: 13px; font-weight: 650; }
+.qv-brand strong { color: #7ed6ff; letter-spacing: .26px; }
+.qv-brand span { font-size: 11px; color: #6d8497; }
+.qv-patient strong { color: #eef6ff; overflow: hidden; text-overflow: ellipsis; }
+.qv-study { overflow: hidden; }
+.qv-modality { justify-content: flex-end; }
+.qv-study span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.qv-modality strong { color: #eef6ff; }
+
+/* Toolbar */
+.qv-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 46px; padding: 0 12px; background: var(--qv-panel); border-bottom: 1px solid var(--qv-line); }
+.qv-tool-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.qv-tool-sep { width: 1px; height: 22px; margin: 0 4px; background: var(--qv-line); }
+.qv-shell .qv-tool { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border: 1px solid #253341; border-radius: 6px; background: #101821; color: #cbd8e5; font-size: 11px; line-height: 1; box-shadow: none; }
+.qv-shell .qv-tool:hover:not(:disabled) { background: #152231; border-color: #33475a; }
+.qv-shell .qv-tool.active, .qv-shell .qv-tool.active:hover:not(:disabled) { background: #143144; border-color: var(--qv-accent); color: #fff; } /* active wins over hover, as in the full viewer */
+.qv-shell .qv-tool svg { width: 16px; height: 16px; flex: none; }
+.qv-tool-actions { position: relative; }
+/* More menu: same structure and tokens as the full viewer's (.more-menu): titled sections of 3-column
+   button grids, an FPS / Layout row, and Export / Tags / Keys. */
+.qv-more-menu { position: absolute; top: calc(100% + 8px); right: 0; z-index: 20; width: 394px; padding: 10px; background: rgba(6, 13, 19, .98); border: 1px solid #2b4659; border-radius: 8px; box-shadow: 0 16px 36px rgba(0, 0, 0, .5); }
+.qv-menu-section { padding: 8px 0; border-bottom: 1px solid #132431; }
+.qv-menu-section:last-child { border-bottom: 0; }
+.qv-menu-title { display: block; margin: 0 0 7px; font-size: 10px; line-height: 14px; letter-spacing: .9px; text-transform: uppercase; color: #7f95a8; }
+.qv-menu-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.qv-shell .qv-menu-grid .qv-tool { justify-content: center; font-size: 10px; }
+.qv-menu-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; }
+/* The portal's global `label { … !important }` (bold uppercase) must not restyle these. */
+.qv-shell .qv-menu-row label { font-size: 11px !important; font-weight: 400 !important; letter-spacing: normal !important; text-transform: none !important; color: #9cb0bf !important; }
+.qv-shell .qv-menu-row select { height: 30px; padding: 0 10px; font-size: 16px; color: #cbd8e5 !important; background: #101821 !important; border: 1px solid #253341 !important; border-radius: 6px !important; }
+.qv-menu-actions { display: none; } /* phones only */
+.qv-shortcuts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 4px 2px 0; font-size: 11px; color: #a8b8c7; }
+.qv-shortcuts dt { color: #eef6ff; font-weight: 600; }
+.qv-shortcuts dd { margin: 0; }
+
+/* Workstation */
+.qv-workstation { display: flex; flex: 1; min-height: 0; }
+.qv-series-panel { display: flex; flex-direction: column; width: 360px; flex: none; background: #020513; border-right: 1px solid var(--qv-line); min-height: 0; }
+.qv-series-panel.collapsed { width: 44px; }
+.qv-series-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 56px; flex: none; padding: 0 12px 0 16px; background: #050824; border-bottom: 1px solid #172636; color: #7f95a8; }
+.qv-series-panel.collapsed .qv-series-header { padding: 0; justify-content: center; }
+.qv-panel-title { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: .88px; text-transform: uppercase; }
+.qv-panel-title svg { width: 15px; height: 15px; }
+.qv-series-header-main { display: flex; align-items: center; gap: 10px; }
+.qv-view-toggle { display: flex; gap: 3px; padding: 3px; background: #071332; border: 1px solid #10243c; border-radius: 7px; }
+.qv-shell .qv-view-toggle button, .qv-shell .qv-icon-button { display: grid; place-items: center; width: 34px; height: 32px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #6ea6e8; }
+.qv-shell .qv-view-toggle button:hover { background: #0b1a33; color: #cfe8ff; }
+.qv-shell .qv-view-toggle button.active { background: #123e67; border-color: transparent; color: #8fd8ff; }
+.qv-shell .qv-icon-button:hover { background: #0b1a33; }
+.qv-series-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 6px; padding: 8px 10px; overflow: auto; min-height: 0; }
+.qv-series-strip.list { grid-template-columns: 1fr; }
+.qv-shell .qv-series-tile { display: flex; flex-direction: column; align-items: stretch; gap: 7px; padding: 6px; text-align: left; border: 1px solid #16222e; border-radius: 5px; background: #07101c; color: var(--qv-text); }
+.qv-shell .qv-series-tile:hover { background: #0a1728; border-color: #22364a; color: var(--qv-text); }
+.qv-shell .qv-series-tile.selected, .qv-shell .qv-series-tile.selected:hover { background: #092d62; border-color: #123f77; box-shadow: inset 3px 0 0 #54caff, 0 0 0 1px rgba(84, 202, 255, .16), 0 8px 20px rgba(84, 202, 255, .08); }
+.qv-series-strip.list .qv-series-tile { flex-direction: row; align-items: center; }
+.qv-series-preview { position: relative; display: grid; place-items: center; height: 146px; overflow: hidden; border: 1px solid #2a3f50; border-radius: 4px; background: #000 linear-gradient(135deg, rgba(84, 202, 255, .08), transparent 46%); }
+.qv-series-strip.list .qv-series-preview { width: 72px; height: 64px; flex: none; }
+.qv-series-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.qv-series-count { position: absolute; right: 5px; bottom: 5px; min-width: 18px; padding: 3px 5px; font-size: 10px; line-height: 10px; text-align: center; color: #dbefff; background: rgba(0, 0, 0, .72); border: 1px solid rgba(255, 255, 255, .1); border-radius: 4px; }
+.qv-series-info { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding: 0 3px 3px; }
+.qv-series-info strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 700; line-height: 15px; color: #f1f8ff; }
+.qv-series-modality { padding: 2px 5px; font-size: 10px; font-weight: 700; letter-spacing: .4px; color: var(--qv-chip); background: #0d202d; border: 1px solid #25465a; border-radius: 4px; }
+.qv-series-meta { font-size: 11px; color: #9ec4df; }
+
+/* Viewport */
+.qv-viewport-grid { position: relative; display: grid; flex: 1; min-width: 0; min-height: 0; gap: 1px; background: #1b2834; }
+.qv-viewport-grid > .qv-viewport-stage { min-height: 0; }
+.qv-viewport-stage.active { box-shadow: inset 0 0 0 1px #6cc8ff; }
+.qv-connected { position: absolute; right: 12px; bottom: 2px; z-index: 5; padding: 6px 12px; font-size: 12px; color: #c4e7ef; background: #152833; border-radius: 6px; pointer-events: none; }
+.qv-viewport-stage { position: relative; flex: 1; min-width: 0; overflow: hidden; background: #000; cursor: crosshair; touch-action: none; user-select: none; outline: none; }
+.qv-viewport-stage[data-tool="pan"] { cursor: grab; }
+.qv-viewport-stage[data-tool="zoom"] { cursor: zoom-in; }
+.qv-image-layer { position: absolute; left: 50%; top: 50%; transform-origin: center; }
+.qv-image-layer > canvas, .qv-image-layer > img { position: absolute; inset: 0; width: 100%; height: 100%; }
+.qv-image-layer > svg { position: absolute; inset: 0; overflow: visible; }
+.qv-ov { position: absolute; display: flex; flex-direction: column; gap: 3px; font-size: 12px; line-height: 17px; color: rgba(215, 230, 242, .86); text-shadow: 0 0 3px #000, 0 1px 2px #000; /* readable over bright bone */ pointer-events: none; }
+.qv-ov.top-left { top: 12px; left: 14px; }
+.qv-ov.top-right { top: 12px; right: 14px; text-align: right; }
+/* Long names/descriptions stop short of the centred preset menu instead of running under it. */
+.qv-ov.top-left, .qv-ov.top-right { max-width: calc(50% - 64px); }
+.qv-ov span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qv-ov.bottom-left { bottom: 12px; left: 14px; }
+.qv-ov.bottom-right { bottom: 12px; right: 14px; text-align: right; }
+.qv-orientation { position: absolute; font-size: 12px; font-weight: 700; color: var(--qv-chip); text-shadow: 0 1px 2px #000; pointer-events: none; }
+.qv-orientation.top { top: 8px; left: 50%; } /* same anchors as the full viewer (50%, not centred) */
+.qv-orientation.bottom { bottom: 8px; left: 50%; }
+.qv-orientation.left { left: 8px; top: 50%; }
+.qv-orientation.right { right: 8px; top: 50%; }
+.qv-viewport-controls { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); }
+.qv-shell .qv-preset { height: 28px; padding: 0 8px; font-size: 16px; color: #c8d6e2 !important; background: rgba(8, 13, 18, .85) !important; border: 1px solid #263847 !important; border-radius: 5px !important; }
+.qv-shell .qv-preset option { background: #0b1117; color: #d9e4ef; }
+.qv-scrubber { position: absolute; bottom: 12px; left: 50%; display: flex; align-items: center; gap: 10px; width: min(520px, calc(100% - 320px)); min-width: 220px; padding: 7px 10px; transform: translateX(-50%); font-size: 11px; color: #bcd1df; background: rgba(5, 10, 14, .78); border: 1px solid rgba(38, 56, 71, .9); border-radius: 6px; }
+.qv-shell .qv-scrubber input { flex: 1; height: 16px; accent-color: var(--qv-accent); }
+.qv-stage-status { position: absolute; inset: 0; display: grid; place-items: center; color: #9fb3c4; font-size: 13px; pointer-events: none; }
+.qv-resolution { position: absolute; right: 12px; bottom: 40px; padding: 6px 12px; font-size: 12px; color: #c4e7ef; background: #152833; border-radius: 6px; pointer-events: none; }
+.qv-measure .qv-note { fill: #ffe7a3; }
+.qv-shell .qv-note-input { position: absolute; z-index: 15; width: 220px; height: 30px; padding: 0 8px; color: #eef6ff !important; background: rgba(8, 13, 18, .92) !important; border: 1px solid var(--qv-accent) !important; border-radius: 5px !important; }
+.qv-measure line, .qv-measure rect, .qv-measure ellipse, .qv-measure polyline { stroke: var(--qv-accent); stroke-linecap: round; stroke-linejoin: round; fill: none; }
+.qv-measure .qv-note { stroke: #000; }
+.qv-measure circle { fill: var(--qv-accent); }
+.qv-measure text { fill: #eaf7ff; paint-order: stroke; stroke: #000; font-family: inherit; font-weight: 600; }
+
+/* Status bar */
+.qv-status-bar { display: flex; align-items: center; gap: 18px; min-height: 28px; padding: 0 14px; font-size: 11px; color: var(--qv-muted); background: var(--qv-panel); border-top: 1px solid var(--qv-line); white-space: nowrap; overflow: hidden; }
+
+/* DICOM tags panel: slides over the right side of the image. */
+.qv-tags-panel { position: absolute; top: 8px; right: 8px; bottom: 8px; z-index: 25; display: flex; flex-direction: column; width: min(560px, calc(100% - 16px)); background: rgba(8, 13, 18, .96); border: 1px solid #253341; border-radius: 6px; box-shadow: 0 16px 36px rgba(0, 0, 0, .5); cursor: default; }
+.qv-tags-head { display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid var(--qv-line); }
+.qv-tags-head strong { font-size: 12px; color: #eef6ff; white-space: nowrap; }
+.qv-shell .qv-tags-head input { flex: 1; min-width: 0; height: 30px; padding: 0 8px; border: 1px solid #253341 !important; border-radius: 5px !important; background: #0b1117 !important; }
+.qv-tags-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 8px 8px; user-select: text; }
+.qv-tags-body table { width: 100%; border-collapse: collapse; font-size: 11px; }
+/* The portal's global `tbody td { … !important }` would otherwise restyle this table. */
+.qv-shell .qv-tags-body td { padding: 4px 6px !important; border-bottom: 1px solid #131d27 !important; vertical-align: top; color: #cbd8e5 !important; font-size: 11px !important; font-weight: 400 !important; line-height: 16px; overflow-wrap: anywhere; }
+.qv-shell .qv-tags-body .qv-tag-id { font-family: ui-monospace, monospace; color: #8fd8ff !important; white-space: nowrap; }
+.qv-shell .qv-tags-body .qv-tag-vr { color: #6d8497 !important; white-space: nowrap; }
+.qv-tags-body p { margin: 12px 4px; color: #a8b8c7; }
+
+.qv-message { display: grid; place-items: center; gap: 12px; height: 100%; min-height: 16rem; padding: 24px; text-align: center; }
+
+/* ---------- Narrow screens (phones, small tablets) ---------- */
+@media (max-width: 900px) {
+  .qv-patient-header > .qv-brand, .qv-patient-header > .qv-study { display: none; } /* beats the base `.qv-patient-header > div` */
+  /* The desktop grid needs the brand/study columns; phones show patient + date/modality in one row. */
+  .qv-patient-header { display: flex; gap: 10px; min-height: 36px; padding: 0 12px; }
+  .qv-patient { flex: 1; overflow: hidden; }
+  .qv-patient span { overflow: hidden; text-overflow: ellipsis; }
+  .qv-modality { flex: none; }
+  /* One toolbar row: the tools scroll sideways, More stays pinned on the right. */
+  .qv-toolbar { gap: 6px; padding: 0 8px; }
+  .qv-toolbar > .qv-tool-group:first-child { flex: 1; flex-wrap: nowrap; min-width: 0; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); } /* fade hints that more tools scroll into view */
+  .qv-toolbar > .qv-tool-group:first-child::-webkit-scrollbar { display: none; }
+  .qv-toolbar > .qv-tool-group:last-child { flex: none; flex-wrap: nowrap; }
+  .qv-shell .qv-tool { flex: none; justify-content: center; }
+  .qv-tool-label { display: none; }
+  .qv-more-menu { width: min(394px, calc(100vw - 16px)); }
+  .qv-more-menu .qv-tool-label { display: inline; }
+  /* Like the full viewer on phones: Undo, MPR and Cine live in the menu's Actions section. */
+  .qv-shell .qv-toolbar-action { display: none; }
+  .qv-menu-actions { display: block; }
+  .qv-connected { display: none; }
+  .qv-shell .qv-note-input { width: min(220px, calc(100% - 24px)); }
+  .qv-tags-panel { top: 4px; right: 4px; bottom: 4px; left: 4px; width: auto; }
+  .qv-tags-body .qv-tag-vr { display: none; }
+  /* Series become a strip under the image. */
+  .qv-workstation { flex-direction: column-reverse; }
+  .qv-series-panel, .qv-series-panel.collapsed { width: auto; border-right: 0; border-top: 1px solid var(--qv-line); }
+  .qv-series-header { display: none; }
+  .qv-series-strip, .qv-series-strip.list { display: flex; gap: 6px; padding: 6px; overflow-x: auto; overflow-y: hidden; }
+  .qv-shell .qv-series-tile, .qv-series-strip.list .qv-series-tile { flex: none; flex-direction: column; width: 84px; gap: 4px; padding: 4px; }
+  .qv-series-preview, .qv-series-strip.list .qv-series-preview { width: auto; height: 60px; }
+  .qv-series-info strong, .qv-series-meta { display: none; }
+  .qv-status-bar { display: none; }
+  /* Overlays: smaller, never colliding. Preset moves to the bottom-right corner, the slider sits above the
+     bottom overlays, and the loading chip goes under the top-left overlay. */
+  .qv-ov { max-width: calc(50% - 16px); font-size: 11px; line-height: 15px; }
+  .qv-ov span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qv-ov.bottom-right { display: none; }
+  .qv-viewport-controls { top: auto; right: 10px; bottom: 10px; left: auto; transform: none; }
+  /* Above the three-line bottom-left overlay (W/L, zoom, counter) and the preset menu. */
+  .qv-scrubber { bottom: 72px; left: 10px; right: 10px; width: auto; min-width: 0; transform: none; }
+  .qv-resolution { top: 50px; right: auto; bottom: auto; left: 12px; padding: 4px 8px; font-size: 11px; }
+  .qv-orientation.top { top: 8px; }
+}
+
+/* ---------- Short screens (phones in landscape) ---------- */
+@media (max-height: 500px) {
+  .qv-shell { min-height: 0; }
+  .qv-patient-header, .qv-status-bar { display: none; }
+  .qv-toolbar { min-height: 44px; }
+  .qv-workstation { flex-direction: row; }
+  .qv-series-panel, .qv-series-panel.collapsed { width: 96px; border-top: 0; border-right: 1px solid var(--qv-line); }
+  /* Compact side column at any width (wide-but-short screens don't get the narrow-screen rules). */
+  .qv-series-header { display: none; }
+  .qv-series-strip, .qv-series-strip.list { display: flex; flex-direction: column; gap: 6px; padding: 6px; overflow-x: hidden; overflow-y: auto; }
+  .qv-shell .qv-series-tile, .qv-series-strip.list .qv-series-tile { flex: none; flex-direction: column; width: auto; gap: 4px; padding: 4px; }
+  .qv-series-preview, .qv-series-strip.list .qv-series-preview { width: auto; height: 60px; }
+  .qv-series-info strong, .qv-series-meta { display: none; }
+  .qv-ov { max-width: calc(50% - 16px); font-size: 11px; line-height: 15px; }
+  .qv-ov span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qv-ov.bottom-right { display: none; }
+  .qv-viewport-controls { top: auto; right: 10px; bottom: 10px; left: auto; transform: none; }
+  .qv-resolution { top: 50px; right: auto; bottom: auto; left: 12px; padding: 4px 8px; font-size: 11px; }
+  .qv-ov.top-left span:nth-child(2), .qv-ov.top-right span:nth-child(2) { display: none; }
+  /* Landscape: between the bottom-left overlay and the preset menu, on the bottom edge. */
+  .qv-scrubber { bottom: 10px; left: 150px; right: 140px; width: auto; min-width: 0; transform: none; }
+}
+
+/* ---------- Touch input: comfortable tap targets ---------- */
+@media (pointer: coarse) {
+  .qv-shell .qv-tool { min-width: 40px; height: 40px; }
+  .qv-shell .qv-view-toggle button, .qv-shell .qv-icon-button { width: 40px; height: 40px; }
+  .qv-shell .qv-preset { height: 36px; }
+  .qv-shell .qv-scrubber input { height: 36px; }
+  .qv-series-count, .qv-series-modality { font-size: 11px; }
+}
