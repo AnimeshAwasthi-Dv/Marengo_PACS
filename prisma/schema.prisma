@@ -299,6 +299,8 @@ model RadiologistProfile {
   callBookings              ReportCallBooking[]
   availabilitySlots         RadiologistAvailability[]
 
+  @@index([providerCode])
+  @@index([clientId])
   @@map("radiologist_profiles")
 }
 
@@ -406,6 +408,9 @@ model ReportReview {
   publicShares     ReportPublicShare[]
 
   @@index([clientId, patientProfileId])
+  @@index([clientId, studyUid, status])
+  @@index([studyUid, createdAt])
+  @@index([radiologistId, status])
   @@map("report_reviews")
 }
 
@@ -631,6 +636,7 @@ model ReportAuditLog {
   report      ReportReview @relation(fields: [reportId], references: [id])
   actor       User?        @relation(fields: [actorUserId], references: [id])
 
+  @@index([reportId])
   @@map("report_audit_logs")
 }
 
@@ -706,6 +712,7 @@ model StudyBillingTransaction {
   invoice         Invoice? @relation(fields: [invoiceId], references: [id])
 
   @@unique([processingJobId, serviceName])
+  @@index([clientId, createdAt])
   @@map("study_billing_transactions")
 }
 
@@ -732,6 +739,7 @@ model Invoice {
   paymentLinks          PaymentLink[]
   payments              Payment[]
 
+  @@index([clientId, createdAt])
   @@map("invoices")
 }
 
@@ -783,6 +791,9 @@ model Payment {
   client            Client   @relation(fields: [clientId], references: [id])
   invoice           Invoice  @relation(fields: [invoiceId], references: [id])
 
+  @@index([provider, providerPaymentId])
+  @@index([invoiceId, status])
+  @@index([clientId, createdAt])
   @@map("payments")
 }
 
@@ -807,6 +818,7 @@ model ProviderPayableTransaction {
   settlement       ProviderSettlement? @relation(fields: [settlementId], references: [id])
 
   @@unique([dectrocelJobId, providerCode])
+  @@index([providerCode, status, createdAt])
   @@map("provider_payable_transactions")
 }
 
@@ -824,6 +836,7 @@ model ProviderSettlement {
   updatedAt        DateTime                     @updatedAt
   items            ProviderPayableTransaction[]
 
+  @@index([providerCode])
   @@map("provider_settlements")
 }
 
@@ -843,6 +856,8 @@ model BillingDispute {
   updatedAt           DateTime @updatedAt
   client              Client?  @relation(fields: [clientId], references: [id])
 
+  @@index([settlementId])
+  @@index([clientId, createdAt])
   @@map("billing_disputes")
 }
 
@@ -959,6 +974,8 @@ model AuditLog {
   createdAt   DateTime @default(now())
   client      Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
 
+  @@index([createdAt])
+  @@index([clientId, createdAt])
   @@map("audit_logs")
 }
 
@@ -1024,6 +1041,9 @@ model ProcessingJob {
   @@index([clientId, patientId])
   @@index([clientId])
   @@index([status])
+  @@index([providerJobId])
+  @@index([clientId, createdAt])
+  @@index([updatedAt])
   @@map("processing_jobs")
 }
 
@@ -1079,6 +1099,7 @@ model AvailableBridgeStudy {
   @@index([clientId, updatedAt, id], map: "abs_client_updated_idx")
   @@index([clientId, agentId])
   @@index([clientId, patientProfileId])
+  @@index([clientId, lastSyncedAt(sort: Desc), id(sort: Desc)])
   @@map("available_bridge_studies")
 }
 
@@ -1097,6 +1118,7 @@ model BridgeStudyAttachment {
   bridgeStudy   AvailableBridgeStudy @relation(fields: [bridgeStudyId], references: [id], onDelete: Cascade)
 
   @@index([clientId, bridgeStudyId])
+  @@index([bridgeStudyId])
   @@map("bridge_study_attachments")
 }
 
@@ -1202,6 +1224,9 @@ model ProviderJobMapping {
   updatedAt        DateTime @updatedAt
 
   @@unique([providerId, providerJobId])
+  @@index([processingJobId])
+  @@index([reportReviewId])
+  @@index([studyInstanceUid])
   @@map("provider_job_mapping")
 }
 
@@ -1219,6 +1244,8 @@ model ProviderApiRequest {
   metadata       Json     @default("{}")
   createdAt      DateTime @default(now())
 
+  @@index([direction, status, createdAt])
+  @@index([providerId, createdAt])
   @@map("provider_api_requests")
 }
 
@@ -1277,6 +1304,8 @@ model PacsReturnJob {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
+  @@index([status, createdAt])
+  @@index([reportReviewId, updatedAt])
   @@map("pacs_return_jobs")
 }
 
@@ -1341,5 +1370,7 @@ model JobStatusHistory {
   technicalDetails      Json     @default("{}")
   createdAt             DateTime @default(now())
 
+  @@index([processingJobId, createdAt])
+  @@index([reportReviewId, createdAt])
   @@map("job_status_history")
 }
