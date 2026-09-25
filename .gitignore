@@ -12,3 +12,4 @@ tmp/
 *.sql.gz
 *.dump
 .DS_Store
+/docs/
