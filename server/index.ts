@@ -173,7 +173,9 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
     if (!storage?.key) throw new Error('Unable to upload the study ZIP for DICOM viewer import')
     const imported = await viewerServiceRequest<ViewerImportStatus>('/api/v1/studies', {
       method: 'POST',
-      body: JSON.stringify({ zipKey: storage.key, bucket: storage.bucket, studyInstanceUid: study.studyInstanceUid, modality: study.modalities.includes('US') && !study.modalities.includes('CT') ? 'US' : viewerModality(kind) }),
+      // The viewer's import API is strict: only { zipKey, modality }, modality in CT | MRI | XRAY | MAMMOGRAPHY.
+      // It picks the S3 bucket and prefix from the modality itself.
+      body: JSON.stringify({ zipKey: storage.key, modality: viewerModality(kind) }),
     })
     importId = imported.id
     externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: imported.status, expiresAt: Date.now() + 60 * 60 * 1000 })
