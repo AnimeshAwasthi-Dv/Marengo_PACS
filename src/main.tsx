@@ -11,8 +11,12 @@ function PortalEntry() {
   return authenticated || publicRoute ? <App /> : <LoginView onLogin={() => setAuthenticated(true)} />
 }
 
+// "Open viewer in a new tab" target: applies the same per-study viewer choice as the in-portal viewer.
+const ViewerPage = lazy(() => import('./features/viewer/ViewerPage'))
+const isViewerPage = window.location.pathname === '/viewer'
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <Suspense fallback={<div role="status" className="p-6 text-slate-600">Loading portal…</div>}><PortalEntry /></Suspense>
+    <Suspense fallback={<div role="status" className="p-6 text-slate-600">Loading portal…</div>}>{isViewerPage ? <ViewerPage /> : <PortalEntry />}</Suspense>
   </StrictMode>,
 )
