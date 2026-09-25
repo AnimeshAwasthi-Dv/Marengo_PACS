@@ -69,3 +69,14 @@ test('cleanup aborts pending fetches and does not schedule another update', asyn
   live.stop(); await flush(); assert(signal.aborted);
   t.mock.timers.tick(60_000); assert.equal(count, 1);
 });
+
+
+test('focus and visibility resume events reuse active and just-finished refreshes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let count = 0; let release!: () => void;
+  const live = startLiveRefresh(async () => { count++; await new Promise<void>(resolve => { release = resolve; }); });
+  t.mock.timers.tick(0); live.resume(); live.resume(); assert.equal(count, 1);
+  release(); await flush(); live.resume(); t.mock.timers.tick(0); assert.equal(count, 1);
+  t.mock.timers.tick(1000); live.resume(); assert.equal(count, 2);
+  live.stop(); release(); await flush();
+});

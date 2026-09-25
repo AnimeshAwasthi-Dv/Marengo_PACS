@@ -2,14 +2,14 @@
 // complete refresh so a failed later page cannot discard previously loaded data.
 export async function loadStudyPages<T extends { id: string }>(
   fetchPage: (cursor: string, limit: number) => Promise<{ studies: T[]; nextCursor?: string | null }>,
-  options: { signal?: AbortSignal; onFirstPage?: (studies: T[]) => void } = {},
+  options: { signal?: AbortSignal; onFirstPage?: (studies: T[]) => void; firstPageSize?: number } = {},
 ): Promise<T[]> {
   const studies = new Map<string, T>();
   const cursors = new Set<string>();
   let cursor = '';
   do {
     options.signal?.throwIfAborted();
-    const result = await fetchPage(cursor, cursor ? 500 : 100);
+    const result = await fetchPage(cursor, cursor ? 500 : options.firstPageSize ?? 100);
     options.signal?.throwIfAborted();
     for (const study of result.studies) studies.set(study.id, study);
     if (!cursor) options.onFirstPage?.([...studies.values()]);

@@ -14,6 +14,7 @@ export function startLiveRefresh(refresh: (signal: AbortSignal) => Promise<void>
   let timer: ReturnType<typeof setTimeout> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
+  let lastFinishedAt = -Infinity;
 
   function schedule(delay: number) {
     clearTimeout(timer);
@@ -33,6 +34,7 @@ export function startLiveRefresh(refresh: (signal: AbortSignal) => Promise<void>
     finally {
       clearTimeout(deadline);
       running = false;
+      lastFinishedAt = Date.now();
       if (!stopped) schedule(pending ? 0 : Math.min(interval * 2 ** failures, Math.max(interval, 30_000)));
       pending = false;
     }
@@ -40,6 +42,8 @@ export function startLiveRefresh(refresh: (signal: AbortSignal) => Promise<void>
   schedule(options.immediate === false ? interval : 0);
   return {
     trigger: () => { void run(); },
+    // Coalesce focus/visibility events without delaying explicit refreshes.
+    resume: () => { if (!running && Date.now() - lastFinishedAt >= 1_000) void run(); },
     stop: () => { stopped = true; clearTimeout(timer); clearTimeout(deadline); controller?.abort(); },
   };
 }

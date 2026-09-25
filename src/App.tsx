@@ -10592,6 +10592,8 @@ function MarengoUnifiedWorklist({
   const [priority, setPriority] = useState<"REGULAR" | "URGENT">("REGULAR");
   const [indication, setIndication] = useState("");
   const [sending, setSending] = useState(false);
+  const [downloadingStudyId, setDownloadingStudyId] = useState<string | null>(null);
+  const studyDownloadInFlight = useRef(false);
   const [terminatingStudyId, setTerminatingStudyId] = useState<string | null>(null);
   const [uploadingStudy, setUploadingStudy] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -10630,14 +10632,14 @@ function MarengoUnifiedWorklist({
     if (worklistLoadingRef.current) return;
     worklistLoadingRef.current = true;
     const startedPriorityRevision = priorityRevision.current;
-    setStudyLoading(true);
+    if (!silent || !hasWorklistSnapshot.current) setStudyLoading(true);
     if (!silent) setStudyError("");
     try {
       const studies = await loadStudyPages<BridgeStudy>(async (cursor, limit) => {
         const params = new URLSearchParams({ limit: String(limit), includeProcessed: "1" });
         if (cursor) params.set("cursor", cursor);
         return api<{ studies: BridgeStudy[]; nextCursor?: string | null }>(`/api/client/study-sync/available-studies?${params}`, token, { cache: "no-store", signal });
-      }, { signal, onFirstPage: firstPage => { if (!hasWorklistSnapshot.current && startedPriorityRevision === priorityRevision.current) { setWorklistStudies(firstPage); hasWorklistSnapshot.current = firstPage.length > 0; } } });
+      }, { signal, firstPageSize: hasWorklistSnapshot.current ? 500 : 100, onFirstPage: firstPage => { if (!hasWorklistSnapshot.current && startedPriorityRevision === priorityRevision.current) { setWorklistStudies(firstPage); hasWorklistSnapshot.current = firstPage.length > 0; } } });
       if (signal?.aborted) return;
       if (startedPriorityRevision === priorityRevision.current) { setWorklistStudies(studies); hasWorklistSnapshot.current = true; }
       setLastSync(new Date());
@@ -10873,6 +10875,9 @@ function MarengoUnifiedWorklist({
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   async function downloadStudyBundle(study: BridgeStudy) {
+    if (studyDownloadInFlight.current) return;
+    studyDownloadInFlight.current = true;
+    setDownloadingStudyId(study.id);
     setFeedback(null);
     try {
       const response = await fetch(`/api/client/study-sync/available-studies/${encodeURIComponent(study.id)}/download`, {
@@ -10897,6 +10902,9 @@ function MarengoUnifiedWorklist({
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       setFeedback({ text: error instanceof Error ? error.message : "Unable to download study. Please try again.", error: true });
+    } finally {
+      studyDownloadInFlight.current = false;
+      setDownloadingStudyId(null);
     }
   }
   async function terminateProcessing(study: BridgeStudy) {
@@ -11062,7 +11070,7 @@ function MarengoUnifiedWorklist({
                     <button disabled={!detailRow?.report || !["APPROVED","PUSHED"].includes(detailRow.report.status)} title={detailRow?.state === "REPORTED" ? "View final report" : "Report is not available yet"} onClick={() => { if (detailRow?.report) setStudyMedia({ kind: "report", report: detailRow.report, title: "Radiology report" }); }}><FileText size={14}/>Report</button>
                   </div>
                   <div className="pw-study-tool-row">
-                    <button onClick={() => void downloadStudyBundle(study)}><Download size={14}/>Download study</button>
+                    <button disabled={Boolean(downloadingStudyId)} onClick={() => void downloadStudyBundle(study)}>{downloadingStudyId === study.id ? <LoaderCircle className="pw-spinning" size={14}/> : <Download size={14}/>} {downloadingStudyId === study.id ? "Downloading study..." : "Download study"}</button>
                     {permissions.share && <button disabled={!detailRow?.report || !["APPROVED","PUSHED"].includes(detailRow.report.status)} title={!detailRow?.report ? "A report is required to share this case" : "Share report"} onClick={() => { if (detailRow?.report) setActionDialog({ kind: "share", report: detailRow.report }); }}><Share2 size={14}/>Share</button>}
                     {permissions.schedule && <button disabled={!detailRow?.report} title={!detailRow?.report ? "Call scheduling becomes available when the case has a report" : "Schedule a radiologist call"} onClick={() => { if (detailRow?.report) setActionDialog({ kind: "call", report: detailRow.report }); }}><Phone size={14}/>Schedule the call</button>}
                   </div>

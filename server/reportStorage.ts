@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { Transform } from 'node:stream'
+import { Transform, Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { GetObjectCommand, ListObjectsV2Command, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
@@ -119,6 +119,24 @@ export async function findStoredStudyObject(input: { kinds: StorageKind[]; keys:
     }
   }
   return null
+}
+
+/** Open an object as a bounded-memory stream. Missing keys differ from storage outages. */
+export async function openStoredObject(input: Pick<StoredObject, 'bucket' | 'key'>, signal?: AbortSignal): Promise<{ stream: Readable; size?: number } | null> {
+  const config = getS3ClientConfig()
+  if (!config || !input.bucket || !input.key) return null
+  const client = new S3Client(config)
+  try {
+    const response = await client.send(new GetObjectCommand({ Bucket: input.bucket, Key: input.key }), { abortSignal: signal })
+    if (!response.Body) { client.destroy(); return null }
+    const stream = response.Body as Readable
+    stream.once('close', () => client.destroy())
+    return { stream, size: response.ContentLength }
+  } catch (error) {
+    client.destroy()
+    if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404) return null
+    throw error
+  }
 }
 
 export async function readStoredObject(input: Pick<StoredObject, 'bucket' | 'key'>): Promise<Buffer | null> {

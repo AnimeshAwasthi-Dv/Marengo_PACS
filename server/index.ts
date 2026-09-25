@@ -1,3 +1,5 @@
+import { sendStudyBundle, StudyArchiveError, type BundleStudySource } from './studyBundle'
+import { parseWorklistQuery, coalesceWorklistRead } from './worklistQuery'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { ensureMarengoServices } from './marengoServices'
@@ -2152,28 +2154,26 @@ app.get('/api/client/study-sync/available-studies', requireAuth, async (req, res
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
   res.setHeader('Pragma', 'no-cache')
   res.setHeader('Expires', '0')
+  const query = parseWorklistQuery(req.query)
+  const { take, updatedSince } = query
   const scope = await workspaceStudyScope(req)
-  const requestedLimit = Number(req.query.limit ?? 50)
-  const take = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 50
-  const requestedSince = req.query.updatedSince ? new Date(String(req.query.updatedSince)) : null
-  const updatedSince = requestedSince && !Number.isNaN(requestedSince.getTime()) ? requestedSince : null
   const asOf = new Date()
-  const rows = await prisma.availableBridgeStudy.findMany({
+  const rows = await coalesceWorklistRead(JSON.stringify({ scope, query }), () => prisma.availableBridgeStudy.findMany({
     where: {
       ...scope,
       ...(updatedSince
         ? { updatedAt: { gt: updatedSince } }
-        : req.query.includeProcessed === '1' || req.query.all === '1'
+        : query.includeProcessed
           ? {}
           : { processingJobId: null }),
-      ...(req.query.status ? { workflowStatus: String(req.query.status) } : {}),
-      ...(req.query.modality ? { modalities: { has: String(req.query.modality).toUpperCase() } } : {}),
-      ...(req.query.q ? {
+      ...(query.status ? { workflowStatus: String(query.status) } : {}),
+      ...(query.modality ? { modalities: { has: String(query.modality).toUpperCase() } } : {}),
+      ...(query.q ? {
         OR: [
-          { patientId: { contains: String(req.query.q), mode: 'insensitive' } },
-          { patientName: { contains: String(req.query.q), mode: 'insensitive' } },
-          { accessionNumber: { contains: String(req.query.q), mode: 'insensitive' } },
-          { studyDescription: { contains: String(req.query.q), mode: 'insensitive' } },
+          { patientId: { contains: String(query.q), mode: 'insensitive' } },
+          { patientName: { contains: String(query.q), mode: 'insensitive' } },
+          { accessionNumber: { contains: String(query.q), mode: 'insensitive' } },
+          { studyDescription: { contains: String(query.q), mode: 'insensitive' } },
         ],
       } : {}),
     },
@@ -2198,9 +2198,9 @@ app.get('/api/client/study-sync/available-studies', requireAuth, async (req, res
       },
     },
     orderBy: [{ lastSyncedAt: 'desc' }, { id: 'desc' }],
-    ...(req.query.cursor ? { cursor: { id: String(req.query.cursor) }, skip: 1 } : {}),
+    ...(query.cursor ? { cursor: { id: String(query.cursor) }, skip: 1 } : {}),
     take: take + 1,
-  })
+  }))
   const hasMore = rows.length > take
   const studies = hasMore ? rows.slice(0, take) : rows
   res.json({
@@ -2212,8 +2212,9 @@ app.get('/api/client/study-sync/available-studies', requireAuth, async (req, res
 })
 
 app.get('/api/client/study-sync/available-studies/:studyId/attachments/:attachmentId', requireAuth, async (req, res) => {
+  const scope = await workspaceStudyScope(req)
   const attachment = await prisma.bridgeStudyAttachment.findFirst({
-    where: { id: String(req.params.attachmentId), bridgeStudyId: String(req.params.studyId), ...await workspaceStudyScope(req), bridgeStudy: { ...await workspaceStudyScope(req) } },
+    where: { id: String(req.params.attachmentId), bridgeStudyId: String(req.params.studyId), ...scope, bridgeStudy: { ...scope } },
   })
   if (!attachment) return res.status(404).json({ message: 'Attachment not found' })
   const filePath = await resolveSafeBundleFile(attachment.filePath)
@@ -2231,7 +2232,7 @@ app.get('/api/client/study-sync/available-studies/:studyId/download', requireAut
     where: { id: String(req.params.studyId), ...await workspaceStudyScope(req) },
     include: {
       client: { select: { id: true, name: true, code: true } },
-      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true } },
+      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true, uploadName: true, uploadPath: true, upstreamStatus: true } },
       dispatchRequests: {
         select: { requestId: true, status: true, progressPercentage: true, createdAt: true, lastErrorMessage: true },
         orderBy: { createdAt: 'desc' },
@@ -4432,6 +4433,7 @@ registerExternalViewerRoutes(app, { prisma, requireAuth, requireRadiologist, acc
 
 app.use((error: unknown, _req: Request, res: Response, next: express.NextFunction) => {
   if (res.headersSent) return next(error)
+  if (error instanceof StudyArchiveError) return res.status(error.status).json({ message: error.message })
   if (error instanceof z.ZodError) {
     const issue = error.issues[0]
     const field = issue?.path.length ? `${issue.path.join('.')}: ` : ''
@@ -8413,6 +8415,7 @@ function formatBridgeStudyForAdmin(study: Parameters<typeof formatBridgeStudyFor
 
 type BridgeBundleStudy = Omit<Parameters<typeof formatBridgeStudyForAdmin>[0], 'attachments'> & {
   archivePath?: string | null
+  processingJob?: NonNullable<Parameters<typeof formatBridgeStudyForAdmin>[0]['processingJob']> & { uploadName?: string; uploadPath?: string | null; upstreamStatus?: unknown }
   attachments: Array<{ id: string; originalName: string; mimeType?: string | null; sizeBytes: bigint | number; createdAt: Date; filePath: string }>
 }
 
@@ -8426,6 +8429,7 @@ type ProviderBundleAttachment = {
 }
 
 type ProviderStudyBundle = {
+  source: BundleStudySource
   publicStudyId: string
   clientId: string
   processingJobId: string
@@ -8486,6 +8490,15 @@ async function getProviderStudyBundle(studyId: string, providerCode: string): Pr
     ? bridgeStudy.modalities
     : [report?.modality ?? queuedMetadata.modality].filter((value): value is string => Boolean(value))
   return {
+    source: {
+      id: bridgeStudy?.id ?? job.id,
+      publicStudyId: bridgeStudy?.publicStudyId ?? mapping.dectrocelJobId,
+      studyInstanceUid: bridgeStudy?.studyInstanceUid ?? mapping.studyInstanceUid ?? queuedMetadata.studyInstanceUid ?? '',
+      modalities,
+      archivePath: bridgeStudy?.archivePath ?? job.uploadPath,
+      archiveName: bridgeStudy?.archiveName ?? job.uploadName,
+      processingJob: { id: job.id, uploadName: job.uploadName, uploadPath: job.uploadPath, upstreamStatus: job.upstreamStatus },
+    },
     publicStudyId: bridgeStudy?.publicStudyId ?? mapping.dectrocelJobId,
     clientId: job.clientId,
     processingJobId: job.id,
@@ -8584,56 +8597,26 @@ async function resolveSafeBundleFile(candidate: string | null | undefined) {
 }
 
 async function sendBridgeStudyBundle(res: Response, study: BridgeBundleStudy) {
-  const archivePath = await resolveSafeBundleFile(study.archivePath)
-  const attachments = (await Promise.all(study.attachments.map(async (attachment) => ({
-    attachment,
-    safePath: await resolveSafeBundleFile(attachment.filePath),
-  })))).filter((item): item is { attachment: BridgeBundleStudy['attachments'][number]; safePath: string } => Boolean(item.safePath))
-  const zip = new yazl.ZipFile()
-  res.setHeader('Content-Type', 'application/zip')
-  res.setHeader('Content-Disposition', `attachment; filename="${safeBridgeFileName(study.publicStudyId)}-bundle.zip"`)
-  res.setHeader('Cache-Control', 'private, no-store')
-  const outputDone = pipeline(zip.outputStream, res)
-  zip.addBuffer(Buffer.from(JSON.stringify(formatBridgeStudyForAdmin(study), null, 2)), 'metadata.json')
-  zip.addBuffer(Buffer.from(study.clinicalIndication?.trim() || 'No clinical indication was supplied.', 'utf8'), 'clinical-indication.txt')
-  if (archivePath) {
-    zip.addFile(archivePath, `study/${safeBridgeFileName(study.archiveName ?? path.basename(archivePath))}`)
-  }
-  for (const [index, item] of attachments.entries()) {
-    zip.addFile(item.safePath, `attachments/${String(index + 1).padStart(3, '0')}-${safeBridgeFileName(item.attachment.originalName)}`)
-  }
-  zip.end()
-  await outputDone
+  return sendStudyBundle(res, {
+    source: {
+      id: study.id, publicStudyId: study.publicStudyId, studyInstanceUid: study.studyInstanceUid,
+      modalities: study.modalities, archivePath: study.archivePath, archiveName: study.archiveName,
+      processingJob: study.processingJob ? {
+        id: study.processingJob.id, uploadName: study.processingJob.uploadName ?? study.archiveName ?? '',
+        uploadPath: study.processingJob.uploadPath, upstreamStatus: study.processingJob.upstreamStatus,
+      } : null,
+    },
+    // Storage references are needed internally to fetch the archive, not in the downloaded metadata.
+    metadata: formatBridgeStudyForAdmin({ ...study, processingJob: study.processingJob ? {
+      id: study.processingJob.id, status: study.processingJob.status, clinicalStatus: study.processingJob.clinicalStatus,
+      completedAt: study.processingJob.completedAt, priority: study.processingJob.priority,
+    } : null }),
+    clinicalIndication: study.clinicalIndication, attachments: study.attachments,
+  })
 }
 
 async function sendProviderStudyBundle(res: Response, study: ProviderStudyBundle) {
-  const archivePath = await resolveSafeBundleFile(study.archivePath)
-  const resolvedAttachments = (await Promise.all(study.attachments.map(async (attachment) => ({
-    attachment,
-    safePath: await resolveSafeBundleFile(attachment.filePath),
-  })))).filter((item): item is { attachment: ProviderBundleAttachment; safePath: string } => Boolean(item.safePath))
-  const metadata = {
-    ...study.metadata,
-    bundle: {
-      generatedAt: new Date().toISOString(),
-      archiveIncluded: Boolean(archivePath),
-      attachmentsIncluded: resolvedAttachments.length,
-      attachmentsOmitted: study.attachments.length - resolvedAttachments.length,
-    },
-  }
-  const zip = new yazl.ZipFile()
-  res.setHeader('Content-Type', 'application/zip')
-  res.setHeader('Content-Disposition', `attachment; filename="${safeBridgeFileName(study.publicStudyId)}-bundle.zip"`)
-  res.setHeader('Cache-Control', 'private, no-store')
-  const outputDone = pipeline(zip.outputStream, res)
-  zip.addBuffer(Buffer.from(JSON.stringify(metadata, (_key, value) => typeof value === 'bigint' ? String(value) : value, 2)), 'metadata.json')
-  zip.addBuffer(Buffer.from(study.clinicalIndication?.trim() || 'No clinical indication was supplied.', 'utf8'), 'clinical-indication.txt')
-  if (archivePath) zip.addFile(archivePath, `study/${safeBridgeFileName(study.archiveName || path.basename(archivePath))}`)
-  for (const [index, item] of resolvedAttachments.entries()) {
-    zip.addFile(item.safePath, `attachments/${String(index + 1).padStart(3, '0')}-${safeBridgeFileName(item.attachment.originalName)}`)
-  }
-  zip.end()
-  await outputDone
+  return sendStudyBundle(res, { source: study.source, metadata: study.metadata, clinicalIndication: study.clinicalIndication, attachments: study.attachments })
 }
 
 function formatBridgeCommandForAgent(command: {
