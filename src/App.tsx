@@ -7,6 +7,8 @@ import { lazy } from 'react';
 import { isSpecialXrayStudy } from './specialXray';
 import { api } from './lib/api';
 import { loadStudyPages, mergeStudies } from './lib/studyPages';
+import { openReportHtml as openReportHtmlTab } from './lib/fullReport';
+import { useFullReport } from './useFullReport';
 import type { ClientStatus, ReturnFormat, WorkflowType, User, ClientPortalRole, Service, StudySyncConfig, ClientService, Client, BridgeStudy, Job, UsageLog, ProcessingJob, ReportSetting, RadiologistProfile, ReportReview, ReportSummary, PatientProfile, PatientStudyArchive, RadiologistFeedbackItem, BillingInvoice, PricingRule, RazorpayPaymentLinkResponse, ProviderSettlement, BillingSnapshot, ClientBillingUsage, TeleradiologyProvider, ProviderDashboard, RadiologistAvailability, AuditLog, CallOptions, ReportCallBooking, SupportTicketMessage, SupportTicket, NotificationRecipient, WhatsAppBotConfig, AdminOverview, ModalityTab, SortDirection, FilterOption, PasswordPromptState, PatientArchiveFile, PortalNotification, WorkspaceAction, WorklistMedia, BrowserSpeechRecognition, WindowWithSpeechRecognition } from './types/portal';
 import { ExternalViewerPane } from "./features/viewer/ExternalViewerPane";
 import {
@@ -5069,10 +5071,12 @@ function MarengoDicomViewerModal({
   const [mobileWorkspacePane, setMobileWorkspacePane] = useState<
     "VIEWER" | "DETAILS"
   >("VIEWER");
+  // List rows carry only a JSON summary; the clinical indication lives in the full report.
+  const fullReport = useFullReport(report, token).report ?? report;
   const reportData =
-    report.editedReportJson && Object.keys(report.editedReportJson).length
-      ? report.editedReportJson
-      : report.aiReportJson ?? {};
+    fullReport.editedReportJson && Object.keys(fullReport.editedReportJson).length
+      ? fullReport.editedReportJson
+      : fullReport.aiReportJson ?? {};
   const clinicalIndication = [
     reportData.clinicalIndication,
     reportData.clinicalHistory,
@@ -9889,21 +9893,7 @@ function AdminReportsView({
   const [manualUploading, setManualUploading] = useState(false);
 
   function openReportHtml(report: ReportReview, version: "initial" | "final") {
-    const html = String(
-      version === "initial"
-        ? (report.aiReportJson?.htmlReport ?? "")
-        : (report.editedReportJson?.htmlReport ?? ""),
-    );
-    if (!html) {
-      notice(
-        `${version === "initial" ? "Initial" : "Final"} report HTML is not available.`,
-      );
-      return;
-    }
-    window.open(
-      URL.createObjectURL(new Blob([html], { type: "text/html" })),
-      "_blank",
-    );
+    void openReportHtmlTab(report, token, version, notice);
   }
 
   async function uploadManualReportPdf() {
@@ -14076,16 +14066,7 @@ function RadiologistDetailModal({
   );
   const rejected = reports.filter((report) => report.status === "FAILED");
   function openReportHtml(report: ReportReview) {
-    const html = String(
-      report.editedReportJson?.htmlReport ??
-        report.aiReportJson?.htmlReport ??
-        "",
-    );
-    if (!html) return;
-    window.open(
-      URL.createObjectURL(new Blob([html], { type: "text/html" })),
-      "_blank",
-    );
+    void openReportHtmlTab(report, token, "best", () => undefined);
   }
 
   return (
@@ -16149,7 +16130,7 @@ function RadiologistReports({
 
   if (selectedReport) {
     return (
-      <RadiologistReportCard
+      <FullRadiologistReportCard
         report={selectedReport}
         token={token}
         reload={reload}
@@ -16337,6 +16318,20 @@ function RadiologistReports({
 function getSpeechRecognitionConstructor() {
   const speechWindow = window as WindowWithSpeechRecognition;
   return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+}
+
+// The card edits and dictates into the report HTML, so it mounts only once the full report has loaded.
+function FullRadiologistReportCard(props: Parameters<typeof RadiologistReportCard>[0]) {
+  const { report, error } = useFullReport(props.report, props.token);
+  if (report) return <RadiologistReportCard {...props} report={report} />;
+  return (
+    <section className="soft-card rounded-lg p-5" aria-busy={!error}>
+      <p className="text-sm font-semibold text-slate-600" role={error ? "alert" : "status"}>{error || "Loading report..."}</p>
+      <button className="mt-4 inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700" onClick={props.onBack} type="button">
+        <ChevronLeft size={16} /> Back
+      </button>
+    </section>
+  );
 }
 
 function RadiologistReportCard({

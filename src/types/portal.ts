@@ -372,9 +372,11 @@ export type ReportReview = {
   modality?: string | null;
   status: ReportReviewStatus;
   outputFormat: ReturnFormat;
-  // Omitted from list payloads (dashboards, worklist); present on report detail and editor data.
+  // Dashboard lists send only a summary of these (jsonPartial: true); load the full
+  // report with `loadFullReport` / `useFullReport` before reading report text.
   aiReportJson?: Record<string, unknown>;
   editedReportJson?: Record<string, unknown>;
+  jsonPartial?: boolean;
   locked: boolean;
   generatedAt: string;
   createdAt: string;
