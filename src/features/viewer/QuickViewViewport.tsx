@@ -1,3 +1,4 @@
+import { modalityLabel } from '../../modalities';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Dispatch, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject, type PointerEvent as ReactPointerEvent, type SetStateAction } from 'react';
 import type { QuickViewDecoder } from './quickviewDecoder';
 import { angleAt, formatArea, lineLength, orientationMarkers, pinchChange, stageToImage, WINDOW_PRESETS, type Line, type Point, type View } from './quickviewMath';
@@ -418,7 +419,7 @@ export const QuickViewViewport = forwardRef<ViewportHandle, Props>(function Quic
     </div>}
 
     <div className="qv-ov top-left"><span>{manifest.patientName || 'Unknown patient'}</span><span>{manifest.patientId}</span></div>
-    <div className="qv-ov top-right"><span>{series?.modality ?? manifest.modalities.join(', ')}</span><span>{series ? seriesTitle(series) : ''}</span></div>
+    <div className="qv-ov top-right"><span>{modalityLabel(series?.modality ?? manifest.modalities.join(', '))}</span><span>{series ? seriesTitle(series) : ''}</span></div>
     <div className="qv-ov bottom-left">
       <span>{windowLevel ? `WW ${Math.round(windowLevel.width)} WL ${Math.round(windowLevel.center)}` : 'WW -- WL --'}</span>
       <span>{view.zoom.toFixed(2)}x</span>
