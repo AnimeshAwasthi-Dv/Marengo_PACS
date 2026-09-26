@@ -6,8 +6,10 @@ import { FollowUpsView } from './FollowUps';
 import { lazy } from 'react';
 import { isSpecialXrayStudy } from './specialXray';
 import { api } from './lib/api';
-import { loadStudyPages } from './lib/studyPages';
-import type { ClientStatus, ReturnFormat, WorkflowType, User, ClientPortalRole, Service, StudySyncConfig, ClientService, Client, BridgeStudy, Job, UsageLog, ProcessingJob, ReportSetting, RadiologistProfile, ReportReview, PatientProfile, PatientStudyArchive, RadiologistFeedbackItem, BillingInvoice, PricingRule, RazorpayPaymentLinkResponse, ProviderSettlement, BillingSnapshot, ClientBillingUsage, TeleradiologyProvider, ProviderDashboard, RadiologistAvailability, AuditLog, CallOptions, ReportCallBooking, SupportTicketMessage, SupportTicket, NotificationRecipient, WhatsAppBotConfig, AdminOverview, ModalityTab, SortDirection, FilterOption, PasswordPromptState, PatientArchiveFile, PortalNotification, WorkspaceAction, WorklistMedia, BrowserSpeechRecognition, WindowWithSpeechRecognition } from './types/portal';
+import { loadStudyPages, mergeStudies } from './lib/studyPages';
+import { openReportHtml as openReportHtmlTab } from './lib/fullReport';
+import { useFullReport } from './useFullReport';
+import type { ClientStatus, ReturnFormat, WorkflowType, User, ClientPortalRole, Service, StudySyncConfig, ClientService, Client, BridgeStudy, Job, UsageLog, ProcessingJob, ReportSetting, RadiologistProfile, ReportReview, ReportSummary, PatientProfile, PatientStudyArchive, RadiologistFeedbackItem, BillingInvoice, PricingRule, RazorpayPaymentLinkResponse, ProviderSettlement, BillingSnapshot, ClientBillingUsage, TeleradiologyProvider, ProviderDashboard, RadiologistAvailability, AuditLog, CallOptions, ReportCallBooking, SupportTicketMessage, SupportTicket, NotificationRecipient, WhatsAppBotConfig, AdminOverview, ModalityTab, SortDirection, FilterOption, PasswordPromptState, PatientArchiveFile, PortalNotification, WorkspaceAction, WorklistMedia, BrowserSpeechRecognition, WindowWithSpeechRecognition } from './types/portal';
 import { ExternalViewerPane } from "./features/viewer/ExternalViewerPane";
 import {
   Activity,
@@ -5069,10 +5071,12 @@ function MarengoDicomViewerModal({
   const [mobileWorkspacePane, setMobileWorkspacePane] = useState<
     "VIEWER" | "DETAILS"
   >("VIEWER");
+  // List rows carry only a JSON summary; the clinical indication lives in the full report.
+  const fullReport = useFullReport(report, token).report ?? report;
   const reportData =
-    report.editedReportJson && Object.keys(report.editedReportJson).length
-      ? report.editedReportJson
-      : report.aiReportJson;
+    fullReport.editedReportJson && Object.keys(fullReport.editedReportJson).length
+      ? fullReport.editedReportJson
+      : fullReport.aiReportJson ?? {};
   const clinicalIndication = [
     reportData.clinicalIndication,
     reportData.clinicalHistory,
@@ -5236,7 +5240,7 @@ function ReportDocumentPreview({
   token,
   publicToken,
 }: {
-  report: ReportReview;
+  report: Pick<ReportReview, "id" | "updatedAt">;
   token?: string;
   publicToken?: string;
 }) {
@@ -9889,21 +9893,7 @@ function AdminReportsView({
   const [manualUploading, setManualUploading] = useState(false);
 
   function openReportHtml(report: ReportReview, version: "initial" | "final") {
-    const html = String(
-      version === "initial"
-        ? (report.aiReportJson?.htmlReport ?? "")
-        : (report.editedReportJson?.htmlReport ?? ""),
-    );
-    if (!html) {
-      notice(
-        `${version === "initial" ? "Initial" : "Final"} report HTML is not available.`,
-      );
-      return;
-    }
-    window.open(
-      URL.createObjectURL(new Blob([html], { type: "text/html" })),
-      "_blank",
-    );
+    void openReportHtmlTab(report, token, version, notice);
   }
 
   async function uploadManualReportPdf() {
@@ -10533,6 +10523,9 @@ function WorkspaceAccountDetails({ client, user, roleLabel, token }: { client: C
   </>;
 }
 
+// Incremental polls cannot see deleted studies; reload the full list at least this often.
+const WORKLIST_FULL_RELOAD_MS = 5 * 60_000;
+
 function MarengoUnifiedWorklist({
   token,
   client,
@@ -10592,6 +10585,8 @@ function MarengoUnifiedWorklist({
   const [priority, setPriority] = useState<"REGULAR" | "URGENT">("REGULAR");
   const [indication, setIndication] = useState("");
   const [sending, setSending] = useState(false);
+  const [downloadingStudyId, setDownloadingStudyId] = useState<string | null>(null);
+  const studyDownloadInFlight = useRef(false);
   const [terminatingStudyId, setTerminatingStudyId] = useState<string | null>(null);
   const [uploadingStudy, setUploadingStudy] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -10624,22 +10619,49 @@ function MarengoUnifiedWorklist({
   const [feedback, setFeedback] = useState<{ text: string; error: boolean } | null>(null);
   const worklistLoadingRef = useRef(false);
   const hasWorklistSnapshot = useRef(initialStudies.length > 0);
+  const worklistSyncRef = useRef<{ asOf: string; fullAt: number } | null>(null);
 
   const loadWorklistStudies = useCallback(async (silent = false, signal?: AbortSignal) => {
     if (!["SUPER_ADMIN", "CLIENT_USER"].includes(user.role)) { setStudyLoading(false); return; }
     if (worklistLoadingRef.current) return;
     worklistLoadingRef.current = true;
     const startedPriorityRevision = priorityRevision.current;
-    setStudyLoading(true);
+    if (!silent || !hasWorklistSnapshot.current) setStudyLoading(true);
     if (!silent) setStudyError("");
     try {
-      const studies = await loadStudyPages<BridgeStudy>(async (cursor, limit) => {
-        const params = new URLSearchParams({ limit: String(limit), includeProcessed: "1" });
+      // The server's asOf (taken before its query) from the first page is the next updatedSince.
+      let asOf = "";
+      let resync = false;
+      const fetchPage = (updatedSince?: string) => async (cursor: string, limit: number) => {
+        const params = new URLSearchParams({ limit: String(limit), includeProcessed: "1", view: "worklist" });
+        if (updatedSince) params.set("updatedSince", updatedSince);
         if (cursor) params.set("cursor", cursor);
-        return api<{ studies: BridgeStudy[]; nextCursor?: string | null }>(`/api/client/study-sync/available-studies?${params}`, token, { cache: "no-store", signal });
-      }, { signal, onFirstPage: firstPage => { if (!hasWorklistSnapshot.current && startedPriorityRevision === priorityRevision.current) { setWorklistStudies(firstPage); hasWorklistSnapshot.current = firstPage.length > 0; } } });
+        const result = await api<{ studies: BridgeStudy[]; nextCursor?: string | null; asOf: string; resync?: boolean }>(`/api/client/study-sync/available-studies?${params}`, token, { cache: "no-store", signal });
+        if (!cursor) { asOf = result.asOf; resync = Boolean(result.resync); }
+        return result;
+      };
+      // Silent polls fetch only studies whose row, job or report changed; a periodic full load drops deleted studies.
+      const sync = worklistSyncRef.current;
+      if (silent && hasWorklistSnapshot.current && sync && Date.now() - sync.fullAt < WORKLIST_FULL_RELOAD_MS) {
+        const changes = await loadStudyPages<BridgeStudy>(fetchPage(sync.asOf), { signal, firstPageSize: 500 });
+        if (signal?.aborted) return;
+        if (!resync) {
+          // A priority change during the request may be newer than these rows; keep the cursor so the next poll re-reads them.
+          if (startedPriorityRevision === priorityRevision.current) {
+            setWorklistStudies((previous) => mergeStudies(previous, changes));
+            worklistSyncRef.current = { asOf, fullAt: sync.fullAt };
+          }
+          setLastSync(new Date());
+          setStudyError("");
+          return;
+        }
+      }
+      const studies = await loadStudyPages<BridgeStudy>(fetchPage(), { signal, firstPageSize: hasWorklistSnapshot.current ? 500 : 100, onFirstPage: firstPage => { if (!hasWorklistSnapshot.current && startedPriorityRevision === priorityRevision.current) { setWorklistStudies(firstPage); hasWorklistSnapshot.current = firstPage.length > 0; } } });
       if (signal?.aborted) return;
-      if (startedPriorityRevision === priorityRevision.current) { setWorklistStudies(studies); hasWorklistSnapshot.current = true; }
+      if (startedPriorityRevision === priorityRevision.current) {
+        setWorklistStudies(studies); hasWorklistSnapshot.current = true;
+        worklistSyncRef.current = { asOf, fullAt: Date.now() };
+      }
       setLastSync(new Date());
       setStudyError("");
     } catch (error) {
@@ -10665,14 +10687,16 @@ function MarengoUnifiedWorklist({
   );
   const rows = useMemo(() => worklistStudies.map((study) => {
     const job = jobByStudyId.get(study.id);
-    const report = reportByUid.get(study.studyInstanceUid);
+    // Slim worklist rows carry their report; older full-shape rows fall back to the dashboard reports.
+    const report: ReportSummary | undefined = study.report !== undefined ? study.report ?? undefined : reportByUid.get(study.studyInstanceUid);
     const state = worklistStatus({ reportStatus: report?.status, workflowStatus: study.workflowStatus, processingJobId: study.processingJobId ?? job?.id, submittedAt: study.submittedAt });
-    const needsAttention = /fail|error/i.test(`${job?.status ?? study.processingJob?.status ?? ""} ${study.workflowStatus}`);
+    // The row's embedded job is fresher than the (cached) dashboard job list.
+    const needsAttention = /fail|error/i.test(`${study.processingJob?.status ?? job?.status ?? ""} ${study.workflowStatus}`);
     const receivedAt = study.receivedAt ?? study.lastSyncedAt;
     const tatStartAt = worklistTatStart(state, study.submittedAt);
     const processedAt = worklistTatEnd(state,
       report && ["APPROVED", "PUSHED"].includes(report.status) ? reportTatCompletedAt(report) : null,
-      job?.completedAt ?? study.processingJob?.completedAt);
+      study.processingJob?.completedAt ?? job?.completedAt);
     const referringDoctor = study.referringPhysician ?? job?.bridgeStudy?.referringPhysician ?? "";
     const priority = worklistPriority(study.priority ?? study.processingJob?.priority ?? job?.priority);
     return { study, job, report, state, needsAttention, receivedAt, tatStartAt, processedAt, referringDoctor, priority };
@@ -10793,6 +10817,29 @@ function MarengoUnifiedWorklist({
   const visible = ordered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   const selectedRows = rows.filter(({ study }) => selectedIds.has(study.id));
   const detailRow = rows.find(({ study }) => study.id === detailStudy?.id);
+  // Rows are slim; the drawer loads clinical history, attachments and errors for the open study only.
+  const [studyDetail, setStudyDetail] = useState<BridgeStudy | null>(null);
+  const [studyDetailError, setStudyDetailError] = useState("");
+  const indicationPrefilledFor = useRef("");
+  const drawerStudyId = (sendStudy ?? detailStudy)?.id ?? "";
+  const drawerRowStudy = drawerStudyId ? rows.find(({ study }) => study.id === drawerStudyId)?.study : undefined;
+  const drawerDetailKey = `${drawerStudyId}:${drawerRowStudy?.updatedAt ?? ""}:${drawerRowStudy?.processingJob?.status ?? ""}`;
+  const drawerDetailReady = !drawerStudyId || studyDetail?.id === drawerStudyId || Boolean(studyDetailError) || Array.isArray((drawerRowStudy ?? sendStudy ?? detailStudy)?.attachments);
+  useEffect(() => {
+    if (!drawerStudyId || !["SUPER_ADMIN", "CLIENT_USER"].includes(user.role)) return;
+    const controller = new AbortController();
+    setStudyDetailError("");
+    api<{ study: BridgeStudy }>(`/api/client/study-sync/available-studies/${encodeURIComponent(drawerStudyId)}`, token, { cache: "no-store", signal: controller.signal })
+      .then(({ study }) => { if (!controller.signal.aborted) setStudyDetail(study); })
+      .catch((error) => { if (!controller.signal.aborted) setStudyDetailError(error instanceof Error ? error.message : "Study details are unavailable."); });
+    return () => controller.abort();
+  }, [drawerStudyId, drawerDetailKey, token, user.role]);
+  useEffect(() => {
+    // Prefill the send form's clinical history once per study, when its detail arrives.
+    if (!sendStudy || studyDetail?.id !== sendStudy.id || indicationPrefilledFor.current === sendStudy.id) return;
+    indicationPrefilledFor.current = sendStudy.id;
+    setIndication((current) => current || studyDetail.clinicalIndication || "");
+  }, [sendStudy, studyDetail]);
   const hasFilters = Boolean(query || dateFilter !== "ALL" || modalityFilter !== "ALL" || statusFilter !== "ALL" || priorityFilter !== "ALL");
   const initials = user.name.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
 
@@ -10873,6 +10920,9 @@ function MarengoUnifiedWorklist({
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   async function downloadStudyBundle(study: BridgeStudy) {
+    if (studyDownloadInFlight.current) return;
+    studyDownloadInFlight.current = true;
+    setDownloadingStudyId(study.id);
     setFeedback(null);
     try {
       const response = await fetch(`/api/client/study-sync/available-studies/${encodeURIComponent(study.id)}/download`, {
@@ -10897,6 +10947,9 @@ function MarengoUnifiedWorklist({
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       setFeedback({ text: error instanceof Error ? error.message : "Unable to download study. Please try again.", error: true });
+    } finally {
+      studyDownloadInFlight.current = false;
+      setDownloadingStudyId(null);
     }
   }
   async function terminateProcessing(study: BridgeStudy) {
@@ -11048,12 +11101,18 @@ function MarengoUnifiedWorklist({
             </> : (() => {
               const currentStudy = rows.find((row) => row.study.id === (sendStudy ?? detailStudy)?.id)?.study;
               if (!currentStudy && lastSync && !studyError) return <div className="pw-empty" role="status">This study is no longer available in your worklist.</div>;
-              const study = currentStudy ?? sendStudy ?? detailStudy!;
-              return <><div className="pw-detail-patient"><span className="pw-modality">{study.modalities.join(", ")}</span><h3>{study.patientName || "Unknown patient"}</h3><p>{study.patientAge || "Age unavailable"} / {study.patientSex || "-"}<span>Patient ID {study.patientId || "-"}</span></p></div>
-                <dl className="pw-details"><dt>Accession number</dt><dd>{study.accessionNumber || "-"}</dd><dt>Referring doctor</dt><dd>{detailRow?.referringDoctor || study.referringPhysician || "-"}</dd><dt>Study</dt><dd>{study.studyDescription || "-"}</dd><dt>Received (IST)</dt><dd>{istTimestamp(detailRow?.receivedAt ?? study.receivedAt ?? study.lastSyncedAt).full}</dd><dt>Sent for reporting (IST)</dt><dd>{istTimestamp(detailRow?.tatStartAt).full}</dd><dt>Reported (IST)</dt><dd>{istTimestamp(detailRow?.processedAt).full}</dd><dt>TAT duration</dt><dd>{worklistDuration(detailRow?.tatStartAt, detailRow?.processedAt, clockTime)}</dd><dt>Series / images</dt><dd>{study.seriesCount} / {study.instanceCount}</dd><dt>Study UID</dt><dd>{study.studyInstanceUid}</dd></dl>
+              const baseStudy = currentStudy ?? sendStudy ?? detailStudy!;
+              const detail = studyDetail?.id === baseStudy.id ? studyDetail : null;
+              // Row fields are the freshest; the detail fills in what slim rows leave out.
+              const study: BridgeStudy = detail ? { ...detail, ...baseStudy } : baseStudy;
+              const detailReady = Boolean(detail) || Array.isArray(baseStudy.attachments);
+              const attachments = study.attachments ?? [];
+              const pending = studyDetailError || "Loading...";
+              return <><div className="pw-detail-patient"><span className="pw-modality">{study.modalities.join(", ")}</span><h3>{study.patientName || "Unknown patient"}</h3><p>{study.patientAge || (detailReady ? "Age unavailable" : pending)} / {study.patientSex || "-"}<span>Patient ID {study.patientId || "-"}</span></p></div>
+                <dl className="pw-details"><dt>Accession number</dt><dd>{study.accessionNumber || "-"}</dd><dt>Referring doctor</dt><dd>{detailRow?.referringDoctor || study.referringPhysician || "-"}</dd><dt>Study</dt><dd>{study.studyDescription || "-"}</dd><dt>Received (IST)</dt><dd>{istTimestamp(detailRow?.receivedAt ?? study.receivedAt ?? study.lastSyncedAt).full}</dd><dt>Sent for reporting (IST)</dt><dd>{istTimestamp(detailRow?.tatStartAt).full}</dd><dt>Reported (IST)</dt><dd>{istTimestamp(detailRow?.processedAt).full}</dd><dt>TAT duration</dt><dd>{worklistDuration(detailRow?.tatStartAt, detailRow?.processedAt, clockTime)}</dd><dt>Series / images</dt><dd>{detailReady ? `${study.seriesCount} / ${study.instanceCount}` : pending}</dd><dt>Study UID</dt><dd>{study.studyInstanceUid}</dd></dl>
                 {!sendStudy && <div className="pw-study-tools" aria-label="Study actions">
                   <div className="pw-study-tool-row">
-                    {permissions.attach && <button onClick={() => setActionDialog({ kind: "attach", study: detailRow?.study ?? study })}><Plus size={14}/>Supporting investigation</button>}
+                    {permissions.attach && <button onClick={() => setActionDialog({ kind: "attach", study })}><Plus size={14}/>Supporting investigation</button>}
                     <button className="pw-primary" disabled={!permissions.submit || detailRow?.state !== "AVAILABLE" || Boolean(study.processingJobId)} title={detailRow?.state !== "AVAILABLE" ? "Study has already entered reporting" : "Send study for reporting"} onClick={() => beginSend(study)}><Send size={14}/>Send for reporting</button>
                     {user.role === "SUPER_ADMIN" && detailRow?.state === "REPORTING" && study.processingJobId && <button className="pw-danger" disabled={terminatingStudyId === study.id} title="Cancel this processing job and make the study available to send again" onClick={() => void terminateProcessing(study)}><X size={14}/>{terminatingStudyId === study.id ? "Terminating..." : "Terminate processing"}</button>}
                   </div>
@@ -11062,19 +11121,19 @@ function MarengoUnifiedWorklist({
                     <button disabled={!detailRow?.report || !["APPROVED","PUSHED"].includes(detailRow.report.status)} title={detailRow?.state === "REPORTED" ? "View final report" : "Report is not available yet"} onClick={() => { if (detailRow?.report) setStudyMedia({ kind: "report", report: detailRow.report, title: "Radiology report" }); }}><FileText size={14}/>Report</button>
                   </div>
                   <div className="pw-study-tool-row">
-                    <button onClick={() => void downloadStudyBundle(study)}><Download size={14}/>Download study</button>
+                    <button disabled={Boolean(downloadingStudyId)} onClick={() => void downloadStudyBundle(study)}>{downloadingStudyId === study.id ? <LoaderCircle className="pw-spinning" size={14}/> : <Download size={14}/>} {downloadingStudyId === study.id ? "Downloading study..." : "Download study"}</button>
                     {permissions.share && <button disabled={!detailRow?.report || !["APPROVED","PUSHED"].includes(detailRow.report.status)} title={!detailRow?.report ? "A report is required to share this case" : "Share report"} onClick={() => { if (detailRow?.report) setActionDialog({ kind: "share", report: detailRow.report }); }}><Share2 size={14}/>Share</button>}
                     {permissions.schedule && <button disabled={!detailRow?.report} title={!detailRow?.report ? "Call scheduling becomes available when the case has a report" : "Schedule a radiologist call"} onClick={() => { if (detailRow?.report) setActionDialog({ kind: "call", report: detailRow.report }); }}><Phone size={14}/>Schedule the call</button>}
                   </div>
                 </div>}
-                <div className="pw-attachment-heading"><h4>Attachments</h4><span>{(detailRow?.study.attachments ?? study.attachments ?? []).length}</span></div>
-                <ul className="pw-attachments">{(detailRow?.study.attachments ?? study.attachments ?? []).map((file) => <li key={file.id}><FileText size={16}/><div><strong title={file.originalName}>{file.originalName}</strong><small>{Math.max(1, Math.ceil(Number(file.sizeBytes) / 1024))} KB</small></div><button aria-label={`View ${file.originalName}`} onClick={() => setStudyMedia({ kind: "attachment", studyId: study.id, attachment: file, title: file.originalName })}><Eye size={13}/>View</button></li>)}</ul>
-                {!(detailRow?.study.attachments ?? study.attachments ?? []).length && <p className="pw-history">No attachments</p>}
-                {sendStudy ? <><fieldset className="pw-priority-field"><legend>Priority</legend><label><input type="radio" name="priority" disabled={sending} checked={priority === "REGULAR"} onChange={() => setPriority("REGULAR")}/>Routine</label><label><input type="radio" name="priority" disabled={sending} checked={priority === "URGENT"} onChange={() => setPriority("URGENT")}/>Urgent</label></fieldset><label className="pw-field">Clinical history<textarea aria-label="Clinical history" disabled={sending} value={indication} onChange={(event) => setIndication(event.target.value)} rows={5} /></label><label className="pw-field">Reporting partner<div className="pw-partner"><ShieldCheck size={16}/>Dectrocel Teleradiology</div></label></> : <><h4>Clinical history</h4><p className="pw-history">{study.clinicalIndication || "Not supplied"}</p><h4>Workflow</h4><p className="pw-history">{study.workflowStatus?.replaceAll("_", " ") || "Available"}</p>{(detailRow?.job?.error || study.latestDispatch?.lastErrorMessage) && <div className="pw-alert">{detailRow?.job?.error || study.latestDispatch?.lastErrorMessage}</div>}{detailRow?.needsAttention && <p className="pw-history">Review the failure with your PACS administrator before resubmitting.</p>}</>}
+                <div className="pw-attachment-heading"><h4>Attachments</h4><span>{detailReady ? attachments.length : study.attachmentCount ?? 0}</span></div>
+                <ul className="pw-attachments">{attachments.map((file) => <li key={file.id}><FileText size={16}/><div><strong title={file.originalName}>{file.originalName}</strong><small>{Math.max(1, Math.ceil(Number(file.sizeBytes) / 1024))} KB</small></div><button aria-label={`View ${file.originalName}`} onClick={() => setStudyMedia({ kind: "attachment", studyId: study.id, attachment: file, title: file.originalName })}><Eye size={13}/>View</button></li>)}</ul>
+                {!attachments.length && <p className="pw-history">{detailReady ? "No attachments" : pending}</p>}
+                {sendStudy ? <><fieldset className="pw-priority-field"><legend>Priority</legend><label><input type="radio" name="priority" disabled={sending} checked={priority === "REGULAR"} onChange={() => setPriority("REGULAR")}/>Routine</label><label><input type="radio" name="priority" disabled={sending} checked={priority === "URGENT"} onChange={() => setPriority("URGENT")}/>Urgent</label></fieldset><label className="pw-field">Clinical history<textarea aria-label="Clinical history" disabled={sending} value={indication} onChange={(event) => setIndication(event.target.value)} rows={5} /></label><label className="pw-field">Reporting partner<div className="pw-partner"><ShieldCheck size={16}/>Dectrocel Teleradiology</div></label></> : <><h4>Clinical history</h4><p className="pw-history">{detailReady ? study.clinicalIndication || "Not supplied" : pending}</p><h4>Workflow</h4><p className="pw-history">{study.workflowStatus?.replaceAll("_", " ") || "Available"}</p>{(detail?.processingJob?.error || detailRow?.job?.error || study.latestDispatch?.lastErrorMessage) && <div className="pw-alert">{detail?.processingJob?.error || detailRow?.job?.error || study.latestDispatch?.lastErrorMessage}</div>}{detailRow?.needsAttention && <p className="pw-history">Review the failure with your PACS administrator before resubmitting.</p>}</>}
               </>;
             })()}
           </div>
-          <div className="pw-drawer-footer"><button onClick={closeOverlays} disabled={sending || uploadingStudy}>Close</button>{uploadOpen ? <button className="pw-primary" disabled={!uploadFile || uploadingStudy} onClick={() => void uploadStudyFile(uploadFile)}><UploadCloud size={15}/>{uploadingStudy ? "Uploading..." : "Upload study"}</button> : sendStudy ? <button className="pw-primary" disabled={sending} onClick={() => void submitForReporting()}><Send size={15}/>{sending ? "Sending..." : "Send for reporting"}</button> : null}</div>
+          <div className="pw-drawer-footer"><button onClick={closeOverlays} disabled={sending || uploadingStudy}>Close</button>{uploadOpen ? <button className="pw-primary" disabled={!uploadFile || uploadingStudy} onClick={() => void uploadStudyFile(uploadFile)}><UploadCloud size={15}/>{uploadingStudy ? "Uploading..." : "Upload study"}</button> : sendStudy ? <button className="pw-primary" disabled={sending || !drawerDetailReady} title={drawerDetailReady ? undefined : "Loading study details..."} onClick={() => void submitForReporting()}><Send size={15}/>{sending ? "Sending..." : "Send for reporting"}</button> : null}</div>
         </section>
       </div>}
       {actionDialog && <WorkspaceActionDialog action={actionDialog} token={token} onClose={() => setActionDialog(null)} onSaved={async () => { await loadWorklistStudies(true); await reload(); }}/>}
@@ -14007,16 +14066,7 @@ function RadiologistDetailModal({
   );
   const rejected = reports.filter((report) => report.status === "FAILED");
   function openReportHtml(report: ReportReview) {
-    const html = String(
-      report.editedReportJson?.htmlReport ??
-        report.aiReportJson?.htmlReport ??
-        "",
-    );
-    if (!html) return;
-    window.open(
-      URL.createObjectURL(new Blob([html], { type: "text/html" })),
-      "_blank",
-    );
+    void openReportHtmlTab(report, token, "best", () => undefined);
   }
 
   return (
@@ -14855,7 +14905,9 @@ function processingJobPatientMetadata(job: ProcessingJob) {
   };
 }
 
-function getReportProcessingJobId(value: Record<string, unknown>) {
+// List payloads omit the report JSON, so `value` may be missing.
+function getReportProcessingJobId(value: Record<string, unknown> | null | undefined) {
+  if (!value) return null;
   const directId = value.processingJobId;
   if (typeof directId === "string" && directId.trim()) return directId;
   const processingJob = value.processingJob;
@@ -14869,13 +14921,13 @@ function getReportProcessingJobId(value: Record<string, unknown>) {
   return typeof id === "string" && id.trim() ? id : null;
 }
 
-function clientReportStatus(report: ReportReview) {
+function clientReportStatus(report: Pick<ReportReview, "status">) {
   if (report.status === "APPROVED" || report.status === "PUSHED")
     return "READY";
   return "PROCESSING";
 }
 
-function reportTatCompletedAt(report: ReportReview) {
+function reportTatCompletedAt(report: Pick<ReportReview, "status" | "approvedAt" | "reviewedAt" | "pushedAt" | "updatedAt">) {
   if (clientReportStatus(report) !== "READY") return null;
   return report.approvedAt ?? report.reviewedAt ?? report.pushedAt ?? report.updatedAt;
 }
@@ -16078,7 +16130,7 @@ function RadiologistReports({
 
   if (selectedReport) {
     return (
-      <RadiologistReportCard
+      <FullRadiologistReportCard
         report={selectedReport}
         token={token}
         reload={reload}
@@ -16266,6 +16318,20 @@ function RadiologistReports({
 function getSpeechRecognitionConstructor() {
   const speechWindow = window as WindowWithSpeechRecognition;
   return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+}
+
+// The card edits and dictates into the report HTML, so it mounts only once the full report has loaded.
+function FullRadiologistReportCard(props: Parameters<typeof RadiologistReportCard>[0]) {
+  const { report, error } = useFullReport(props.report, props.token);
+  if (report) return <RadiologistReportCard {...props} report={report} />;
+  return (
+    <section className="soft-card rounded-lg p-5" aria-busy={!error}>
+      <p className="text-sm font-semibold text-slate-600" role={error ? "alert" : "status"}>{error || "Loading report..."}</p>
+      <button className="mt-4 inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700" onClick={props.onBack} type="button">
+        <ChevronLeft size={16} /> Back
+      </button>
+    </section>
+  );
 }
 
 function RadiologistReportCard({
