@@ -1,3 +1,4 @@
+import { modalityCode, modalityLabel } from './modalities';
 const istDate = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' });
 const istTime = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 
@@ -5,17 +6,9 @@ export function worklistPriority(value?: string | null) {
   return value?.trim().toUpperCase() === 'URGENT' ? 'URGENT' as const : 'REGULAR' as const;
 }
 
-export function worklistModality(value: string) {
-  const code = value.trim().toUpperCase().replace(/[ _-]/g, '');
-  if (['XR', 'XRAY', 'CR', 'DX'].includes(code)) return 'XR';
-  if (code === 'MRI') return 'MR';
-  if (code === 'NMR') return 'NM';
-  return code;
-}
+export const worklistModality = modalityCode;
 
-export function worklistModalityLabel(code: string) {
-  return code === 'XR' ? 'X-ray' : code === 'MR' ? 'MRI' : code === 'NM' ? 'Nuclear medicine' : code === 'SPECIALXRAY' ? 'Special x-ray' : code;
-}
+export const worklistModalityLabel = modalityLabel;
 
 type FacetRow = { receivedAt?: string | null; study: { modalities?: string[] }; state: 'AVAILABLE' | 'REPORTING' | 'REPORTED'; priority: 'REGULAR' | 'URGENT'; needsAttention: boolean };
 

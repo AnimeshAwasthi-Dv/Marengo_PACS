@@ -1,3 +1,4 @@
+import { modalityCodes, modalityCode, modalityLabel } from './modalities';
 import { useState, type ReactNode } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpDown, BookOpen, CreditCard, Download, Search, Settings2 } from 'lucide-react';
 import { WorkspaceStatistics } from './WorkspaceOperations';
@@ -37,21 +38,21 @@ function WorkspaceTariff({ token }: { token: string }) {
     } catch (err) { setDownloadError(err instanceof Error ? err.message : 'Download failed.'); }
     finally { setDownloading(false); }
   }
-  const filtered = (tariff?.rates ?? []).filter(rate => (modality === 'ALL' || rate.modality === modality)
+  const filtered = (tariff?.rates ?? []).filter(rate => (modality === 'ALL' || modalityCode(rate.modality) === modalityCode(modality))
     && (chargeType === 'ALL' || rate.chargeType === chargeType)
     && [rate.modality, rate.bodyPart, rate.studies, rate.note].join(' ').toLowerCase().includes(query.trim().toLowerCase()));
   if (sortAscending !== null) filtered.sort((a, b) => (a.amountMinor - b.amountMinor) * (sortAscending ? 1 : -1));
   const hasFilters = query || modality !== 'ALL' || chargeType !== 'ALL';
   return <>
     <header className="pw-heading"><div><div className="pw-breadcrumb">Marengo / Billing / Rate card</div><h1>Dectrocel tariff <span>{tariff?.rates.length ?? 0}</span></h1></div><button aria-label="Download rate card" title="Download rate card" disabled={!tariff || downloading} onClick={() => void exportRates()}><Download size={15}/><span className="pw-tariff-download-label">{downloading ? 'Exporting...' : 'Download rate card'}</span></button></header>
-    <div className="pw-toolbar pw-tariff-toolbar"><label className="pw-search"><Search size={16}/><input aria-label="Search tariff" placeholder="Search study, body part, modality..." value={query} onChange={e => setQuery(e.target.value)}/></label><select aria-label="Tariff modality" value={modality} onChange={e => setModality(e.target.value)}><option value="ALL">All modalities</option>{['X RAY', 'CT', 'MRI', 'NMR'].map(item => <option key={item}>{item}</option>)}</select><select aria-label="Tariff charge type" value={chargeType} onChange={e => setChargeType(e.target.value)}><option value="ALL">All charge types</option>{Object.entries(chargeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{hasFilters && <button onClick={() => { setQuery(''); setModality('ALL'); setChargeType('ALL'); }}>Clear filters</button>}</div>
+    <div className="pw-toolbar pw-tariff-toolbar"><label className="pw-search"><Search size={16}/><input aria-label="Search tariff" placeholder="Search study, body part, modality..." value={query} onChange={e => setQuery(e.target.value)}/></label><select aria-label="Tariff modality" value={modality} onChange={e => setModality(e.target.value)}><option value="ALL">All modalities</option>{modalityCodes.map(item => <option key={item} value={item}>{modalityLabel(item)}</option>)}</select><select aria-label="Tariff charge type" value={chargeType} onChange={e => setChargeType(e.target.value)}><option value="ALL">All charge types</option>{Object.entries(chargeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{hasFilters && <button onClick={() => { setQuery(''); setModality('ALL'); setChargeType('ALL'); }}>Clear filters</button>}</div>
     {(error || downloadError) && <div className="pw-alert" role="alert">{error || downloadError}</div>}
     {tariff && <div className="pw-tariff-state"><span className="pw-status available">Draft</span><span>Effective date pending</span><details><summary>Pending confirmations <b>{tariff.pendingConfirmations.length}</b></summary><ul>{tariff.pendingConfirmations.map(note => <li key={note}>{note}</li>)}</ul></details></div>}
     <div className="pw-table-scroll"><table className="pw-data-table pw-tariff-table">
       <colgroup><col style={{ width: 92 }}/><col style={{ width: 180 }}/><col/><col style={{ width: 140 }}/><col style={{ width: 126 }}/></colgroup>
       <thead><tr><th>Modality</th><th>Body part / Category</th><th>Studies</th><th>Billing unit</th><th aria-sort={sortAscending === null ? 'none' : sortAscending ? 'ascending' : 'descending'}><button title="Sort by rate" onClick={() => setSortAscending(value => value === null ? true : !value)}>Rate<span className="pw-tariff-currency"> (INR)</span>{sortAscending === null ? <ArrowUpDown size={13}/> : sortAscending ? <ArrowUp size={13}/> : <ArrowDown size={13}/>}</button></th></tr></thead>
       <tbody>{filtered.map(rate => <tr key={rate.id} data-rate-id={rate.id}>
-        <td><span className="pw-modality">{rate.modality}</span></td>
+        <td><span className="pw-modality">{modalityLabel(rate.modality)}</span></td>
         <td><strong>{rate.bodyPart}</strong><small>{rate.unit}</small><details className="pw-tariff-mobile-studies"><summary>Studies</summary><p>{rate.studies}</p>{rate.note && <small className="pw-tariff-note">{rate.note}</small>}</details></td>
         <td>{rate.studies}{rate.note && <small className="pw-tariff-note">{rate.note}</small>}</td><td>{rate.unit}</td>
         <td className="pw-tariff-price">{rateFormat.format(rate.amountMinor / 100)}</td>

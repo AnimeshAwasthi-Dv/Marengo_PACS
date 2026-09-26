@@ -1,3 +1,4 @@
+import { modalityCodes, modalityCode, modalityLabel } from './modalities';
 import LoginView from './LoginView';
 import './pacs-workspace.css';
 import { needsFullAdminOverview } from './lib/adminOverview';
@@ -264,7 +265,7 @@ const modalityTabs = [
   "Mammography",
   "X-RAY",
   "PET-CT",
-  "Ultrasound",
+  "USG",
 ] as const;
 
 
@@ -277,7 +278,7 @@ function normalizeModalityTab(value?: string | null): ModalityTab | null {
   if (!text) return null;
   if (/\b(pet[\s-]?ct|pt)\b/.test(text)) return "PET-CT";
   if (/\b(mammography|mammo|mg)\b/.test(text)) return "Mammography";
-  if (/\b(ultrasound|usg|us)\b/.test(text)) return "Ultrasound";
+  if (/\b(ultrasound|usg|us)\b/.test(text)) return "USG";
   if (/\b(x[\s-]?ray|xray|dx|cr)\b/.test(text)) return "X-RAY";
   if (/\b(mri|mr|mra|mrv|mrs|mrcp)\b/.test(text)) return "MRI";
   if (/\bct\b|computed tomography/.test(text)) return "CT";
@@ -329,7 +330,7 @@ function reportModalityValues(report: ReportReview) {
 }
 
 function dicomExamLabel(metadata: Record<string, unknown>, fallback: string) {
-  const modality = typeof metadata.modality === "string" ? metadata.modality.trim().toUpperCase() : "";
+  const modality = typeof metadata.modality === "string" ? modalityLabel(metadata.modality) : "";
   const description = typeof metadata.studyDescription === "string" ? metadata.studyDescription.trim() : "";
   if (description) return description;
 
@@ -1073,9 +1074,9 @@ function AdminDashboard({
       if (
         modality !== "ALL" &&
         !jobModalities.some((item) =>
-          item.toUpperCase().startsWith(modality),
+          modalityCode(item) === modalityCode(modality),
         ) &&
-        !job.serviceType.toUpperCase().startsWith(modality)
+        !(modalityCode(job.serviceType) === modalityCode(modality) || job.serviceType.toUpperCase().startsWith(modality))
       )
         return false;
       return (
@@ -1201,9 +1202,7 @@ function AdminDashboard({
           value={modality}
         >
           <option value="ALL">All modalities</option>
-          <option value="CT">CT</option>
-          <option value="MR">MR</option>
-          <option value="XR">XR</option>
+          {modalityCodes.map(code => <option key={code} value={code}>{modalityLabel(code)}</option>)}
         </select>
         <select
           onChange={(event) => setCenterCode(event.target.value)}
@@ -1323,7 +1322,7 @@ function AdminDashboard({
             />
             <DetailField
               label="Modality / service"
-              value={`${selectedJob.bridgeStudy?.modalities?.join(", ") || "-"} / ${serviceTypeLabels[selectedJob.serviceType] ?? selectedJob.serviceType}`}
+              value={`${selectedJob.bridgeStudy?.modalities?.map(modalityLabel).join(", ") || "-"} / ${serviceTypeLabels[selectedJob.serviceType] ?? selectedJob.serviceType}`}
             />
             <DetailField
               label="Priority"
@@ -3755,7 +3754,7 @@ function ClientDashboard({ client }: { client: Client }) {
   const modalityCaseRows = useMemo(() => {
     const rows = new Map<string, { modality: string; received: number; processing: number; reported: number }>();
     const ensure = (modality?: string | null) => {
-      const key = (modality || "XRAY").trim().toUpperCase() || "XRAY";
+      const key = modalityLabel(modality || "XRAY");
       const existing = rows.get(key);
       if (existing) return existing;
       const created = { modality: key, received: 0, processing: 0, reported: 0 };
@@ -4514,7 +4513,7 @@ function GroupStudiesView({
                   <td className="py-4 pr-4 text-slate-700">
                     {study.studyDescription ?? study.studyInstanceUid}
                     <div className="text-xs text-slate-500">
-                      {study.modalities.join(", ") || "-"}
+                      {study.modalities.map(modalityLabel).join(", ") || "-"}
                     </div>
                   </td>
                   <td className="py-4 pr-4">
@@ -4860,7 +4859,7 @@ function MarengoReportsView({
             />
             <DetailField
               label="Modality"
-              value={selectedReport.modality ?? "-"}
+              value={modalityLabel(selectedReport.modality ?? "-")}
             />
             <DetailField label="Service" value={selectedReport.serviceName} />
             <DetailField
@@ -5033,13 +5032,13 @@ function PublicSharedReportView({ token }: { token: string }) {
   if (!report) return <main className="app-shell grid min-h-screen place-items-center p-4"><EmptyState message="Opening shared report…" /></main>;
   if (report.includeViewer === false) return <div className="fullscreen-dicom-shell pw-public-shell"><header className="fullscreen-dicom-topbar"><div><p>Shared radiology report</p><span>{report.patientName} / {report.patientId}</span></div></header><div className="pw-public-report"><ReportDocumentPreview report={report} publicToken={token}/></div></div>;
   if (isPhone) return <div className="public-phone-share-shell" style={{ width: `${phoneViewport.width}px`, height: `${phoneViewport.height}px` }}>
-    <header className="public-phone-share-header"><p>Shared DICOM Viewer</p><span>{report.patientName ?? "Patient"} · {report.modality ?? "DICOM"}</span></header>
+    <header className="public-phone-share-header"><p>Shared DICOM Viewer</p><span>{report.patientName ?? "Patient"} · {modalityLabel(report.modality ?? "DICOM")}</span></header>
     <nav className="public-phone-share-tabs" aria-label="Shared study workspace">
       <button className={cx(mobilePane === "VIEWER" && "active")} onClick={() => setMobilePane("VIEWER")} type="button">Images</button>
       <button className={cx(mobilePane === "REPORT" && "active")} onClick={() => setMobilePane("REPORT")} type="button">Report</button>
     </nav>
     <main className="public-phone-share-content">
-      {mobilePane === "VIEWER" ? <PublicDecxpertViewerPane token={token} /> : <section className="public-phone-report"><div className="public-phone-report-header"><strong>{report.patientName ?? "Patient"}</strong><span>{report.modality ?? "DICOM"} · {report.serviceName}</span></div><ReportDocumentPreview report={report} publicToken={token} /></section>}
+      {mobilePane === "VIEWER" ? <PublicDecxpertViewerPane token={token} /> : <section className="public-phone-report"><div className="public-phone-report-header"><strong>{report.patientName ?? "Patient"}</strong><span>{modalityLabel(report.modality ?? "DICOM")} · {report.serviceName}</span></div><ReportDocumentPreview report={report} publicToken={token} /></section>}
     </main>
   </div>;
   return <div className="fullscreen-dicom-shell">
@@ -5050,7 +5049,7 @@ function PublicSharedReportView({ token }: { token: string }) {
     </nav>
     <div className="fullscreen-dicom-grid">
       <section className={cx("fullscreen-viewer-pane", mobilePane !== "VIEWER" && "mobile-pane-hidden")}><PublicDecxpertViewerPane token={token} /></section>
-      <aside className={cx("fullscreen-report-pane", mobilePane !== "REPORT" && "mobile-pane-hidden")}><div className="dicom-preview-toolbar"><div><p>{report.patientName ?? "Patient"}</p><span>{report.modality ?? "DICOM"} - {report.serviceName}</span></div><StatusBadge status={report.status} /></div><ReportDocumentPreview report={report} publicToken={token} /></aside>
+      <aside className={cx("fullscreen-report-pane", mobilePane !== "REPORT" && "mobile-pane-hidden")}><div className="dicom-preview-toolbar"><div><p>{report.patientName ?? "Patient"}</p><span>{modalityLabel(report.modality ?? "DICOM")} - {report.serviceName}</span></div><StatusBadge status={report.status} /></div><ReportDocumentPreview report={report} publicToken={token} /></aside>
     </div>
   </div>;
 }
@@ -5152,7 +5151,7 @@ function MarengoDicomViewerModal({
             <div>
               <p>{report.patientName ?? "Patient"}</p>
               <span>
-                {report.modality ?? "DICOM"} - {report.serviceName}
+                {modalityLabel(report.modality ?? "DICOM")} - {report.serviceName}
               </span>
             </div>
             <StatusBadge status={report.status} />
@@ -5218,7 +5217,7 @@ function MarengoDicomViewerModal({
                 <span className="block text-xs font-bold uppercase text-slate-400">
                   Modality / service
                 </span>
-                {report.modality || "-"} / {report.serviceName}
+                {modalityLabel(report.modality || "-")} / {report.serviceName}
               </div>
               <div>
                 <span className="block text-xs font-bold uppercase text-slate-400">
@@ -5711,7 +5710,7 @@ function ClientStudySyncView({
       study.patientSex ?? "-",
       study.patientAge ?? "-",
       study.studyDescription ?? "-",
-      study.modalities.join(", ") || "-",
+      study.modalities.map(modalityLabel).join(", ") || "-",
       study.seriesCount,
       study.instanceCount,
       study.studyDate ?? "-",
@@ -5871,7 +5870,7 @@ function ClientStudySyncView({
                 Patient ID: {selectedStudy.patientId ?? "-"}
               </p>
               <p>Study: {selectedStudy.studyDescription ?? "-"}</p>
-              <p>Modality: {selectedStudy.modalities.join(", ") || "-"}</p>
+              <p>Modality: {selectedStudy.modalities.map(modalityLabel).join(", ") || "-"}</p>
             </div>
             <label className="hidden">
               Patient profile
@@ -8434,7 +8433,7 @@ function PatientPacsStudies({
                       {archive.studyInstanceUid || archive.id}
                     </span>
                   </td>
-                  <td className="px-3 py-4">{archive.modality || "-"}</td>
+                  <td className="px-3 py-4">{modalityLabel(archive.modality || "-")}</td>
                   <td className="px-3 py-4">
                     {archive.accessionNumber || "-"}
                   </td>
@@ -8556,7 +8555,7 @@ function PatientPacsStudies({
                   <span className="block text-xs font-bold uppercase text-slate-400">
                     Modality
                   </span>
-                  {archive.modality || "-"}
+                  {modalityLabel(archive.modality || "-")}
                 </div>
                 <StatusBadge status="Archived" />
               </summary>
@@ -10361,7 +10360,7 @@ function WorkspaceReports({ reports, token, permissions, onPreview, onAction, on
     <div className="pw-toolbar"><label className="pw-search"><Search size={16}/><input aria-label="Search reports" placeholder="Search patient, ID, accession..." value={query} onChange={(e) => { setQuery(e.target.value); setPage(0); }}/></label></div>
     {error && <div className="pw-alert" role="alert">{error}</div>}
     <div className="pw-table-scroll"><table className="pw-data-table pw-report-table"><thead><tr><th>Patient</th><th>Accession number</th><th>Study</th><th>Reported (IST)</th><th>Radiologist</th><th>Download PDF</th><th>Actions</th></tr></thead><tbody>
-      {filtered.slice(currentPage * 25, currentPage * 25 + 25).map((report) => <tr key={report.id}><td><strong>{report.patientName || "Unknown patient"}</strong><small>{report.patientId || "-"}</small><small className="pw-report-mobile-study">{report.serviceName}</small></td><td>{report.accession || "-"}</td><td><strong>{report.serviceName}</strong><small>{report.modality} {report.client?.name}</small></td><td>{istTimestamp(report.approvedAt ?? report.generatedAt).full}</td><td>{report.radiologist?.fullName || "-"}</td><td><div className="pw-downloads">{(["with-letterhead", "without-letterhead"] as const).map((variant) => <button key={variant} aria-label={`Download report ${variant.replaceAll("-", " ")} for ${report.patientName}`} disabled={Boolean(busy)} onClick={() => void download(report, variant)}>{busy === `${report.id}:${variant}` ? <LoaderCircle className="pw-spinning" size={14}/> : <Download size={14}/>}<span>{variant === "with-letterhead" ? "With letterhead" : "Without letterhead"}</span></button>)}</div></td><td><div className="pw-inline-actions">
+      {filtered.slice(currentPage * 25, currentPage * 25 + 25).map((report) => <tr key={report.id}><td><strong>{report.patientName || "Unknown patient"}</strong><small>{report.patientId || "-"}</small><small className="pw-report-mobile-study">{report.serviceName}</small></td><td>{report.accession || "-"}</td><td><strong>{report.serviceName}</strong><small>{modalityLabel(report.modality ?? "")} {report.client?.name}</small></td><td>{istTimestamp(report.approvedAt ?? report.generatedAt).full}</td><td>{report.radiologist?.fullName || "-"}</td><td><div className="pw-downloads">{(["with-letterhead", "without-letterhead"] as const).map((variant) => <button key={variant} aria-label={`Download report ${variant.replaceAll("-", " ")} for ${report.patientName}`} disabled={Boolean(busy)} onClick={() => void download(report, variant)}>{busy === `${report.id}:${variant}` ? <LoaderCircle className="pw-spinning" size={14}/> : <Download size={14}/>}<span>{variant === "with-letterhead" ? "With letterhead" : "Without letterhead"}</span></button>)}</div></td><td><div className="pw-inline-actions">
         <button title="View report" aria-label={`View report for ${report.patientName}`} onClick={() => onPreview(report)}><Eye size={15}/></button>
         {permissions.share && <button title="Share report" aria-label={`Share report for ${report.patientName}`} onClick={() => onAction({ kind: "share", report })}><Share2 size={15}/></button>}
         {permissions.schedule && <button title="Schedule call" aria-label={`Schedule call for ${report.patientName}`} onClick={() => onAction({ kind: "call", report })}><Phone size={15}/></button>}
@@ -10702,7 +10701,7 @@ function MarengoUnifiedWorklist({
     return { study, job, report, state, needsAttention, receivedAt, tatStartAt, processedAt, referringDoctor, priority };
   }), [jobByStudyId, reportByUid, worklistStudies]);
 
-  const modalityOptions = useMemo(() => Array.from(new Set(['XR', 'CT', 'MR', 'SPECIALXRAY', ...rows.flatMap(({ study }) => (study.modalities ?? []).map(worklistModality).filter(Boolean))])).sort(), [rows]);
+  const modalityOptions = useMemo(() => Array.from(new Set([...modalityCodes, ...rows.flatMap(({ study }) => (study.modalities ?? []).map(worklistModality).filter(Boolean))])).sort(), [rows]);
   const searchedRows = useMemo(() => rows.filter(({ study, referringDoctor }) => searchableText([
         referringDoctor,
         study.patientName,
@@ -10800,7 +10799,6 @@ function MarengoUnifiedWorklist({
     { key: "REPORTING", label: "Reporting", icon: Activity },
     { key: "REPORTED", label: "Reported", icon: CheckCircle2 },
     { key: "URGENT", label: "Urgent", icon: AlertTriangle },
-    { key: "FAILED", label: "Needs attention", icon: AlertTriangle },
   ] as const;
   const ordered = useMemo(() => [...filtered].sort((a, b) => {
     const comparison = sort.key === "received"
@@ -10911,7 +10909,7 @@ function MarengoUnifiedWorklist({
     const records = [["Patient name", "Patient ID", "Accession number", "Referring doctor", "Modality", "Study description", "Received (IST)", "Sent for reporting (IST)", "Reported (IST)", "TAT (HH:MM:SS)", "Status"],
       ...selectedRows.map(({ study, state, receivedAt, tatStartAt, processedAt, referringDoctor }) => [
         study.patientName ?? "", study.patientId ?? "", study.accessionNumber ?? "", referringDoctor,
-        study.modalities.join(", "), study.studyDescription ?? "", istTimestamp(receivedAt).full,
+        study.modalities.map(modalityLabel).join(", "), study.studyDescription ?? "", istTimestamp(receivedAt).full,
         istTimestamp(tatStartAt).full, istTimestamp(processedAt).full, worklistDuration(tatStartAt, processedAt, clockTime), displayedStatus(state).label,
       ])];
     const url = URL.createObjectURL(new Blob([records.map((record) => record.map(safeCell).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" }));
@@ -11023,7 +11021,7 @@ function MarengoUnifiedWorklist({
           <button className="pw-refresh" disabled={studyLoading} onClick={() => void loadWorklistStudies()}><RefreshCw size={15} className={studyLoading ? "pw-spinning" : ""} />{studyLoading ? "Refreshing" : "Refresh"}</button>
         </div>
         <nav className="pw-queues pw-worklist-queues" aria-label="Study queues">
-          {queueItems.map(({ key, label, icon: Icon }) => <button key={key} className={tab === key ? "active" : ""} aria-pressed={tab === key} onClick={() => { setTab(key); setStatusFilter("ALL"); setPriorityFilter("ALL"); }}><Icon size={15}/><span>{label}</span><b className={(key === "FAILED" || key === "URGENT") && counts[key] ? "pw-error-count" : ""}>{counts[key]}</b></button>)}
+          {queueItems.map(({ key, label, icon: Icon }) => <button key={key} className={tab === key ? "active" : ""} aria-pressed={tab === key} onClick={() => { setTab(key); setStatusFilter("ALL"); setPriorityFilter("ALL"); }}><Icon size={15}/><span>{label}</span><b className={(key === "URGENT") && counts[key] ? "pw-error-count" : ""}>{counts[key]}</b></button>)}
         </nav>
         <div className="pw-modality-strip">
           <nav aria-label="Modality queues"><button className={modalityFilter === "ALL" ? "active" : ""} aria-pressed={modalityFilter === "ALL"} onClick={() => setModalityFilter("ALL")}>All modalities<b>{receivedCount}</b></button>{modalityOptions.map(code => <button key={code} className={modalityFilter === code ? "active" : ""} aria-pressed={modalityFilter === code} onClick={() => setModalityFilter(code)}>{worklistModalityLabel(code)}<b>{modalityCounts[code] ?? 0}</b></button>)}</nav>
@@ -11033,7 +11031,7 @@ function MarengoUnifiedWorklist({
           <label className="pw-search"><Search size={17} /><input aria-label="Search studies" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search patient, ID, accession, doctor..." />{query && <button title="Clear search" aria-label="Clear search" onClick={() => setQuery("")}><X size={14} /></button>}</label>
           <label className="pw-filter"><CalendarDays size={15} /><select aria-label="Date range" value={dateFilter} onChange={(event) => setDateFilter(event.target.value as typeof dateFilter)}><option value="ALL">All dates</option><option value="TODAY">Today</option><option value="WEEK">Last 7 days</option></select><ChevronDown size={13} /></label>
           <label className="pw-filter"><Network size={15} /><select aria-label="Modality" value={modalityFilter} onChange={(event) => setModalityFilter(event.target.value)}><option value="ALL">All modalities</option>{modalityOptions.map((modality) => <option value={modality} key={modality}>{worklistModalityLabel(modality)}</option>)}</select><ChevronDown size={13} /></label>
-          <label className="pw-filter"><Filter size={15} /><select aria-label="Status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>{queueItems.filter(({key}) => key !== "FAILED" && key !== "URGENT").map(({key, label}) => <option key={key} value={key}>{key === "ALL" ? "All statuses" : label}</option>)}</select><ChevronDown size={13} /></label>
+          <label className="pw-filter"><Filter size={15} /><select aria-label="Status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>{queueItems.filter(({key}) => key !== "URGENT").map(({key, label}) => <option key={key} value={key}>{key === "ALL" ? "All statuses" : label}</option>)}</select><ChevronDown size={13} /></label>
           <label className="pw-filter"><AlertTriangle size={15}/><select aria-label="Priority" value={priorityFilter} onChange={event => setPriorityFilter(event.target.value as typeof priorityFilter)}><option value="ALL">All priorities</option><option value="REGULAR">Routine</option><option value="URGENT">Urgent</option></select><ChevronDown size={13}/></label>
           <label className="pw-filter pw-mobile-sort"><select aria-label="Sort studies" value={`${sort.key}:${sort.ascending ? "asc" : "desc"}`} onChange={event => { const [key, direction] = event.target.value.split(":"); setSort({ key: key as typeof sort.key, ascending: direction === "asc" }); }}><option value="received:desc">Newest received</option><option value="received:asc">Oldest received</option><option value="priority:desc">Urgent first</option><option value="priority:asc">Routine first</option><option value="patient:asc">Patient A-Z</option><option value="patient:desc">Patient Z-A</option><option value="modality:asc">Modality A-Z</option><option value="modality:desc">Modality Z-A</option><option value="processed:desc">Latest processed</option><option value="processed:asc">Earliest processed</option></select><ChevronDown size={13}/></label>
           {hasFilters && <button className="pw-text-button" onClick={resetFilters}>Clear filters</button>}
@@ -11061,11 +11059,11 @@ function MarengoUnifiedWorklist({
               return <tr key={study.id} data-study-id={study.id} className={selectedIds.has(study.id) ? "selected" : ""} onDoubleClick={() => setDetailStudy(study)}>
                 <td><input type="checkbox" aria-label={`Select ${study.patientName || study.id}`} checked={selectedIds.has(study.id)} onChange={() => toggleStudy(study.id)} /></td>
                 <td>{priorityBadge(study, urgent, state === "REPORTED")}</td>
-                <td><button className="pw-patient" onClick={() => setDetailStudy(study)} title={study.patientName ?? "Unknown patient"}>{study.patientName || "Unknown patient"}</button><span className="pw-mobile-study">{priorityBadge(study, urgent, state === "REPORTED", true)} / {study.modalities.join(", ")} / {study.studyDescription || "Imaging study"}</span></td>
+                <td><button className="pw-patient" onClick={() => setDetailStudy(study)} title={study.patientName ?? "Unknown patient"}>{study.patientName || "Unknown patient"}</button><span className="pw-mobile-study">{priorityBadge(study, urgent, state === "REPORTED", true)} / {study.modalities.map(modalityLabel).join(", ")} / {study.studyDescription || "Imaging study"}</span></td>
                 <td className="pw-numeric">{study.patientId || "-"}</td>
                 <td className="pw-numeric">{study.accessionNumber || "-"}</td>
                 <td title={referringDoctor}>{referringDoctor || "-"}</td>
-                <td><span className="pw-modality">{study.modalities?.includes("MG") ? "Mammogram" : study.modalities?.join(", ") || "-"}</span></td>
+                <td><span className="pw-modality">{study.modalities?.map(modalityLabel).join(", ") || "-"}</span></td>
                 <td title={study.studyDescription ?? ""}><span className="pw-description">{study.studyDescription || "Imaging study"}</span>{isSpecialXrayStudy(study) && <span className="pw-modality" title="Requires manual submission; automatic processing is disabled">Special X-ray</span>}</td>
                 <td className="pw-received" title={istTimestamp(receivedAt).full}>{istTimestamp(receivedAt).date}<span>{istTimestamp(receivedAt).time}</span></td>
                 <td className="pw-received" title={istTimestamp(processedAt).full}>{istTimestamp(processedAt).date}<span>{istTimestamp(processedAt).time}</span></td>
@@ -11108,7 +11106,7 @@ function MarengoUnifiedWorklist({
               const detailReady = Boolean(detail) || Array.isArray(baseStudy.attachments);
               const attachments = study.attachments ?? [];
               const pending = studyDetailError || "Loading...";
-              return <><div className="pw-detail-patient"><span className="pw-modality">{study.modalities.join(", ")}</span><h3>{study.patientName || "Unknown patient"}</h3><p>{study.patientAge || (detailReady ? "Age unavailable" : pending)} / {study.patientSex || "-"}<span>Patient ID {study.patientId || "-"}</span></p></div>
+              return <><div className="pw-detail-patient"><span className="pw-modality">{study.modalities.map(modalityLabel).join(", ")}</span><h3>{study.patientName || "Unknown patient"}</h3><p>{study.patientAge || (detailReady ? "Age unavailable" : pending)} / {study.patientSex || "-"}<span>Patient ID {study.patientId || "-"}</span></p></div>
                 <dl className="pw-details"><dt>Accession number</dt><dd>{study.accessionNumber || "-"}</dd><dt>Referring doctor</dt><dd>{detailRow?.referringDoctor || study.referringPhysician || "-"}</dd><dt>Study</dt><dd>{study.studyDescription || "-"}</dd><dt>Received (IST)</dt><dd>{istTimestamp(detailRow?.receivedAt ?? study.receivedAt ?? study.lastSyncedAt).full}</dd><dt>Sent for reporting (IST)</dt><dd>{istTimestamp(detailRow?.tatStartAt).full}</dd><dt>Reported (IST)</dt><dd>{istTimestamp(detailRow?.processedAt).full}</dd><dt>TAT duration</dt><dd>{worklistDuration(detailRow?.tatStartAt, detailRow?.processedAt, clockTime)}</dd><dt>Series / images</dt><dd>{detailReady ? `${study.seriesCount} / ${study.instanceCount}` : pending}</dd><dt>Study UID</dt><dd>{study.studyInstanceUid}</dd></dl>
                 {!sendStudy && <div className="pw-study-tools" aria-label="Study actions">
                   <div className="pw-study-tool-row">
@@ -11720,7 +11718,7 @@ function StudyDetailsModal({
         />
         <TextInput
           label="Modality"
-          value={study.modalities.join(", ") || "-"}
+          value={study.modalities.map(modalityLabel).join(", ") || "-"}
           readOnly
         />
         <TextInput
