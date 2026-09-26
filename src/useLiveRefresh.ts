@@ -12,7 +12,7 @@ export function useLiveRefresh(refresh: (signal: AbortSignal) => Promise<void>, 
       intervalMs, immediate,
       canRefresh: () => document.visibilityState === 'visible' && navigator.onLine,
     });
-    const resume = () => subscription.trigger();
+    const resume = () => subscription.resume();
     window.addEventListener('focus', resume);
     window.addEventListener('online', resume);
     document.addEventListener('visibilitychange', resume);

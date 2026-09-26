@@ -1,3 +1,9 @@
+import { sendStudyBundle, StudyArchiveError, type BundleStudySource } from './studyBundle'
+import { registerWorklistRoutes } from './routers/worklist.router'
+import { registerReportRoutes } from './routers/reports.router'
+import { activeCallBookingStatuses, reportClientSelect, reportListOmit, reportRadiologistSelect } from './queries/reports.queries'
+import { withReportSummaries } from './services/reports.service'
+import { formatBridgeStudyForAdmin, formatBridgeStudyForClient } from './lib/bridgeStudyFormat'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { ensureMarengoServices } from './marengoServices'
@@ -6,7 +12,7 @@ import QRCode from 'qrcode'
 import { preferredCallWindows, normalizeCallPhone } from './callScheduling'
 import { externalViewerOrigin } from './viewer/externalViewer';
 import { classifyBreastXrayModalities } from '../src/mammography';
-import { holdSpecialXrayForManualSubmission, isSpecialXrayStudy } from '../src/specialXray';
+import { holdSpecialXrayForManualSubmission } from '../src/specialXray';
 import { nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
 import { registerExternalViewerRoutes } from './viewer/routes';
@@ -580,7 +586,7 @@ app.get('/api/admin/dashboard', requireAuth, requireSuperAdmin, async (_req, res
 app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) => {
   res.setHeader('Cache-Control', 'private, no-store')
   const dashboardOnly = req.query.scope === 'dashboard'
-  const dashboardCacheKey = `${redisNamespace}:admin-overview:${dashboardOnly ? 'dashboard' : 'full'}`
+  const dashboardCacheKey = `${redisNamespace}:admin-overview:v2:${dashboardOnly ? 'dashboard' : 'full'}`
   const cachedDashboard = req.query.fresh === '1' ? null : await redisGetJson<unknown>(dashboardCacheKey)
   if (cachedDashboard) return res.json(cachedDashboard)
 
@@ -641,9 +647,10 @@ app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) 
     prisma.job.findMany({ include: { client: true, study: true }, orderBy: { createdAt: 'desc' }, take: 50 }),
     prisma.usageLog.findMany({ include: { client: true }, orderBy: { createdAt: 'desc' }, take: 50 }),
     prisma.reportFormatSetting.findMany({ include: { client: true } }),
-    prisma.reportReview.findMany({ include: { client: true, radiologist: true }, orderBy: { createdAt: 'desc' } }),
+    prisma.reportReview.findMany({ omit: reportListOmit, include: { client: { select: reportClientSelect }, radiologist: true }, orderBy: { createdAt: 'desc' } }),
     prisma.radiologistProfile.findMany({ include: { client: true, user: { select: portalUserSelect } }, orderBy: { createdAt: 'desc' } }),
     prisma.processingJob.findMany({
+      omit: { reportHtml: true },
       include: {
         client: true,
         bridgeStudy: {
@@ -664,7 +671,15 @@ app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) 
       orderBy: { createdAt: 'desc' },
       take: getDeploymentFeatures().marengoMinimal ? 100 : 500,
     }),
-    prisma.availableBridgeStudy.findMany({ include: { client: true, attachments: true, processingJob: true }, orderBy: { updatedAt: 'desc' }, take: 100 }),
+    prisma.availableBridgeStudy.findMany({
+      include: {
+        client: { select: reportClientSelect },
+        attachments: { select: { id: true, originalName: true, mimeType: true, sizeBytes: true, createdAt: true } },
+        processingJob: { omit: { reportHtml: true, upstreamStatus: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 100,
+    }),
     prisma.auditLog.findMany({ include: { client: true }, orderBy: { createdAt: 'desc' }, take: getDeploymentFeatures().marengoMinimal ? 100 : 500 }),
     getDeploymentFeatures().billing ? getAdminBillingSnapshot() : Promise.resolve(null),
   ])
@@ -677,7 +692,7 @@ app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) 
     jobs,
     usageLogs,
     reportSettings,
-    reportReviews,
+    reportReviews: await withReportSummaries(reportReviews),
     radiologists,
     processingJobs,
     availableBridgeStudies,
@@ -1366,7 +1381,7 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
       studyInstanceUid: true,
       accessionNumber: true,
       status: true,
-      metadata: true,
+      // No `metadata`: about 4 KB per study and no provider screen reads it.
       createdAt: true,
       updatedAt: true,
     },
@@ -1452,13 +1467,14 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
         user: { select: portalUserSelect },
         manager: { select: portalUserSelect },
         availabilitySlots: { orderBy: { slotStart: 'asc' }, take: 50 },
-        reportReviews: { where: providerReportWhere, orderBy: { createdAt: 'desc' } },
+        reportReviews: { where: providerReportWhere, omit: reportListOmit, orderBy: { createdAt: 'desc' } },
       },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.reportReview.findMany({
       where: providerReportWhere,
-      include: { client: true, radiologist: true },
+      omit: reportListOmit,
+      include: { client: { select: reportClientSelect }, radiologist: { select: reportRadiologistSelect } },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.user.findMany({
@@ -1474,7 +1490,7 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
     }),
     prisma.reportCallBooking.findMany({
       where: { report: providerReportWhere },
-      include: { radiologist: true, report: { include: { client: true } }, client: true, managerAcceptedBy: { select: portalUserSelect }, radiologistAcceptedBy: { select: portalUserSelect } },
+      include: { radiologist: true, report: { omit: reportListOmit, include: { client: { select: reportClientSelect } } }, client: { select: reportClientSelect }, managerAcceptedBy: { select: portalUserSelect }, radiologistAcceptedBy: { select: portalUserSelect } },
       orderBy: { createdAt: 'desc' },
       take: 200,
     }),
@@ -1494,6 +1510,7 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
   const providerProcessingJobs = mappedProcessingJobIds.length
     ? await prisma.processingJob.findMany({
         where: { id: { in: mappedProcessingJobIds } },
+        omit: { reportHtml: true },
         include: {
           client: { select: { id: true, code: true, name: true } },
           bridgeStudy: { include: { attachments: { orderBy: { createdAt: 'asc' } } } },
@@ -1558,6 +1575,12 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
     take: 50,
   })
   const pendingPayableMinor = payables.filter((item) => item.status !== 'PAID').reduce((sum, item) => sum + item.amountMinor, 0)
+  // The lists above are capped; KPI cards need true totals.
+  const [assignedStudyCount, submittedReportCount, apiRequestCount] = await Promise.all([
+    prisma.providerJobMapping.count({ where: { providerId: provider.id } }),
+    prisma.providerReportSubmission.count({ where: { providerId: provider.id } }),
+    prisma.providerApiRequest.count({ where: { providerId: provider.id } }),
+  ])
   res.json({
     provider: {
       id: provider.id,
@@ -1567,9 +1590,9 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
       reportCallbackEndpoint: provider.reportCallbackEndpoint,
     },
     summary: {
-      assignedStudies: mappings.length,
-      reportsSubmitted: submissions.length,
-      apiRequests: apiLogs.length,
+      assignedStudies: assignedStudyCount,
+      reportsSubmitted: submittedReportCount,
+      apiRequests: apiRequestCount,
       pendingPayableMinor,
       settlementCount: settlements.length,
       disputeCount: disputes.length,
@@ -1583,7 +1606,7 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
     settlements,
     disputes,
     radiologists,
-    reportReviews,
+    reportReviews: await withReportSummaries(reportReviews),
     managers,
     availabilitySlots,
     callBookings,
@@ -1837,10 +1860,16 @@ app.post('/api/provider/call-bookings/:bookingId/complete', requireAuth, require
   res.json(updated)
 })
 
+// Dashboards list many reports: they send each report's JSON as a small summary
+// (`withReportSummaries`) and screens that show report text load `GET /api/reports/:id`.
+// The client dashboard also drops job payloads and per-radiologist report lists, which
+// it never shows; the worklist loads its own slim study pages.
+const dashboardJobOmit = { upstreamStatus: true, reportHtml: true } as const
+
 app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res) => {
   if (!req.user!.clientId) return res.status(403).json({ message: 'Client account required' })
   const access = await workspaceAccess(req)
-  const dashboardCacheKey = `${redisNamespace}:client-dashboard:v2:${req.user!.clientId}:${req.user!.sub}:${req.user!.portalRole}`
+  const dashboardCacheKey = `${redisNamespace}:client-dashboard:v3:${req.user!.clientId}:${req.user!.sub}:${req.user!.portalRole}`
   res.setHeader('Cache-Control', 'private, no-store')
   const cachedDashboard = req.query.fresh === '1' ? null : await redisGetJson<unknown>(dashboardCacheKey)
   if (cachedDashboard) return res.json(cachedDashboard)
@@ -1855,9 +1884,12 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
       processingJobs: {
         orderBy: { createdAt: 'desc' },
         take: 50,
+        omit: dashboardJobOmit,
         include: {
           bridgeStudy: {
             select: {
+              id: true,
+              referringPhysician: true,
               patientId: true,
               patientName: true,
               patientSex: true,
@@ -1874,20 +1906,18 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
       users: access.permissions.manageUsers ? { select: portalUserSelect, orderBy: { createdAt: 'asc' } } : false,
       _count: { select: { processingJobs: { where: { demoMode: true } } } },
       radiologists: {
-        include: {
-          user: { select: portalUserSelect },
-          reportReviews: { orderBy: { createdAt: 'desc' } },
-        },
+        include: { user: { select: portalUserSelect } },
         orderBy: { createdAt: 'desc' },
       },
-      reportReviews: { include: { radiologist: true, callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 } }, orderBy: { updatedAt: 'desc' } },
+      reportReviews: { omit: reportListOmit, include: { radiologist: { select: reportRadiologistSelect }, callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 } }, orderBy: { updatedAt: 'desc' } },
     },
     }),
     getDeploymentFeatures().billing && access.permissions.billing ? getClientBillingSnapshot(req.user!.clientId) : Promise.resolve(undefined),
   ])
   if (!client) return res.json(null)
+  const clientReports = await withReportSummaries(client.reportReviews)
   if (client.kind !== 'GROUP') {
-    const payload = { ...client, ...(billing ? { billing } : {}) }
+    const payload = { ...client, reportReviews: clientReports, ...(billing ? { billing } : {}) }
     void redisSetJson(dashboardCacheKey, payload, Number(process.env.REDIS_DASHBOARD_TTL_SECONDS ?? 60))
     return res.json(payload)
   }
@@ -1907,19 +1937,21 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
     orderBy: { name: 'asc' },
   })
   const centerIds = centers.map((center) => center.id)
-  const [organizationReports, organizationProcessingJobs, organizationBridgeStudies] = centerIds.length
+  const [organizationReports, organizationProcessingJobs] = centerIds.length
     ? await Promise.all([
       prisma.reportReview.findMany({
         where: { clientId: { in: centerIds } },
+        omit: reportListOmit,
         include: {
           client: { select: { name: true, code: true } },
-          radiologist: true,
+          radiologist: { select: reportRadiologistSelect },
           callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 },
         },
         orderBy: { updatedAt: 'desc' },
       }),
       prisma.processingJob.findMany({
         where: { clientId: { in: centerIds } },
+        omit: dashboardJobOmit,
         include: {
           client: { select: { id: true, code: true, name: true } },
           bridgeStudy: {
@@ -1935,6 +1967,7 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
               studyDescription: true,
               modalities: true,
               clinicalIndication: true,
+              referringPhysician: true,
               submittedAt: true,
               _count: { select: { attachments: true } },
             },
@@ -1943,23 +1976,14 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
         orderBy: { createdAt: 'desc' },
         take: 500,
       }),
-      prisma.availableBridgeStudy.findMany({
-        where: { clientId: { in: centerIds } },
-        include: { client: true, attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
-        orderBy: { updatedAt: 'desc' },
-        take: 500,
-      }),
     ])
-    : [[], [], []]
+    : [[], []]
   const organizationRadiologists = await prisma.radiologistProfile.findMany({
     where: {
       providerCode: null,
       clientId: client.id,
     },
-    include: {
-      user: { select: portalUserSelect },
-      reportReviews: { orderBy: { createdAt: 'desc' } },
-    },
+    include: { user: { select: portalUserSelect } },
     orderBy: { createdAt: 'desc' },
   })
   const organization = {
@@ -1974,9 +1998,8 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
       reports: center._count.reportReviews,
       tickets: center._count.supportTickets,
     })),
-    reports: organizationReports,
+    reports: await withReportSummaries(organizationReports),
     processingJobs: organizationProcessingJobs,
-    bridgeStudies: organizationBridgeStudies.map(formatBridgeStudyForAdmin),
     radiologists: organizationRadiologists,
     totals: {
       centers: centers.length,
@@ -1987,7 +2010,7 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
       tickets: centers.reduce((sum, center) => sum + center._count.supportTickets, 0),
     },
   }
-  const payload = { ...client, ...(billing ? { billing } : {}), organization }
+  const payload = { ...client, reportReviews: clientReports, ...(billing ? { billing } : {}), organization }
   void redisSetJson(dashboardCacheKey, payload, Number(process.env.REDIS_DASHBOARD_TTL_SECONDS ?? 60))
   res.json(payload)
 })
@@ -2148,72 +2171,12 @@ app.get('/api/client/study-sync/config', requireAuth, requireClientUser, async (
   res.json(await buildStudySyncApiDetails(client))
 })
 
-app.get('/api/client/study-sync/available-studies', requireAuth, async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
-  res.setHeader('Pragma', 'no-cache')
-  res.setHeader('Expires', '0')
-  const scope = await workspaceStudyScope(req)
-  const requestedLimit = Number(req.query.limit ?? 50)
-  const take = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 50
-  const requestedSince = req.query.updatedSince ? new Date(String(req.query.updatedSince)) : null
-  const updatedSince = requestedSince && !Number.isNaN(requestedSince.getTime()) ? requestedSince : null
-  const asOf = new Date()
-  const rows = await prisma.availableBridgeStudy.findMany({
-    where: {
-      ...scope,
-      ...(updatedSince
-        ? { updatedAt: { gt: updatedSince } }
-        : req.query.includeProcessed === '1' || req.query.all === '1'
-          ? {}
-          : { processingJobId: null }),
-      ...(req.query.status ? { workflowStatus: String(req.query.status) } : {}),
-      ...(req.query.modality ? { modalities: { has: String(req.query.modality).toUpperCase() } } : {}),
-      ...(req.query.q ? {
-        OR: [
-          { patientId: { contains: String(req.query.q), mode: 'insensitive' } },
-          { patientName: { contains: String(req.query.q), mode: 'insensitive' } },
-          { accessionNumber: { contains: String(req.query.q), mode: 'insensitive' } },
-          { studyDescription: { contains: String(req.query.q), mode: 'insensitive' } },
-        ],
-      } : {}),
-    },
-    select: {
-      client: { select: { id: true, name: true, code: true } },
-      id: true, publicStudyId: true, agentId: true, agentName: true, studyInstanceUid: true,
-      patientId: true, patientName: true, patientSex: true, patientAge: true, accessionNumber: true,
-      studyDate: true, studyTime: true, studyDescription: true, modalities: true, seriesCount: true,
-      instanceCount: true, totalSizeBytes: true, localIp: true, localPort: true, localAeTitle: true,
-      archiveName: true, clinicalIndication: true, processingJobId: true, availabilityStatus: true,
-      workflowStatus: true, lastSyncedAt: true, selectedAt: true, submittedAt: true,
-      referringPhysician: true, firstDetectedAt: true, createdAt: true, priority: process.env.DATABASE_READ_ONLY !== 'true',
-      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true } },
-      dispatchRequests: {
-        select: { requestId: true, status: true, progressPercentage: true, createdAt: true, lastErrorMessage: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1,
-      },
-      attachments: {
-        select: { id: true, originalName: true, mimeType: true, sizeBytes: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-      },
-    },
-    orderBy: [{ lastSyncedAt: 'desc' }, { id: 'desc' }],
-    ...(req.query.cursor ? { cursor: { id: String(req.query.cursor) }, skip: 1 } : {}),
-    take: take + 1,
-  })
-  const hasMore = rows.length > take
-  const studies = hasMore ? rows.slice(0, take) : rows
-  res.json({
-    studies: studies.map(formatBridgeStudyForAdmin),
-    incremental: Boolean(updatedSince),
-    asOf: asOf.toISOString(),
-    nextCursor: hasMore ? studies.at(-1)?.id ?? null : null,
-  })
-})
+registerWorklistRoutes(app, { requireAuth, studyScope: workspaceStudyScope })
 
 app.get('/api/client/study-sync/available-studies/:studyId/attachments/:attachmentId', requireAuth, async (req, res) => {
+  const scope = await workspaceStudyScope(req)
   const attachment = await prisma.bridgeStudyAttachment.findFirst({
-    where: { id: String(req.params.attachmentId), bridgeStudyId: String(req.params.studyId), ...await workspaceStudyScope(req), bridgeStudy: { ...await workspaceStudyScope(req) } },
+    where: { id: String(req.params.attachmentId), bridgeStudyId: String(req.params.studyId), ...scope, bridgeStudy: { ...scope } },
   })
   if (!attachment) return res.status(404).json({ message: 'Attachment not found' })
   const filePath = await resolveSafeBundleFile(attachment.filePath)
@@ -2231,7 +2194,7 @@ app.get('/api/client/study-sync/available-studies/:studyId/download', requireAut
     where: { id: String(req.params.studyId), ...await workspaceStudyScope(req) },
     include: {
       client: { select: { id: true, name: true, code: true } },
-      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true } },
+      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true, uploadName: true, uploadPath: true, upstreamStatus: true } },
       dispatchRequests: {
         select: { requestId: true, status: true, progressPercentage: true, createdAt: true, lastErrorMessage: true },
         orderBy: { createdAt: 'desc' },
@@ -4039,7 +4002,7 @@ app.get('/api/radiologist/dashboard', requireAuth, requireRadiologist, async (re
       user: { select: portalUserSelect },
       callBookings: {
         where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED', 'COMPLETED'] }, slotEnd: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-        include: { client: true, report: true },
+        include: { client: { select: reportClientSelect }, report: { omit: reportListOmit } },
         orderBy: { slotStart: 'asc' },
         take: 100,
       },
@@ -4064,10 +4027,14 @@ app.get('/api/radiologist/dashboard', requireAuth, requireRadiologist, async (re
         ],
       }),
     },
-    include: { client: true, auditLogs: true, radiologist: true, callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 } },
+    // No audit trail here: no screen shows it, and it was the largest part after the report JSON.
+    omit: reportListOmit,
+    include: { client: { select: reportClientSelect }, radiologist: { select: reportRadiologistSelect }, callBookings: { where: { status: { in: activeCallBookingStatuses } }, orderBy: { slotStart: 'asc' }, take: 5 } },
     orderBy: { createdAt: 'desc' },
   })
-  res.json({ ...profile, reportReviews: isGroupRadiologist ? reportReviews : reportReviews.filter((report) => canSeePreferredRadiologistReport(profile, report)) })
+  // The JSON summary keeps workflow.preferredRadiologistId, so the visibility filter still applies.
+  const summarized = await withReportSummaries(reportReviews)
+  res.json({ ...profile, reportReviews: isGroupRadiologist ? summarized : summarized.filter((report) => canSeePreferredRadiologistReport(profile, report)) })
 })
 
 app.get('/api/radiologist/reports/:reportId/pdf', requireAuth, requireRadiologist, async (req, res) => {
@@ -4428,10 +4395,22 @@ app.post('/api/admin/processing-jobs/:jobId/retry-renewist', requireAuth, requir
   res.status(202).json({ processingJobId: jobId, status: 'QueuedForRenewist' })
 })
 
+registerReportRoutes(app, {
+  requireAuth,
+  getAuthorizedReport,
+  async canRadiologistSeeReport(req, report) {
+    const profile = await prisma.radiologistProfile.findUniqueOrThrow({ where: { userId: req.user!.sub }, select: { id: true, clientId: true, providerCode: true } })
+    return await isGroupRadiologistProfile(profile) || canSeePreferredRadiologistReport(profile, report)
+  },
+})
 registerExternalViewerRoutes(app, { prisma, requireAuth, requireRadiologist, accessibleClientIds, workspaceStudyScope, getAccessibleProcessingJob, extractQueuedMetadata, publicSharedReport, getAuthorizedReport, canRadiologistAccessReport, isGroupRadiologistProfile, getDicomMetadataValue, createBridgeStudyViewerUrl });
 
 app.use((error: unknown, _req: Request, res: Response, next: express.NextFunction) => {
   if (res.headersSent) return next(error)
+  if (error instanceof StudyArchiveError) return res.status(error.status).json({ message: error.message })
+  // Access helpers such as workspaceStudyScope throw an Error carrying a 4xx `status`.
+  const status = (error as { status?: unknown }).status
+  if (error instanceof Error && typeof status === 'number' && status >= 400 && status < 500) return res.status(status).json({ message: error.message })
   if (error instanceof z.ZodError) {
     const issue = error.issues[0]
     const field = issue?.path.length ? `${issue.path.join('.')}: ` : ''
@@ -8307,112 +8286,9 @@ function bridgeStudyData(study: {
   }
 }
 
-function formatBridgeStudyForClient(study: {
-  id: string
-  publicStudyId: string
-  agentId: string
-  agentName?: string | null
-  studyInstanceUid: string
-  patientId?: string | null
-  patientName?: string | null
-  patientSex?: string | null
-  patientAge?: string | null
-  accessionNumber?: string | null
-  studyDate?: string | null
-  studyTime?: string | null
-  studyDescription?: string | null
-  modalities: string[]
-  seriesCount: number
-  instanceCount: number
-  totalSizeBytes?: bigint | number
-  localIp?: string | null
-  localPort?: number | null
-  localAeTitle?: string | null
-  archiveName?: string | null
-  clinicalIndication?: string | null
-  processingJobId?: string | null
-  priority?: string | null
-  availabilityStatus: string
-  workflowStatus: string
-  lastSyncedAt: Date
-  firstDetectedAt?: Date | null
-  createdAt?: Date
-  referringPhysician?: string | null
-  selectedAt?: Date | null
-  submittedAt?: Date | null
-  attachments?: Array<{ id: string; originalName: string; mimeType?: string | null; sizeBytes: bigint | number; createdAt: Date }>
-  processingJob?: { id: string; status: string; clinicalStatus?: string | null; completedAt?: Date | null; priority?: string | null } | null
-  dispatchRequests?: Array<{ requestId: string; status: string; progressPercentage: number; createdAt: Date; lastErrorMessage?: string | null }>
-}) {
-  const latestDispatch = study.dispatchRequests?.[0] ?? null
-  const status = study.processingJob
-    ? study.processingJob.status === 'queued' ? 'Queued'
-      : study.processingJob.status === 'processing' ? 'Processing'
-        : study.workflowStatus
-    : study.availabilityStatus
-  return {
-    id: study.id,
-    publicStudyId: study.publicStudyId,
-    agentId: study.agentId,
-    agentName: study.agentName,
-    studyInstanceUid: study.studyInstanceUid,
-    patientId: study.patientId,
-    patientName: study.patientName,
-    patientSex: study.patientSex,
-    patientAge: study.patientAge,
-    accessionNumber: study.accessionNumber,
-    studyDate: study.studyDate,
-    studyTime: study.studyTime,
-    studyDescription: study.studyDescription,
-    modalities: study.modalities,
-    studyCategory: study.modalities.includes('MG') ? 'Mammogram' : isSpecialXrayStudy(study) ? 'Special X-ray' : null,
-    seriesCount: study.seriesCount,
-    instanceCount: study.instanceCount,
-    totalSizeBytes: study.totalSizeBytes ? String(study.totalSizeBytes) : '0',
-    localIp: study.localIp ?? null,
-    localPort: study.localPort ?? null,
-    localAeTitle: study.localAeTitle ?? null,
-    archiveName: study.archiveName ?? null,
-    clinicalIndication: study.clinicalIndication ?? null,
-    processingJobId: study.processingJobId ?? null,
-    priority: study.processingJob?.priority ?? study.priority ?? 'REGULAR',
-    status,
-    availabilityStatus: study.availabilityStatus,
-    workflowStatus: study.workflowStatus,
-    lastSyncedAt: study.lastSyncedAt,
-    receivedAt: study.firstDetectedAt ?? study.createdAt ?? study.lastSyncedAt,
-    referringPhysician: study.referringPhysician ?? null,
-    selectedAt: study.selectedAt,
-    submittedAt: study.submittedAt ?? null,
-    attachments: (study.attachments ?? []).map((attachment) => ({
-      id: attachment.id,
-      originalName: attachment.originalName,
-      mimeType: attachment.mimeType ?? null,
-      sizeBytes: String(attachment.sizeBytes),
-      createdAt: attachment.createdAt,
-    })),
-    processingJob: study.processingJob ?? null,
-    latestDispatch,
-  }
-}
-
-function formatBridgeStudyForAdmin(study: Parameters<typeof formatBridgeStudyForClient>[0] & {
-  client?: { id: string; code: string; name: string } | null
-  createdAt?: Date
-  updatedAt?: Date
-  dispatchRequests?: Array<{ requestId: string; status: string; progressPercentage: number; createdAt: Date; lastErrorMessage?: string | null }>
-}) {
-  return {
-    ...formatBridgeStudyForClient(study),
-    client: study.client ? { id: study.client.id, code: study.client.code, name: study.client.name } : null,
-    createdAt: study.createdAt,
-    updatedAt: study.updatedAt,
-    dispatchRequests: study.dispatchRequests ?? [],
-  }
-}
-
 type BridgeBundleStudy = Omit<Parameters<typeof formatBridgeStudyForAdmin>[0], 'attachments'> & {
   archivePath?: string | null
+  processingJob?: NonNullable<Parameters<typeof formatBridgeStudyForAdmin>[0]['processingJob']> & { uploadName?: string; uploadPath?: string | null; upstreamStatus?: unknown }
   attachments: Array<{ id: string; originalName: string; mimeType?: string | null; sizeBytes: bigint | number; createdAt: Date; filePath: string }>
 }
 
@@ -8426,6 +8302,7 @@ type ProviderBundleAttachment = {
 }
 
 type ProviderStudyBundle = {
+  source: BundleStudySource
   publicStudyId: string
   clientId: string
   processingJobId: string
@@ -8486,6 +8363,15 @@ async function getProviderStudyBundle(studyId: string, providerCode: string): Pr
     ? bridgeStudy.modalities
     : [report?.modality ?? queuedMetadata.modality].filter((value): value is string => Boolean(value))
   return {
+    source: {
+      id: bridgeStudy?.id ?? job.id,
+      publicStudyId: bridgeStudy?.publicStudyId ?? mapping.dectrocelJobId,
+      studyInstanceUid: bridgeStudy?.studyInstanceUid ?? mapping.studyInstanceUid ?? queuedMetadata.studyInstanceUid ?? '',
+      modalities,
+      archivePath: bridgeStudy?.archivePath ?? job.uploadPath,
+      archiveName: bridgeStudy?.archiveName ?? job.uploadName,
+      processingJob: { id: job.id, uploadName: job.uploadName, uploadPath: job.uploadPath, upstreamStatus: job.upstreamStatus },
+    },
     publicStudyId: bridgeStudy?.publicStudyId ?? mapping.dectrocelJobId,
     clientId: job.clientId,
     processingJobId: job.id,
@@ -8584,56 +8470,26 @@ async function resolveSafeBundleFile(candidate: string | null | undefined) {
 }
 
 async function sendBridgeStudyBundle(res: Response, study: BridgeBundleStudy) {
-  const archivePath = await resolveSafeBundleFile(study.archivePath)
-  const attachments = (await Promise.all(study.attachments.map(async (attachment) => ({
-    attachment,
-    safePath: await resolveSafeBundleFile(attachment.filePath),
-  })))).filter((item): item is { attachment: BridgeBundleStudy['attachments'][number]; safePath: string } => Boolean(item.safePath))
-  const zip = new yazl.ZipFile()
-  res.setHeader('Content-Type', 'application/zip')
-  res.setHeader('Content-Disposition', `attachment; filename="${safeBridgeFileName(study.publicStudyId)}-bundle.zip"`)
-  res.setHeader('Cache-Control', 'private, no-store')
-  const outputDone = pipeline(zip.outputStream, res)
-  zip.addBuffer(Buffer.from(JSON.stringify(formatBridgeStudyForAdmin(study), null, 2)), 'metadata.json')
-  zip.addBuffer(Buffer.from(study.clinicalIndication?.trim() || 'No clinical indication was supplied.', 'utf8'), 'clinical-indication.txt')
-  if (archivePath) {
-    zip.addFile(archivePath, `study/${safeBridgeFileName(study.archiveName ?? path.basename(archivePath))}`)
-  }
-  for (const [index, item] of attachments.entries()) {
-    zip.addFile(item.safePath, `attachments/${String(index + 1).padStart(3, '0')}-${safeBridgeFileName(item.attachment.originalName)}`)
-  }
-  zip.end()
-  await outputDone
+  return sendStudyBundle(res, {
+    source: {
+      id: study.id, publicStudyId: study.publicStudyId, studyInstanceUid: study.studyInstanceUid,
+      modalities: study.modalities, archivePath: study.archivePath, archiveName: study.archiveName,
+      processingJob: study.processingJob ? {
+        id: study.processingJob.id, uploadName: study.processingJob.uploadName ?? study.archiveName ?? '',
+        uploadPath: study.processingJob.uploadPath, upstreamStatus: study.processingJob.upstreamStatus,
+      } : null,
+    },
+    // Storage references are needed internally to fetch the archive, not in the downloaded metadata.
+    metadata: formatBridgeStudyForAdmin({ ...study, processingJob: study.processingJob ? {
+      id: study.processingJob.id, status: study.processingJob.status, clinicalStatus: study.processingJob.clinicalStatus,
+      completedAt: study.processingJob.completedAt, priority: study.processingJob.priority,
+    } : null }),
+    clinicalIndication: study.clinicalIndication, attachments: study.attachments,
+  })
 }
 
 async function sendProviderStudyBundle(res: Response, study: ProviderStudyBundle) {
-  const archivePath = await resolveSafeBundleFile(study.archivePath)
-  const resolvedAttachments = (await Promise.all(study.attachments.map(async (attachment) => ({
-    attachment,
-    safePath: await resolveSafeBundleFile(attachment.filePath),
-  })))).filter((item): item is { attachment: ProviderBundleAttachment; safePath: string } => Boolean(item.safePath))
-  const metadata = {
-    ...study.metadata,
-    bundle: {
-      generatedAt: new Date().toISOString(),
-      archiveIncluded: Boolean(archivePath),
-      attachmentsIncluded: resolvedAttachments.length,
-      attachmentsOmitted: study.attachments.length - resolvedAttachments.length,
-    },
-  }
-  const zip = new yazl.ZipFile()
-  res.setHeader('Content-Type', 'application/zip')
-  res.setHeader('Content-Disposition', `attachment; filename="${safeBridgeFileName(study.publicStudyId)}-bundle.zip"`)
-  res.setHeader('Cache-Control', 'private, no-store')
-  const outputDone = pipeline(zip.outputStream, res)
-  zip.addBuffer(Buffer.from(JSON.stringify(metadata, (_key, value) => typeof value === 'bigint' ? String(value) : value, 2)), 'metadata.json')
-  zip.addBuffer(Buffer.from(study.clinicalIndication?.trim() || 'No clinical indication was supplied.', 'utf8'), 'clinical-indication.txt')
-  if (archivePath) zip.addFile(archivePath, `study/${safeBridgeFileName(study.archiveName || path.basename(archivePath))}`)
-  for (const [index, item] of resolvedAttachments.entries()) {
-    zip.addFile(item.safePath, `attachments/${String(index + 1).padStart(3, '0')}-${safeBridgeFileName(item.attachment.originalName)}`)
-  }
-  zip.end()
-  await outputDone
+  return sendStudyBundle(res, { source: study.source, metadata: study.metadata, clinicalIndication: study.clinicalIndication, attachments: study.attachments })
 }
 
 function formatBridgeCommandForAgent(command: {

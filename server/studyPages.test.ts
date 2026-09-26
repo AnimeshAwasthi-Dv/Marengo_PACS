@@ -44,3 +44,13 @@ test('repeating cursors fail instead of causing an infinite request loop', async
 test('empty worklists complete normally', async () => {
   assert.deepEqual(await loadStudyPages(async () => ({ studies: [] })), []);
 });
+
+
+test('background snapshot loads use one 500-row page without dropping records', async () => {
+  let requests = 0;
+  const studies = Array.from({ length: 400 }, (_, index) => ({ id: String(index) }));
+  const rows = await loadStudyPages(async (_cursor, limit) => {
+    requests++; assert.equal(limit, 500); return { studies };
+  }, { firstPageSize: 500 });
+  assert.equal(requests, 1); assert.deepEqual(rows, studies);
+});

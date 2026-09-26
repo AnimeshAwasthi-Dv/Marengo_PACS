@@ -411,6 +411,7 @@ model ReportReview {
   @@index([clientId, studyUid, status])
   @@index([studyUid, createdAt])
   @@index([radiologistId, status])
+  @@index([updatedAt])
   @@map("report_reviews")
 }
 
@@ -1100,6 +1101,8 @@ model AvailableBridgeStudy {
   @@index([clientId, agentId])
   @@index([clientId, patientProfileId])
   @@index([clientId, lastSyncedAt(sort: Desc), id(sort: Desc)])
+  @@index([studyInstanceUid])
+  @@index([updatedAt])
   @@map("available_bridge_studies")
 }
 
