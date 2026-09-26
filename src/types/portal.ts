@@ -230,6 +230,10 @@ export type BridgeStudy = {
   referringPhysician?: string | null;
   selectedAt?: string | null;
   submittedAt?: string | null;
+  updatedAt?: string;
+  // Slim worklist rows carry the attachment count and the matching report instead of the full lists.
+  attachmentCount?: number;
+  report?: ReportSummary | null;
   attachments?: Array<{
     id: string;
     originalName: string;
@@ -243,6 +247,7 @@ export type BridgeStudy = {
     clinicalStatus?: string | null;
     completedAt?: string | null;
     priority?: string | null;
+    error?: string | null;
   } | null;
   latestDispatch?: {
     requestId: string;
@@ -367,8 +372,9 @@ export type ReportReview = {
   modality?: string | null;
   status: ReportReviewStatus;
   outputFormat: ReturnFormat;
-  aiReportJson: Record<string, unknown>;
-  editedReportJson: Record<string, unknown>;
+  // Omitted from list payloads (dashboards, worklist); present on report detail and editor data.
+  aiReportJson?: Record<string, unknown>;
+  editedReportJson?: Record<string, unknown>;
   locked: boolean;
   generatedAt: string;
   createdAt: string;
@@ -380,6 +386,9 @@ export type ReportReview = {
   radiologist?: RadiologistProfile | null;
   callBookings?: ReportCallBooking[];
 };
+
+/** The report fields the worklist rows and their share/call/preview actions read. */
+export type ReportSummary = Pick<ReportReview, "id" | "clientId" | "studyUid" | "status" | "patientName" | "patientId" | "accession" | "serviceName" | "modality" | "generatedAt" | "approvedAt" | "reviewedAt" | "pushedAt" | "updatedAt">;
 
 export type PatientProfile = {
   id: string;
@@ -920,11 +929,11 @@ export type PortalNotification = {
   event: { id: string; eventType: string; title: string; message: string; status: string; stage?: string | null; occurredAt: string };
 };
 
-export type WorkspaceAction = { kind: "share" | "call"; report: ReportReview } | { kind: "attach"; study: BridgeStudy };
+export type WorkspaceAction = { kind: "share" | "call"; report: ReportSummary } | { kind: "attach"; study: BridgeStudy };
 
 export type WorklistMedia =
   | { kind: "dicom"; studyId: string; title: string }
-  | { kind: "report"; report: ReportReview; title: string }
+  | { kind: "report"; report: ReportSummary; title: string }
   | { kind: "attachment"; studyId: string; attachment: NonNullable<BridgeStudy["attachments"]>[number]; title: string };
 
 export type BrowserSpeechRecognition = {

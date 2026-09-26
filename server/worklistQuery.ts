@@ -21,7 +21,11 @@ const schema = z.object({
   q: text(200), status: text(64), modality: text(16), cursor: text(128),
   includeProcessed: z.enum(['0', '1']).optional(), all: z.enum(['0', '1']).optional(),
   updatedSince: syncDate,
+  // 'worklist' returns slim rows (details load on click); 'full' keeps the legacy row shape.
+  view: z.enum(['full', 'worklist']).optional(),
 })
+export type WorklistQuery = ReturnType<typeof parseWorklistQuery>
+
 export function parseWorklistQuery(query: unknown) {
   const value = schema.parse(query)
   return {
@@ -30,11 +34,13 @@ export function parseWorklistQuery(query: unknown) {
     modality: value.modality?.toUpperCase() || undefined, cursor: value.cursor || undefined,
     includeProcessed: value.includeProcessed === '1' || value.all === '1',
     updatedSince: value.updatedSince ? new Date(value.updatedSince) : null,
+    view: value.view ?? 'full',
   }
 }
 
 // Share only concurrent identical, already-authorized reads. No completed rows
 // are cached, so a later refresh still observes mutations and permission changes.
+// In-process state: this relies on the app running as a single replica.
 const pendingReads = new Map<string, Promise<unknown>>()
 export async function coalesceWorklistRead<T>(key: string, loader: () => Promise<T>): Promise<T> {
   const existing = pendingReads.get(key)
