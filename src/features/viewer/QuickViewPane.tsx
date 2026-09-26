@@ -1,3 +1,4 @@
+import { modalityLabel } from '../../modalities';
 import { createRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Activity, Box, Download, Ellipsis, FileText, Gauge, Grid2x2, Keyboard, Layers, List, Move, PanelLeftClose, PanelLeftOpen, Pause, Play, Ruler, RotateCw, ScanLine, Search, Square, Target, Trash2, Type, Undo2 } from 'lucide-react';
 import { QuickViewDecoder } from './quickviewDecoder';
@@ -201,7 +202,7 @@ export default function QuickViewPane({ baseUrl, token, onOpenFull }: { baseUrl:
 
   if (!manifest) return <section className="qv-shell"><div className="qv-message" role="status"><p>Loading study…</p></div></section>;
 
-  const modality = manifest.modalities.join(', ') || manifest.series[0]?.modality || '';
+  const modality = manifest.modalities.map(modalityLabel).join(', ') || manifest.series[0]?.modality || '';
   const activeSeries = viewportSeries[activeViewport] ?? 0;
   const estimatedMb = Object.keys(fullReady).reduce((sum, key) => {
     const item = manifest.series.flatMap(entry => entry.instances).find(entry => entry.index === Number(key));
@@ -218,7 +219,7 @@ export default function QuickViewPane({ baseUrl, token, onOpenFull }: { baseUrl:
       <div className="qv-brand"><strong>DecXpert Viewer</strong><span>Diagnostic workstation</span></div>
       <div className="qv-patient"><strong>{manifest.patientName || 'Unknown patient'}</strong><span>{manifest.patientId}</span></div>
       <div className="qv-study"><span>{formatAgeSex(manifest.patientAge, manifest.patientSex)}</span><span>{manifest.studyDescription}</span></div>
-      <div className="qv-modality"><span>{formatDicomDate(manifest.studyDate)}</span><strong>{modality}</strong></div>
+      <div className="qv-modality"><span>{formatDicomDate(manifest.studyDate)}</span><strong>{modalityLabel(modality)}</strong></div>
     </header>
 
     <div className="qv-toolbar" role="toolbar" aria-label="Viewer tools">
@@ -291,7 +292,7 @@ export default function QuickViewPane({ baseUrl, token, onOpenFull }: { baseUrl:
                 <span className="qv-series-count">{item.instances.length}</span>
               </div>
               <div className="qv-series-info">
-                {item.modality && <span className="qv-series-modality">{item.modality}</span>}
+                {item.modality && <span className="qv-series-modality">{modalityLabel(item.modality)}</span>}
                 <strong>{seriesTitle(item)}</strong>
                 <span className="qv-series-meta">S:{item.seriesNumber ?? '-'} - {item.instances.length} image{item.instances.length === 1 ? '' : 's'}</span>
               </div>
