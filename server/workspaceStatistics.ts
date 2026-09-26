@@ -1,3 +1,4 @@
+import { modalityLabel } from '../src/modalities';
 const DAY = 86400000;
 const IST_OFFSET = 19800000;
 export const istDay = (value: Date | string) => new Date(new Date(value).getTime() + IST_OFFSET).toISOString().slice(0, 10);
@@ -19,7 +20,7 @@ export type StatisticsRow = {
   id: string; clientId: string; center: string; patient: string; patientId: string; accession: string;
   modality: string; description: string; studyUid: string | null; jobId: string | null; demo: boolean;
   billingServiceName?: string | null; billingUnits?: number | null; workflowType?: string | null; priority?: string | null;
-  received: string | null; processed: string | null; reported: string | null; tatSeconds: number | null;
+  submitted?: string | null; received: string | null; processed: string | null; reported: string | null; tatSeconds: number | null;
   tbScore?: number | null; replacementCount?: number; replacementHistory?: string;
 };
 
@@ -75,4 +76,30 @@ export function csvDocument(rows: unknown[][]) {
     return '"' + text.replace(/"/g, '""') + '"';
   };
   return '\uFEFF' + rows.map(row => row.map(cell).join(',')).join('\r\n');
+}
+
+export function reportingActivity(rows: StatisticsRow[], range: ReturnType<typeof statisticsRange>) {
+ const inRange = (at?: string | null) => !!at && Date.parse(at) >= +range.start && Date.parse(at) < +range.end;
+ const daily = Array.from({length: Math.round((+range.end - +range.start) / DAY)}, (_, i) => ({day: istDay(new Date(+range.start + i * DAY)), submitted: 0, received: 0, sent: 0, notSent: 0}));
+ const byDay = new Map(daily.map(row => [row.day, row]));
+ const hourly = Array.from({length:24}, (_,h) => ({hour: String(h).padStart(2,'0') + ':00', studies:0}));
+ const counts = new Map<string,number>();
+ for (const row of rows) {
+  if (inRange(row.submitted)) {
+   byDay.get(istDay(row.submitted!))!.submitted++;
+   hourly[new Date(Date.parse(row.submitted!) + IST_OFFSET).getUTCHours()].studies++;
+   for (const m of new Set(row.modality.split(',').map(modalityLabel).filter(Boolean))) counts.set(m, (counts.get(m) ?? 0) + 1);
+  }
+  if (inRange(row.received)) {
+   const day = byDay.get(istDay(row.received!))!; day.received++;
+   if (row.submitted && Date.parse(row.submitted) < +range.end) day.sent++; else day.notSent++;
+  }
+ }
+ const sum = (key: 'submitted'|'received'|'sent'|'notSent') => daily.reduce((n,d) => n + d[key],0);
+ const total = [...counts.values()].reduce((a,b)=>a+b,0);
+ const modalityDistribution = [...counts].map(([modality,count])=>({modality,count,percentage:total ? Math.round(count/total*10000)/100 : 0}));
+ const tatStudies = rows.filter(r=>inRange(r.reported) && r.tatSeconds !== null)
+  .sort((a,b)=>(a.reported ?? '').localeCompare(b.reported ?? '') || a.id.localeCompare(b.id))
+  .map((r,i)=>({study:i+1,id:r.id,modality:modalityLabel(r.modality),minutes:r.tatSeconds!/60}));
+ return { daily, hourly, modalityDistribution, totals: {submitted:sum('submitted'),received:sum('received'),sent:sum('sent'),notSent:sum('notSent')}, tatStudies };
 }

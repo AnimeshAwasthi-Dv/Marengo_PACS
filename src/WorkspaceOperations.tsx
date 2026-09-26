@@ -1,3 +1,5 @@
+import { modalityCodes, modalityLabel } from './modalities';
+import { ReportingActivity, type ReportingActivityData } from './features/analytics/ReportingActivity';
 import { useState } from 'react';
 import { Activity, BarChart3, CalendarDays, ChevronLeft, ChevronRight, Download, RefreshCw } from 'lucide-react';
 import { BarChart, Bar, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -10,6 +12,7 @@ type StudyRow = {
   service?: string; units?: number | null; amountMinor?: number | null; currency?: string; billingStatus?: string; invoice?: string;
 };
 type Statistics = {
+  reporting: ReportingActivityData; tatStudies: {study:number;id:string;modality:string;minutes:number}[];
   modalities: string[]; tatDaily: { day: string; minutes: number | null; samples: number }[];
   rows: StudyRow[]; daily: { day: string; received: number; processed: number; reported: number }[];
   hourly: { hour: string; studies: number }[]; modalityDistribution: { modality: string; count: number; percentage: number }[];
@@ -37,7 +40,7 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
   const [modality, setModality] = useState('');
   const [page, setPage] = useState(1);
   const [preset, setPreset] = useState('7');
-  const [view, setView] = useState<'studies' | 'daily'>('studies');
+  const [view, setView] = useState<'studies' | 'daily' | 'reporting'>('studies');
   const [result, setResult] = useState<{ key: string; data: Statistics } | null>(null);
   const [error, setError] = useState('');
   const [downloading, setDownloading] = useState(false);
@@ -51,7 +54,7 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
       if (!signal.aborted) { setResult({ key, data }); setError(''); }
     } catch (err) { if (!signal.aborted) setError(err instanceof Error ? err.message : 'Automatic updates interrupted.'); throw err; }
   }, { refreshKey: `${key}:${refresh}`, intervalMs: 15000, enabled: Boolean(from && to) });
-  async function download(type: 'studies' | 'daily' = 'studies', exportMode = mode) {
+  async function download(type: 'studies' | 'daily' | 'reporting' = 'studies', exportMode = mode) {
     setDownloading(true); setError('');
     try {
       const response = await fetch(`/api/workspace/${exportMode}?${query}&format=csv&export=${type}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -67,8 +70,8 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
     <div className="pw-toolbar pw-stats-toolbar"><label><CalendarDays size={15}/>From <input aria-label="From date IST" type="date" value={from} max={to} onChange={e => { setFrom(e.target.value); setPreset('custom'); setPage(1); }}/></label><label>To <input aria-label="To date IST" type="date" value={to} min={from} onChange={e => { setTo(e.target.value); setPreset('custom'); setPage(1); }}/><span>IST</span></label>
       <select aria-label="Statistics date preset" value={preset} onChange={e => { setPreset(e.target.value); const days = Number(e.target.value); setFrom(istDay(new Date(Date.now() - (days - 1) * 86400000))); setTo(istDay(new Date())); setPage(1); }}><option value="custom" disabled>Custom range</option><option value="1">Today</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select>
       {(result?.data.centers.length ?? 0) > 1 && <select aria-label="Statistics center" value={centerId} onChange={e => { setCenterId(e.target.value); setPage(1); }}><option value="">All linked centers</option>{result?.data.centers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
-      <select aria-label="Statistics modality" value={modality} onChange={event => { setModality(event.target.value); setPage(1); }}><option value="">All modalities</option>{(result?.data.modalities ?? []).map(value => <option key={value}>{value}</option>)}</select>
-      <div className="pw-stats-exports"><button disabled={!data || downloading} onClick={() => void download('studies')}><Download size={15}/>{mode === 'billing' ? 'Billing CSV' : 'Download MIS CSV'}</button><button disabled={!data || downloading} onClick={() => void download('daily', 'analytics')}><Download size={15}/>{mode === 'billing' ? 'Usage CSV' : 'Daily totals CSV'}</button></div>
+      <select aria-label="Statistics modality" value={modality} onChange={event => { setModality(event.target.value); setPage(1); }}><option value="">All modalities</option>{(result?.data.modalities ?? modalityCodes.map(modalityLabel)).map(value => <option key={value}>{value}</option>)}</select>
+      <div className="pw-stats-exports"><button disabled={!data || downloading} onClick={() => void download('studies')}><Download size={15}/>{mode === 'billing' ? 'Billing CSV' : 'Download MIS CSV'}</button><button disabled={!data || downloading} onClick={() => void download('daily', 'analytics')}><Download size={15}/>{mode === 'billing' ? 'Usage CSV' : 'Daily totals CSV'}</button>{mode === 'analytics' && <button disabled={!data || downloading} onClick={() => void download('reporting')}><Download size={15}/>Reporting activity CSV</button>}</div>
     </div>
     {error && <div className="pw-alert" role="alert">{error}{data && ' Showing the last received data.'}</div>}
     {!data ? <div className="pw-empty" role="status">{error ? 'Statistics unavailable for this selection.' : 'Loading statistics...'}</div> : <>
@@ -84,9 +87,9 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
           <div><span>Reports replaced</span><strong>{(data.totals.reportsReplaced ?? 0).toLocaleString()}</strong><small>after reported</small></div>
         </>}
       </section>
-      {mode === 'analytics' && <div className="pw-stats-switch" role="tablist" aria-label="Analytics view"><button role="tab" aria-selected={view === 'studies'} className={view === 'studies' ? 'active' : ''} onClick={() => setView('studies')}>Study TAT</button><button role="tab" aria-selected={view === 'daily'} className={view === 'daily' ? 'active' : ''} onClick={() => setView('daily')}><BarChart3 size={15}/>Daily activity</button></div>}
-      {mode === 'analytics' && view === 'studies' && <section className="pw-tat-chart" aria-label="Reporting turnaround time chart"><h2>Reporting TAT by day - average minutes</h2><ResponsiveContainer width="100%" height={250}><BarChart data={data.tatDaily} margin={{ top: 16, right: 16, left: 24, bottom: 8 }}><CartesianGrid stroke="#465364" vertical={false}/><XAxis dataKey="day" tick={{ fill: '#c3ccd9', fontSize: 11 }}/><YAxis tick={{ fill: '#c3ccd9', fontSize: 11 }} label={{ value: 'Time taken (minutes)', angle: -90, position: 'insideLeft', fill: '#c3ccd9' }}/><Tooltip contentStyle={{ background: '#252d37', color: '#edf2f8' }}/><Bar dataKey="minutes" name="Average reporting time (minutes)" fill="#75a5ef" isAnimationActive={false}/></BarChart></ResponsiveContainer><p className="pw-help">Time from submission for reporting to finalized report. Studies without recorded submission and completion times are excluded.</p></section>}
-      {mode === 'analytics' && view === 'daily' ? <div className="pw-stats-scroll">
+      {mode === 'analytics' && <div className="pw-stats-switch" role="tablist" aria-label="Analytics view"><button role="tab" aria-selected={view === 'studies'} className={view === 'studies' ? 'active' : ''} onClick={() => setView('studies')}>Study TAT</button><button role="tab" aria-selected={view === 'daily'} className={view === 'daily' ? 'active' : ''} onClick={() => setView('daily')}><BarChart3 size={15}/>Daily activity</button><button role="tab" aria-selected={view === 'reporting'} className={view === 'reporting' ? 'active' : ''} onClick={() => setView('reporting')}>Reporting activity</button></div>}
+      {mode === 'analytics' && view === 'studies' && <section className="pw-tat-chart" aria-label="Reporting turnaround time chart"><h2>Reporting TAT by study - minutes</h2><ResponsiveContainer width="100%" height={250}><BarChart data={data.tatStudies} margin={{ top: 16, right: 16, left: 24, bottom: 22 }}><CartesianGrid stroke="#465364" vertical={false}/><XAxis dataKey="study" allowDecimals={false} tick={{ fill: '#c3ccd9', fontSize: 11 }} label={{ value: 'Number of studies', position: 'insideBottom', offset: -5, fill: '#c3ccd9' }}/><YAxis tick={{ fill: '#c3ccd9', fontSize: 11 }} label={{ value: 'Time taken (minutes)', angle: -90, position: 'insideLeft', fill: '#c3ccd9' }}/><Tooltip labelFormatter={label => `Study ${label}`} formatter={(value, _name, item) => [`${Number(value).toFixed(2)} minutes`, item.payload.modality || 'Reporting TAT']} contentStyle={{ background: '#252d37', color: '#edf2f8' }}/><Bar dataKey="minutes" name="Reporting time (minutes)" fill="#75a5ef" isAnimationActive={false}/></BarChart></ResponsiveContainer>{!data.tatStudies.length && <p className="pw-empty">No completed studies with recorded TAT in this period.</p>}<p className="pw-help">Each bar is one study, numbered in report completion order. Time is from submission to finalized report. Studies without recorded submission and completion times are excluded.</p></section>}
+      {mode === 'analytics' && view === 'reporting' ? <ReportingActivity data={data.reporting}/> : mode === 'analytics' && view === 'daily' ? <div className="pw-stats-scroll">
         <div className="pw-chart-legend"><span><i style={{ background: '#75a5ef' }}/>Received</span><span><i style={{ background: '#66c4ac' }}/>Hourly volume</span><span><i style={{ background: '#d8b778' }}/>Modality share</span></div>
         <div className="pw-analytics-grid">
           <section><h2>Study Traffic - Day Wise</h2><div className="pw-stats-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={data.daily} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}><CartesianGrid stroke="#343b46" vertical={false}/><XAxis dataKey="day" tick={{ fill: '#a1aab9', fontSize: 11 }} tickFormatter={day => String(day).slice(5)}/><YAxis allowDecimals={false} tick={{ fill: '#a1aab9', fontSize: 11 }}/><Tooltip contentStyle={{ background: '#252b34', border: '1px solid #485465', color: '#edf0f5' }}/><Bar dataKey="received" fill="#75a5ef" name="Studies" isAnimationActive={false}/></BarChart></ResponsiveContainer></div></section>

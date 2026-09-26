@@ -1,3 +1,4 @@
+import { modalityCodes, modalityLabel, modalityMatchesCode } from '../src/modalities';
 import { collectServiceHealth } from './serviceHealth';
 import { Router } from 'express';
 import { prisma } from './db';
@@ -7,7 +8,7 @@ import { studyTracking } from './studyTracking';
 import { setWorklistPriority } from './worklistPriority';
 import { redisNamespace } from './redisCache';
 import { requireWorkspaceCapability, workspaceAccess } from './workspaceAccess';
-import { csvDocument, durationSeconds, istTimestamp, statisticsRange, summarizeStudies, type StatisticsRow } from './workspaceStatistics';
+import { reportingActivity, csvDocument, durationSeconds, istTimestamp, statisticsRange, summarizeStudies, type StatisticsRow } from './workspaceStatistics';
 import { recordBillingEvent, repriceUninvoicedZeroBillingTransactions } from './billing';
 import { serviceNameForType } from './uploadPipeline';
 
@@ -124,9 +125,9 @@ async function collectStatistics(clientIds: string[] | null, range: ReturnType<t
   const reportSelect = { id: true, clientId: true, studyUid: true, approvedAt: true, pushedAt: true, generatedAt: true, patientName: true, patientId: true, accession: true, modality: true, serviceName: true, editedReportJson: true, client: { select: { name: true } } } as const;
   const periodReports = await prisma.reportReview.findMany({ where: { ...scope, status: { in: ['APPROVED', 'PUSHED'] }, OR: [{ approvedAt: period }, { approvedAt: null, pushedAt: period }, { approvedAt: null, pushedAt: null, generatedAt: period }] }, select: reportSelect, take: MAX_ROWS + 1 });
   const studies = await prisma.availableBridgeStudy.findMany({
-    where: { ...scope, OR: [{ firstDetectedAt: period }, { firstDetectedAt: null, createdAt: period }, { processingJob: { completedAt: period } }, { studyInstanceUid: { in: periodReports.flatMap(r => r.studyUid ? [r.studyUid] : []) } }] },
+    where: { ...scope, OR: [{ submittedAt: period }, { submittedAt: null, processingJob: { createdAt: period } }, { firstDetectedAt: period }, { firstDetectedAt: null, createdAt: period }, { processingJob: { completedAt: period } }, { studyInstanceUid: { in: periodReports.flatMap(r => r.studyUid ? [r.studyUid] : []) } }] },
     select: { id: true, clientId: true, studyInstanceUid: true, patientName: true, patientId: true, accessionNumber: true, modalities: true, studyDescription: true, firstDetectedAt: true, createdAt: true, submittedAt: true,
-      client: { select: { name: true } }, processingJob: { select: { id: true, completedAt: true, status: true, demoMode: true, serviceType: true, workflowType: true, priority: true, imageCount: true } } }, take: MAX_ROWS + 1,
+      client: { select: { name: true } }, processingJob: { select: { id: true, createdAt: true, completedAt: true, status: true, demoMode: true, serviceType: true, workflowType: true, priority: true, imageCount: true } } }, take: MAX_ROWS + 1,
   });
   const finalReports = studies.length ? await prisma.reportReview.findMany({ where: { ...scope, status: { in: ['APPROVED', 'PUSHED'] }, studyUid: { in: studies.map(s => s.studyInstanceUid) } }, select: reportSelect, take: MAX_ROWS + 1, orderBy: { generatedAt: 'desc' } }) : [];
   const jobs = await prisma.processingJob.findMany({ where: { ...scope, bridgeStudy: null, OR: [{ createdAt: period }, { completedAt: period }] }, select: { id: true, clientId: true, serviceType: true, workflowType: true, priority: true, imageCount: true, createdAt: true, completedAt: true, status: true, demoMode: true, client: { select: { name: true } }, patient: { select: { name: true, patientIdentifier: true } } }, take: MAX_ROWS + 1 });
@@ -175,21 +176,21 @@ async function collectStatistics(clientIds: string[] | null, range: ReturnType<t
     const reported = report ? iso(report.approvedAt ?? report.pushedAt ?? report.generatedAt) : null;
     const replacement = replacementInfo(report);
     const billingServiceName = study.processingJob ? serviceNameForType(study.processingJob.serviceType) : null;
-    return { id: study.id, clientId: study.clientId, center: study.client.name, patient: study.patientName ?? '', patientId: study.patientId ?? '', accession: study.accessionNumber ?? '', modality: study.modalities.join(', '), description: study.studyDescription ?? '', studyUid: study.studyInstanceUid, jobId: study.processingJob?.id ?? null, demo: study.processingJob?.demoMode ?? false,
+    return { id: study.id, clientId: study.clientId, center: study.client.name, patient: study.patientName ?? '', patientId: study.patientId ?? '', accession: study.accessionNumber ?? '', modality: [...new Set(study.modalities.map(modalityLabel))].join(', '), description: study.studyDescription ?? '', studyUid: study.studyInstanceUid, jobId: study.processingJob?.id ?? null, demo: study.processingJob?.demoMode ?? false,
       billingServiceName, billingUnits: xrayBillableUnits(billingServiceName, study.processingJob?.imageCount), workflowType: study.processingJob?.workflowType ?? null, priority: study.processingJob?.priority ?? null,
-      received, processed: processedAt(study.processingJob), reported, tatSeconds: durationSeconds(iso(study.submittedAt), reported), tbScore: tbScore(report), replacementCount: replacement.count, replacementHistory: replacement.history };
+      received, submitted: iso(study.submittedAt ?? study.processingJob?.createdAt), processed: processedAt(study.processingJob), reported, tatSeconds: durationSeconds(iso(study.submittedAt ?? study.processingJob?.createdAt), reported), tbScore: tbScore(report), replacementCount: replacement.count, replacementHistory: replacement.history };
   });
   for (const job of jobs) {
     const billingServiceName = serviceNameForType(job.serviceType);
-    rows.push({ id: job.id, clientId: job.clientId, center: job.client.name, patient: job.patient?.name ?? '', patientId: job.patient?.patientIdentifier ?? '', accession: '', modality: '', description: job.serviceType, studyUid: null, jobId: job.id, demo: job.demoMode, billingServiceName, billingUnits: xrayBillableUnits(billingServiceName, job.imageCount), workflowType: job.workflowType ?? null, priority: job.priority ?? null, received: iso(job.createdAt), processed: processedAt(job), reported: null, tatSeconds: null });
+    rows.push({ id: job.id, clientId: job.clientId, center: job.client.name, patient: job.patient?.name ?? '', patientId: job.patient?.patientIdentifier ?? '', accession: '', modality: modalityLabel(job.serviceType.startsWith('ct') ? 'CT' : /^(mri|mra|mrcp)/.test(job.serviceType) ? 'MR' : job.serviceType.includes('xray') ? 'XR' : job.serviceType), description: job.serviceType, studyUid: null, jobId: job.id, demo: job.demoMode, billingServiceName, billingUnits: xrayBillableUnits(billingServiceName, job.imageCount), workflowType: job.workflowType ?? null, priority: job.priority ?? null, received: iso(job.createdAt), submitted: iso(job.createdAt), processed: processedAt(job), reported: null, tatSeconds: null });
   }
   const linked = new Set(rows.filter(r => r.studyUid).map(r => `${r.clientId}:${r.studyUid}`));
   for (const report of periodReports) if (!report.studyUid || !linked.has(`${report.clientId}:${report.studyUid}`)) {
     const replacement = replacementInfo(report);
-    rows.push({ id: report.id, clientId: report.clientId, center: report.client.name, patient: report.patientName ?? '', patientId: report.patientId ?? '', accession: report.accession ?? '', modality: report.modality ?? '', description: report.serviceName, studyUid: report.studyUid, jobId: null, demo: false, received: null, processed: null, reported: iso(report.approvedAt ?? report.pushedAt ?? report.generatedAt), tatSeconds: null, tbScore: tbScore(report), replacementCount: replacement.count, replacementHistory: replacement.history });
+    rows.push({ id: report.id, clientId: report.clientId, center: report.client.name, patient: report.patientName ?? '', patientId: report.patientId ?? '', accession: report.accession ?? '', modality: modalityLabel(report.modality ?? ''), description: report.serviceName, studyUid: report.studyUid, jobId: null, demo: false, received: null, processed: null, reported: iso(report.approvedAt ?? report.pushedAt ?? report.generatedAt), tatSeconds: null, tbScore: tbScore(report), replacementCount: replacement.count, replacementHistory: replacement.history });
     if (report.studyUid) linked.add(`${report.clientId}:${report.studyUid}`);
   }
-  const periodRows = basis === 'received' ? rows.filter(row => within(row.received, range)) : rows.filter(row => within(row.received, range) || within(row.processed, range) || within(row.reported, range));
+  const periodRows = basis === 'received' ? rows.filter(row => within(row.received, range)) : rows.filter(row => within(row.received, range) || within(row.submitted ?? null, range) || within(row.processed, range) || within(row.reported, range));
   periodRows.sort((a, b) => (b.received ?? b.reported ?? '').localeCompare(a.received ?? a.reported ?? ''));
   return { rows: periodRows, ...summarizeStudies(periodRows, periodReports.map(r => ({ at: iso(r.approvedAt ?? r.pushedAt ?? r.generatedAt)! })), range) };
 }
@@ -251,13 +252,14 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
       if (ids !== null && !ids.includes(centerId)) return res.status(403).json({ message: 'Center is outside your account scope.' });
       ids = [centerId];
     }
-    let result = await collectStatistics(ids, range, view === 'analytics' ? 'received' : 'activity');
-    const modalities = [...new Set(result.rows.flatMap(row => row.modality.split(',').map(value => value.trim()).filter(Boolean)))].sort();
+    let result = await collectStatistics(ids, range, 'activity');
+    const modalities = [...new Set([...modalityCodes.map(modalityLabel), ...result.rows.flatMap(row => row.modality.split(',').map(value => value.trim()).filter(Boolean))])];
     const modality = String(req.query.modality ?? '').trim().toUpperCase();
     if (modality) {
-      const rows = result.rows.filter(row => row.modality.split(',').some(value => value.trim().toUpperCase() === modality));
+      const rows = result.rows.filter(row => modalityMatchesCode(row.modality, modality));
       result = { rows, ...summarizeStudies(rows, rows.flatMap(row => row.reported ? [{ at: row.reported }] : []), range) };
     }
+    const reporting = reportingActivity(result.rows, range);
     const centers = await prisma.client.findMany({ where: access.clientIds === null ? {} : { id: { in: access.clientIds } }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
     const processedRows = result.rows.filter(row => within(row.processed, range));
     const transactions = view === 'billing' ? await reconcileMissingBillingRows(ids, processedRows, await billingTransactionsForRows(ids, processedRows)) : [];
@@ -275,6 +277,8 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
       const data: unknown[][] = view === 'billing' ? [
         ['Center', 'Patient', 'Patient ID', 'Accession', 'Study', 'Processed IST', 'Service', 'Units', 'Unit price', 'Amount', 'Currency', 'Billing status', 'Invoice'],
         ...billingRows.map(r => [r.center, r.patient, r.patientId, r.accession, r.description, istTimestamp(r.processed), r.service, r.units, r.unitPriceMinor === null ? '' : r.unitPriceMinor / 100, r.amountMinor === null ? '' : r.amountMinor / 100, r.currency, r.billingStatus, r.invoice]),
+      ] : req.query.export === 'reporting' ? [
+        ['Date IST', 'Submitted during day', 'Received during day', 'Received cohort sent by period end', 'Received cohort not sent by period end'], ...reporting.daily.map(d => [d.day, d.submitted, d.received, d.sent, d.notSent]),
       ] : req.query.export === 'daily' ? [
         ['Date IST', 'Received studies', 'Processed studies', 'Finalized reports'], ...result.daily.map(d => [d.day, d.received, d.processed, d.reported]),
         [], ['Average TAT seconds', result.totals.averageTatSeconds], ['Completed TAT sample', result.totals.tatSampleSize],
@@ -288,7 +292,7 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
     }
     const rows = view === 'billing' ? billingRows : result.rows;
     const page = Math.min(Math.max(1, Math.ceil(rows.length / 50)), Math.max(1, Number.parseInt(String(req.query.page ?? 1), 10) || 1));
-    res.json({ ...result, modalities, tatDaily: result.daily.map(day => { const samples = result.rows.filter(row => row.reported && row.tatSeconds !== null && new Date(Date.parse(row.reported) + 19800000).toISOString().slice(0, 10) === day.day); return { day: day.day, minutes: samples.length ? samples.reduce((sum, row) => sum + row.tatSeconds!, 0) / samples.length / 60 : null, samples: samples.length }; }), rows: rows.slice((page - 1) * 50, page * 50), total: rows.length, page, pageSize: 50, centers, charges, unrecorded: billingRows.filter(r => r.billingStatus === 'NOT_RECORDED').length, from: range.from, to: range.to, updatedAt: new Date().toISOString() });
+    res.json({ ...result, reporting, tatStudies: reporting.tatStudies, modalities, tatDaily: result.daily.map(day => { const samples = result.rows.filter(row => row.reported && row.tatSeconds !== null && new Date(Date.parse(row.reported) + 19800000).toISOString().slice(0, 10) === day.day); return { day: day.day, minutes: samples.length ? samples.reduce((sum, row) => sum + row.tatSeconds!, 0) / samples.length / 60 : null, samples: samples.length }; }), rows: rows.slice((page - 1) * 50, page * 50), total: rows.length, page, pageSize: 50, centers, charges, unrecorded: billingRows.filter(r => r.billingStatus === 'NOT_RECORDED').length, from: range.from, to: range.to, updatedAt: new Date().toISOString() });
   } catch (error) {
     if (error instanceof Error && 'status' in error && error.status === 422) return res.status(422).json({ message: error.message });
     next(error);

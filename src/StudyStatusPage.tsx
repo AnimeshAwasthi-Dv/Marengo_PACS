@@ -1,3 +1,4 @@
+import { modalityLabel } from './modalities';
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Clock3, FileJson, LogOut, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useLiveRefresh } from './useLiveRefresh';
@@ -44,7 +45,7 @@ export function StudyStatusPage({ token, jobId, onLogout }: { token: string; job
       {error && <p role="alert" className="st-error">{error}</p>}
       {!data && !error && <p role="status">Loading study status...</p>}
       {data && <>
-        <section className="st-summary"><div><span className="st-label">Patient</span><h2>{data.patientName ?? 'Patient details pending'}</h2><p>Accession {data.accession ?? '-'} / {data.modality}</p></div><div><span className={`st-status ${data.status === 'Reported' ? 'is-complete' : ''}`}>{data.status}</span><p className={data.priority === 'Urgent' ? 'st-urgent' : 'st-routine'}>{data.priority}</p></div></section>
+        <section className="st-summary"><div><span className="st-label">Patient</span><h2>{data.patientName ?? 'Patient details pending'}</h2><p>Accession {data.accession ?? '-'} / {modalityLabel(data.modality)}</p></div><div><span className={`st-status ${data.status === 'Reported' ? 'is-complete' : ''}`}>{data.status}</span><p className={data.priority === 'Urgent' ? 'st-urgent' : 'st-routine'}>{data.priority}</p></div></section>
         <section className="st-timing" aria-label="Turnaround time">
           <div><span className="st-label"><Clock3 size={15}/> {data.completedAt ? 'Final TAT' : 'Elapsed TAT'}</span><strong>{duration(elapsed)}</strong><small>Since sent for processing</small></div>
           <div className={remaining !== null && remaining < 0 ? 'st-overdue' : ''}><span className="st-label">{data.completedAt ? remaining !== null && remaining < 0 ? 'Completed over target' : 'Target margin' : remaining !== null && remaining < 0 ? 'Overdue' : 'Time remaining'}</span><strong>{remaining === null ? 'Not configured' : duration(remaining)}</strong><small>{data.targetSeconds === null ? 'Awaiting modality SLA' : `${data.targetSeconds / 60} minute target`}</small></div>
