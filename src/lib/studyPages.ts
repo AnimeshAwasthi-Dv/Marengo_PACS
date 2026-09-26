@@ -19,3 +19,11 @@ export async function loadStudyPages<T extends { id: string }>(
   } while (cursor);
   return [...studies.values()];
 }
+
+// Apply an incremental refresh: changed rows replace their old copy, new rows go first.
+export function mergeStudies<T extends { id: string }>(current: T[], changes: T[]): T[] {
+  if (!changes.length) return current;
+  const updates = new Map(changes.map((study) => [study.id, study]));
+  const known = new Set(current.map((study) => study.id));
+  return [...changes.filter((study) => !known.has(study.id)), ...current.map((study) => updates.get(study.id) ?? study)];
+}

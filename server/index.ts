@@ -1,5 +1,6 @@
 import { sendStudyBundle, StudyArchiveError, type BundleStudySource } from './studyBundle'
-import { parseWorklistQuery, coalesceWorklistRead } from './worklistQuery'
+import { registerWorklistRoutes } from './routers/worklist.router'
+import { formatBridgeStudyForAdmin, formatBridgeStudyForClient } from './lib/bridgeStudyFormat'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { ensureMarengoServices } from './marengoServices'
@@ -8,7 +9,7 @@ import QRCode from 'qrcode'
 import { preferredCallWindows, normalizeCallPhone } from './callScheduling'
 import { externalViewerOrigin } from './viewer/externalViewer';
 import { classifyBreastXrayModalities } from '../src/mammography';
-import { holdSpecialXrayForManualSubmission, isSpecialXrayStudy } from '../src/specialXray';
+import { holdSpecialXrayForManualSubmission } from '../src/specialXray';
 import { nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
 import { registerExternalViewerRoutes } from './viewer/routes';
@@ -1839,10 +1840,17 @@ app.post('/api/provider/call-bookings/:bookingId/complete', requireAuth, require
   res.json(updated)
 })
 
+// The client dashboard feeds the workspace shell and report library. Report bodies,
+// job payloads and per-radiologist report lists are never shown there, so they stay
+// out of this payload; the worklist loads its own slim study pages.
+const dashboardReportOmit = { aiReportJson: true, editedReportJson: true } as const
+const dashboardJobOmit = { upstreamStatus: true, reportHtml: true } as const
+const dashboardRadiologistSelect = { id: true, fullName: true, userId: true, clientId: true } as const
+
 app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res) => {
   if (!req.user!.clientId) return res.status(403).json({ message: 'Client account required' })
   const access = await workspaceAccess(req)
-  const dashboardCacheKey = `${redisNamespace}:client-dashboard:v2:${req.user!.clientId}:${req.user!.sub}:${req.user!.portalRole}`
+  const dashboardCacheKey = `${redisNamespace}:client-dashboard:v3:${req.user!.clientId}:${req.user!.sub}:${req.user!.portalRole}`
   res.setHeader('Cache-Control', 'private, no-store')
   const cachedDashboard = req.query.fresh === '1' ? null : await redisGetJson<unknown>(dashboardCacheKey)
   if (cachedDashboard) return res.json(cachedDashboard)
@@ -1857,9 +1865,12 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
       processingJobs: {
         orderBy: { createdAt: 'desc' },
         take: 50,
+        omit: dashboardJobOmit,
         include: {
           bridgeStudy: {
             select: {
+              id: true,
+              referringPhysician: true,
               patientId: true,
               patientName: true,
               patientSex: true,
@@ -1876,13 +1887,10 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
       users: access.permissions.manageUsers ? { select: portalUserSelect, orderBy: { createdAt: 'asc' } } : false,
       _count: { select: { processingJobs: { where: { demoMode: true } } } },
       radiologists: {
-        include: {
-          user: { select: portalUserSelect },
-          reportReviews: { orderBy: { createdAt: 'desc' } },
-        },
+        include: { user: { select: portalUserSelect } },
         orderBy: { createdAt: 'desc' },
       },
-      reportReviews: { include: { radiologist: true, callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 } }, orderBy: { updatedAt: 'desc' } },
+      reportReviews: { omit: dashboardReportOmit, include: { radiologist: { select: dashboardRadiologistSelect }, callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 } }, orderBy: { updatedAt: 'desc' } },
     },
     }),
     getDeploymentFeatures().billing && access.permissions.billing ? getClientBillingSnapshot(req.user!.clientId) : Promise.resolve(undefined),
@@ -1909,19 +1917,21 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
     orderBy: { name: 'asc' },
   })
   const centerIds = centers.map((center) => center.id)
-  const [organizationReports, organizationProcessingJobs, organizationBridgeStudies] = centerIds.length
+  const [organizationReports, organizationProcessingJobs] = centerIds.length
     ? await Promise.all([
       prisma.reportReview.findMany({
         where: { clientId: { in: centerIds } },
+        omit: dashboardReportOmit,
         include: {
           client: { select: { name: true, code: true } },
-          radiologist: true,
+          radiologist: { select: dashboardRadiologistSelect },
           callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 },
         },
         orderBy: { updatedAt: 'desc' },
       }),
       prisma.processingJob.findMany({
         where: { clientId: { in: centerIds } },
+        omit: dashboardJobOmit,
         include: {
           client: { select: { id: true, code: true, name: true } },
           bridgeStudy: {
@@ -1937,6 +1947,7 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
               studyDescription: true,
               modalities: true,
               clinicalIndication: true,
+              referringPhysician: true,
               submittedAt: true,
               _count: { select: { attachments: true } },
             },
@@ -1945,23 +1956,14 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
         orderBy: { createdAt: 'desc' },
         take: 500,
       }),
-      prisma.availableBridgeStudy.findMany({
-        where: { clientId: { in: centerIds } },
-        include: { client: true, attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
-        orderBy: { updatedAt: 'desc' },
-        take: 500,
-      }),
     ])
-    : [[], [], []]
+    : [[], []]
   const organizationRadiologists = await prisma.radiologistProfile.findMany({
     where: {
       providerCode: null,
       clientId: client.id,
     },
-    include: {
-      user: { select: portalUserSelect },
-      reportReviews: { orderBy: { createdAt: 'desc' } },
-    },
+    include: { user: { select: portalUserSelect } },
     orderBy: { createdAt: 'desc' },
   })
   const organization = {
@@ -1978,7 +1980,6 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
     })),
     reports: organizationReports,
     processingJobs: organizationProcessingJobs,
-    bridgeStudies: organizationBridgeStudies.map(formatBridgeStudyForAdmin),
     radiologists: organizationRadiologists,
     totals: {
       centers: centers.length,
@@ -2150,66 +2151,7 @@ app.get('/api/client/study-sync/config', requireAuth, requireClientUser, async (
   res.json(await buildStudySyncApiDetails(client))
 })
 
-app.get('/api/client/study-sync/available-studies', requireAuth, async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
-  res.setHeader('Pragma', 'no-cache')
-  res.setHeader('Expires', '0')
-  const query = parseWorklistQuery(req.query)
-  const { take, updatedSince } = query
-  const scope = await workspaceStudyScope(req)
-  const asOf = new Date()
-  const rows = await coalesceWorklistRead(JSON.stringify({ scope, query }), () => prisma.availableBridgeStudy.findMany({
-    where: {
-      ...scope,
-      ...(updatedSince
-        ? { updatedAt: { gt: updatedSince } }
-        : query.includeProcessed
-          ? {}
-          : { processingJobId: null }),
-      ...(query.status ? { workflowStatus: String(query.status) } : {}),
-      ...(query.modality ? { modalities: { has: String(query.modality).toUpperCase() } } : {}),
-      ...(query.q ? {
-        OR: [
-          { patientId: { contains: String(query.q), mode: 'insensitive' } },
-          { patientName: { contains: String(query.q), mode: 'insensitive' } },
-          { accessionNumber: { contains: String(query.q), mode: 'insensitive' } },
-          { studyDescription: { contains: String(query.q), mode: 'insensitive' } },
-        ],
-      } : {}),
-    },
-    select: {
-      client: { select: { id: true, name: true, code: true } },
-      id: true, publicStudyId: true, agentId: true, agentName: true, studyInstanceUid: true,
-      patientId: true, patientName: true, patientSex: true, patientAge: true, accessionNumber: true,
-      studyDate: true, studyTime: true, studyDescription: true, modalities: true, seriesCount: true,
-      instanceCount: true, totalSizeBytes: true, localIp: true, localPort: true, localAeTitle: true,
-      archiveName: true, clinicalIndication: true, processingJobId: true, availabilityStatus: true,
-      workflowStatus: true, lastSyncedAt: true, selectedAt: true, submittedAt: true,
-      referringPhysician: true, firstDetectedAt: true, createdAt: true, priority: process.env.DATABASE_READ_ONLY !== 'true',
-      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true } },
-      dispatchRequests: {
-        select: { requestId: true, status: true, progressPercentage: true, createdAt: true, lastErrorMessage: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1,
-      },
-      attachments: {
-        select: { id: true, originalName: true, mimeType: true, sizeBytes: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-      },
-    },
-    orderBy: [{ lastSyncedAt: 'desc' }, { id: 'desc' }],
-    ...(query.cursor ? { cursor: { id: String(query.cursor) }, skip: 1 } : {}),
-    take: take + 1,
-  }))
-  const hasMore = rows.length > take
-  const studies = hasMore ? rows.slice(0, take) : rows
-  res.json({
-    studies: studies.map(formatBridgeStudyForAdmin),
-    incremental: Boolean(updatedSince),
-    asOf: asOf.toISOString(),
-    nextCursor: hasMore ? studies.at(-1)?.id ?? null : null,
-  })
-})
+registerWorklistRoutes(app, { requireAuth, studyScope: workspaceStudyScope })
 
 app.get('/api/client/study-sync/available-studies/:studyId/attachments/:attachmentId', requireAuth, async (req, res) => {
   const scope = await workspaceStudyScope(req)
@@ -8306,110 +8248,6 @@ function bridgeStudyData(study: {
     firstDetectedAt: study.first_detected_at ? new Date(study.first_detected_at) : null,
     readyAt: study.ready_at ? new Date(study.ready_at) : null,
     lastSyncedAt: new Date(),
-  }
-}
-
-function formatBridgeStudyForClient(study: {
-  id: string
-  publicStudyId: string
-  agentId: string
-  agentName?: string | null
-  studyInstanceUid: string
-  patientId?: string | null
-  patientName?: string | null
-  patientSex?: string | null
-  patientAge?: string | null
-  accessionNumber?: string | null
-  studyDate?: string | null
-  studyTime?: string | null
-  studyDescription?: string | null
-  modalities: string[]
-  seriesCount: number
-  instanceCount: number
-  totalSizeBytes?: bigint | number
-  localIp?: string | null
-  localPort?: number | null
-  localAeTitle?: string | null
-  archiveName?: string | null
-  clinicalIndication?: string | null
-  processingJobId?: string | null
-  priority?: string | null
-  availabilityStatus: string
-  workflowStatus: string
-  lastSyncedAt: Date
-  firstDetectedAt?: Date | null
-  createdAt?: Date
-  referringPhysician?: string | null
-  selectedAt?: Date | null
-  submittedAt?: Date | null
-  attachments?: Array<{ id: string; originalName: string; mimeType?: string | null; sizeBytes: bigint | number; createdAt: Date }>
-  processingJob?: { id: string; status: string; clinicalStatus?: string | null; completedAt?: Date | null; priority?: string | null } | null
-  dispatchRequests?: Array<{ requestId: string; status: string; progressPercentage: number; createdAt: Date; lastErrorMessage?: string | null }>
-}) {
-  const latestDispatch = study.dispatchRequests?.[0] ?? null
-  const status = study.processingJob
-    ? study.processingJob.status === 'queued' ? 'Queued'
-      : study.processingJob.status === 'processing' ? 'Processing'
-        : study.workflowStatus
-    : study.availabilityStatus
-  return {
-    id: study.id,
-    publicStudyId: study.publicStudyId,
-    agentId: study.agentId,
-    agentName: study.agentName,
-    studyInstanceUid: study.studyInstanceUid,
-    patientId: study.patientId,
-    patientName: study.patientName,
-    patientSex: study.patientSex,
-    patientAge: study.patientAge,
-    accessionNumber: study.accessionNumber,
-    studyDate: study.studyDate,
-    studyTime: study.studyTime,
-    studyDescription: study.studyDescription,
-    modalities: study.modalities,
-    studyCategory: study.modalities.includes('MG') ? 'Mammogram' : isSpecialXrayStudy(study) ? 'Special X-ray' : null,
-    seriesCount: study.seriesCount,
-    instanceCount: study.instanceCount,
-    totalSizeBytes: study.totalSizeBytes ? String(study.totalSizeBytes) : '0',
-    localIp: study.localIp ?? null,
-    localPort: study.localPort ?? null,
-    localAeTitle: study.localAeTitle ?? null,
-    archiveName: study.archiveName ?? null,
-    clinicalIndication: study.clinicalIndication ?? null,
-    processingJobId: study.processingJobId ?? null,
-    priority: study.processingJob?.priority ?? study.priority ?? 'REGULAR',
-    status,
-    availabilityStatus: study.availabilityStatus,
-    workflowStatus: study.workflowStatus,
-    lastSyncedAt: study.lastSyncedAt,
-    receivedAt: study.firstDetectedAt ?? study.createdAt ?? study.lastSyncedAt,
-    referringPhysician: study.referringPhysician ?? null,
-    selectedAt: study.selectedAt,
-    submittedAt: study.submittedAt ?? null,
-    attachments: (study.attachments ?? []).map((attachment) => ({
-      id: attachment.id,
-      originalName: attachment.originalName,
-      mimeType: attachment.mimeType ?? null,
-      sizeBytes: String(attachment.sizeBytes),
-      createdAt: attachment.createdAt,
-    })),
-    processingJob: study.processingJob ?? null,
-    latestDispatch,
-  }
-}
-
-function formatBridgeStudyForAdmin(study: Parameters<typeof formatBridgeStudyForClient>[0] & {
-  client?: { id: string; code: string; name: string } | null
-  createdAt?: Date
-  updatedAt?: Date
-  dispatchRequests?: Array<{ requestId: string; status: string; progressPercentage: number; createdAt: Date; lastErrorMessage?: string | null }>
-}) {
-  return {
-    ...formatBridgeStudyForClient(study),
-    client: study.client ? { id: study.client.id, code: study.client.code, name: study.client.name } : null,
-    createdAt: study.createdAt,
-    updatedAt: study.updatedAt,
-    dispatchRequests: study.dispatchRequests ?? [],
   }
 }
 
