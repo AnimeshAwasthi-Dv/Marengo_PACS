@@ -1381,7 +1381,7 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
       studyInstanceUid: true,
       accessionNumber: true,
       status: true,
-      metadata: true,
+      // No `metadata`: about 4 KB per study and no provider screen reads it.
       createdAt: true,
       updatedAt: true,
     },
@@ -4408,6 +4408,9 @@ registerExternalViewerRoutes(app, { prisma, requireAuth, requireRadiologist, acc
 app.use((error: unknown, _req: Request, res: Response, next: express.NextFunction) => {
   if (res.headersSent) return next(error)
   if (error instanceof StudyArchiveError) return res.status(error.status).json({ message: error.message })
+  // Access helpers such as workspaceStudyScope throw an Error carrying a 4xx `status`.
+  const status = (error as { status?: unknown }).status
+  if (error instanceof Error && typeof status === 'number' && status >= 400 && status < 500) return res.status(status).json({ message: error.message })
   if (error instanceof z.ZodError) {
     const issue = error.issues[0]
     const field = issue?.path.length ? `${issue.path.join('.')}: ` : ''
