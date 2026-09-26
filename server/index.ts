@@ -1,5 +1,8 @@
 import { sendStudyBundle, StudyArchiveError, type BundleStudySource } from './studyBundle'
 import { registerWorklistRoutes } from './routers/worklist.router'
+import { registerReportRoutes } from './routers/reports.router'
+import { activeCallBookingStatuses, reportClientSelect, reportListOmit, reportRadiologistSelect } from './queries/reports.queries'
+import { withReportSummaries } from './services/reports.service'
 import { formatBridgeStudyForAdmin, formatBridgeStudyForClient } from './lib/bridgeStudyFormat'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
@@ -583,7 +586,7 @@ app.get('/api/admin/dashboard', requireAuth, requireSuperAdmin, async (_req, res
 app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) => {
   res.setHeader('Cache-Control', 'private, no-store')
   const dashboardOnly = req.query.scope === 'dashboard'
-  const dashboardCacheKey = `${redisNamespace}:admin-overview:${dashboardOnly ? 'dashboard' : 'full'}`
+  const dashboardCacheKey = `${redisNamespace}:admin-overview:v2:${dashboardOnly ? 'dashboard' : 'full'}`
   const cachedDashboard = req.query.fresh === '1' ? null : await redisGetJson<unknown>(dashboardCacheKey)
   if (cachedDashboard) return res.json(cachedDashboard)
 
@@ -644,9 +647,10 @@ app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) 
     prisma.job.findMany({ include: { client: true, study: true }, orderBy: { createdAt: 'desc' }, take: 50 }),
     prisma.usageLog.findMany({ include: { client: true }, orderBy: { createdAt: 'desc' }, take: 50 }),
     prisma.reportFormatSetting.findMany({ include: { client: true } }),
-    prisma.reportReview.findMany({ include: { client: true, radiologist: true }, orderBy: { createdAt: 'desc' } }),
+    prisma.reportReview.findMany({ omit: reportListOmit, include: { client: { select: reportClientSelect }, radiologist: true }, orderBy: { createdAt: 'desc' } }),
     prisma.radiologistProfile.findMany({ include: { client: true, user: { select: portalUserSelect } }, orderBy: { createdAt: 'desc' } }),
     prisma.processingJob.findMany({
+      omit: { reportHtml: true },
       include: {
         client: true,
         bridgeStudy: {
@@ -667,7 +671,15 @@ app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) 
       orderBy: { createdAt: 'desc' },
       take: getDeploymentFeatures().marengoMinimal ? 100 : 500,
     }),
-    prisma.availableBridgeStudy.findMany({ include: { client: true, attachments: true, processingJob: true }, orderBy: { updatedAt: 'desc' }, take: 100 }),
+    prisma.availableBridgeStudy.findMany({
+      include: {
+        client: { select: reportClientSelect },
+        attachments: { select: { id: true, originalName: true, mimeType: true, sizeBytes: true, createdAt: true } },
+        processingJob: { omit: { reportHtml: true, upstreamStatus: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 100,
+    }),
     prisma.auditLog.findMany({ include: { client: true }, orderBy: { createdAt: 'desc' }, take: getDeploymentFeatures().marengoMinimal ? 100 : 500 }),
     getDeploymentFeatures().billing ? getAdminBillingSnapshot() : Promise.resolve(null),
   ])
@@ -680,7 +692,7 @@ app.get('/api/admin/overview', requireAuth, requireSuperAdmin, async (req, res) 
     jobs,
     usageLogs,
     reportSettings,
-    reportReviews,
+    reportReviews: await withReportSummaries(reportReviews),
     radiologists,
     processingJobs,
     availableBridgeStudies,
@@ -1455,13 +1467,14 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
         user: { select: portalUserSelect },
         manager: { select: portalUserSelect },
         availabilitySlots: { orderBy: { slotStart: 'asc' }, take: 50 },
-        reportReviews: { where: providerReportWhere, orderBy: { createdAt: 'desc' } },
+        reportReviews: { where: providerReportWhere, omit: reportListOmit, orderBy: { createdAt: 'desc' } },
       },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.reportReview.findMany({
       where: providerReportWhere,
-      include: { client: true, radiologist: true },
+      omit: reportListOmit,
+      include: { client: { select: reportClientSelect }, radiologist: { select: reportRadiologistSelect } },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.user.findMany({
@@ -1477,7 +1490,7 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
     }),
     prisma.reportCallBooking.findMany({
       where: { report: providerReportWhere },
-      include: { radiologist: true, report: { include: { client: true } }, client: true, managerAcceptedBy: { select: portalUserSelect }, radiologistAcceptedBy: { select: portalUserSelect } },
+      include: { radiologist: true, report: { omit: reportListOmit, include: { client: { select: reportClientSelect } } }, client: { select: reportClientSelect }, managerAcceptedBy: { select: portalUserSelect }, radiologistAcceptedBy: { select: portalUserSelect } },
       orderBy: { createdAt: 'desc' },
       take: 200,
     }),
@@ -1497,6 +1510,7 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
   const providerProcessingJobs = mappedProcessingJobIds.length
     ? await prisma.processingJob.findMany({
         where: { id: { in: mappedProcessingJobIds } },
+        omit: { reportHtml: true },
         include: {
           client: { select: { id: true, code: true, name: true } },
           bridgeStudy: { include: { attachments: { orderBy: { createdAt: 'asc' } } } },
@@ -1561,6 +1575,12 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
     take: 50,
   })
   const pendingPayableMinor = payables.filter((item) => item.status !== 'PAID').reduce((sum, item) => sum + item.amountMinor, 0)
+  // The lists above are capped; KPI cards need true totals.
+  const [assignedStudyCount, submittedReportCount, apiRequestCount] = await Promise.all([
+    prisma.providerJobMapping.count({ where: { providerId: provider.id } }),
+    prisma.providerReportSubmission.count({ where: { providerId: provider.id } }),
+    prisma.providerApiRequest.count({ where: { providerId: provider.id } }),
+  ])
   res.json({
     provider: {
       id: provider.id,
@@ -1570,9 +1590,9 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
       reportCallbackEndpoint: provider.reportCallbackEndpoint,
     },
     summary: {
-      assignedStudies: mappings.length,
-      reportsSubmitted: submissions.length,
-      apiRequests: apiLogs.length,
+      assignedStudies: assignedStudyCount,
+      reportsSubmitted: submittedReportCount,
+      apiRequests: apiRequestCount,
       pendingPayableMinor,
       settlementCount: settlements.length,
       disputeCount: disputes.length,
@@ -1586,7 +1606,7 @@ app.get('/api/provider/dashboard', requireAuth, requireProviderStaff, async (req
     settlements,
     disputes,
     radiologists,
-    reportReviews,
+    reportReviews: await withReportSummaries(reportReviews),
     managers,
     availabilitySlots,
     callBookings,
@@ -1840,12 +1860,11 @@ app.post('/api/provider/call-bookings/:bookingId/complete', requireAuth, require
   res.json(updated)
 })
 
-// The client dashboard feeds the workspace shell and report library. Report bodies,
-// job payloads and per-radiologist report lists are never shown there, so they stay
-// out of this payload; the worklist loads its own slim study pages.
-const dashboardReportOmit = { aiReportJson: true, editedReportJson: true } as const
+// Dashboards list many reports: they send each report's JSON as a small summary
+// (`withReportSummaries`) and screens that show report text load `GET /api/reports/:id`.
+// The client dashboard also drops job payloads and per-radiologist report lists, which
+// it never shows; the worklist loads its own slim study pages.
 const dashboardJobOmit = { upstreamStatus: true, reportHtml: true } as const
-const dashboardRadiologistSelect = { id: true, fullName: true, userId: true, clientId: true } as const
 
 app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res) => {
   if (!req.user!.clientId) return res.status(403).json({ message: 'Client account required' })
@@ -1890,14 +1909,15 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
         include: { user: { select: portalUserSelect } },
         orderBy: { createdAt: 'desc' },
       },
-      reportReviews: { omit: dashboardReportOmit, include: { radiologist: { select: dashboardRadiologistSelect }, callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 } }, orderBy: { updatedAt: 'desc' } },
+      reportReviews: { omit: reportListOmit, include: { radiologist: { select: reportRadiologistSelect }, callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 } }, orderBy: { updatedAt: 'desc' } },
     },
     }),
     getDeploymentFeatures().billing && access.permissions.billing ? getClientBillingSnapshot(req.user!.clientId) : Promise.resolve(undefined),
   ])
   if (!client) return res.json(null)
+  const clientReports = await withReportSummaries(client.reportReviews)
   if (client.kind !== 'GROUP') {
-    const payload = { ...client, ...(billing ? { billing } : {}) }
+    const payload = { ...client, reportReviews: clientReports, ...(billing ? { billing } : {}) }
     void redisSetJson(dashboardCacheKey, payload, Number(process.env.REDIS_DASHBOARD_TTL_SECONDS ?? 60))
     return res.json(payload)
   }
@@ -1921,10 +1941,10 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
     ? await Promise.all([
       prisma.reportReview.findMany({
         where: { clientId: { in: centerIds } },
-        omit: dashboardReportOmit,
+        omit: reportListOmit,
         include: {
           client: { select: { name: true, code: true } },
-          radiologist: { select: dashboardRadiologistSelect },
+          radiologist: { select: reportRadiologistSelect },
           callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 },
         },
         orderBy: { updatedAt: 'desc' },
@@ -1978,7 +1998,7 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
       reports: center._count.reportReviews,
       tickets: center._count.supportTickets,
     })),
-    reports: organizationReports,
+    reports: await withReportSummaries(organizationReports),
     processingJobs: organizationProcessingJobs,
     radiologists: organizationRadiologists,
     totals: {
@@ -1990,7 +2010,7 @@ app.get('/api/client/dashboard', requireAuth, requireClientUser, async (req, res
       tickets: centers.reduce((sum, center) => sum + center._count.supportTickets, 0),
     },
   }
-  const payload = { ...client, ...(billing ? { billing } : {}), organization }
+  const payload = { ...client, reportReviews: clientReports, ...(billing ? { billing } : {}), organization }
   void redisSetJson(dashboardCacheKey, payload, Number(process.env.REDIS_DASHBOARD_TTL_SECONDS ?? 60))
   res.json(payload)
 })
@@ -3982,7 +4002,7 @@ app.get('/api/radiologist/dashboard', requireAuth, requireRadiologist, async (re
       user: { select: portalUserSelect },
       callBookings: {
         where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED', 'COMPLETED'] }, slotEnd: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-        include: { client: true, report: true },
+        include: { client: { select: reportClientSelect }, report: { omit: reportListOmit } },
         orderBy: { slotStart: 'asc' },
         take: 100,
       },
@@ -4007,10 +4027,14 @@ app.get('/api/radiologist/dashboard', requireAuth, requireRadiologist, async (re
         ],
       }),
     },
-    include: { client: true, auditLogs: true, radiologist: true, callBookings: { where: { status: { in: ['REQUESTED', 'MANAGER_ACCEPTED', 'RADIOLOGIST_ACCEPTED', 'BOOKED'] } }, orderBy: { slotStart: 'asc' }, take: 5 } },
+    // No audit trail here: no screen shows it, and it was the largest part after the report JSON.
+    omit: reportListOmit,
+    include: { client: { select: reportClientSelect }, radiologist: { select: reportRadiologistSelect }, callBookings: { where: { status: { in: activeCallBookingStatuses } }, orderBy: { slotStart: 'asc' }, take: 5 } },
     orderBy: { createdAt: 'desc' },
   })
-  res.json({ ...profile, reportReviews: isGroupRadiologist ? reportReviews : reportReviews.filter((report) => canSeePreferredRadiologistReport(profile, report)) })
+  // The JSON summary keeps workflow.preferredRadiologistId, so the visibility filter still applies.
+  const summarized = await withReportSummaries(reportReviews)
+  res.json({ ...profile, reportReviews: isGroupRadiologist ? summarized : summarized.filter((report) => canSeePreferredRadiologistReport(profile, report)) })
 })
 
 app.get('/api/radiologist/reports/:reportId/pdf', requireAuth, requireRadiologist, async (req, res) => {
@@ -4371,6 +4395,14 @@ app.post('/api/admin/processing-jobs/:jobId/retry-renewist', requireAuth, requir
   res.status(202).json({ processingJobId: jobId, status: 'QueuedForRenewist' })
 })
 
+registerReportRoutes(app, {
+  requireAuth,
+  getAuthorizedReport,
+  async canRadiologistSeeReport(req, report) {
+    const profile = await prisma.radiologistProfile.findUniqueOrThrow({ where: { userId: req.user!.sub }, select: { id: true, clientId: true, providerCode: true } })
+    return await isGroupRadiologistProfile(profile) || canSeePreferredRadiologistReport(profile, report)
+  },
+})
 registerExternalViewerRoutes(app, { prisma, requireAuth, requireRadiologist, accessibleClientIds, workspaceStudyScope, getAccessibleProcessingJob, extractQueuedMetadata, publicSharedReport, getAuthorizedReport, canRadiologistAccessReport, isGroupRadiologistProfile, getDicomMetadataValue, createBridgeStudyViewerUrl });
 
 app.use((error: unknown, _req: Request, res: Response, next: express.NextFunction) => {
