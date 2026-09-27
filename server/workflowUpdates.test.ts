@@ -37,9 +37,13 @@ test('urgent queue rejects routine/demo/out-of-scope studies and uses its own id
 });
 
 test('operational group configurations remain independent', () => {
- const env = { TELEGRAM_BOT_TOKEN:'token', TELEGRAM_CLIENT_IDS:'center', TELEGRAM_PORTAL_URL:'https://portal.example.com', TELEGRAM_URGENT_ENABLED:'true', TELEGRAM_URGENT_CHAT_ID:'-1001', TELEGRAM_CALLBACK_ENABLED:'true', TELEGRAM_CALLBACK_CHAT_ID:'-1002' };
+ const env = { TELEGRAM_BOT_TOKEN:'general', TELEGRAM_URGENT_BOT_TOKEN:'urgent', TELEGRAM_CALLBACK_BOT_TOKEN:'callback', TELEGRAM_CLIENT_IDS:'center', TELEGRAM_PORTAL_URL:'https://portal.example.com', TELEGRAM_URGENT_ENABLED:'true', TELEGRAM_URGENT_CHAT_ID:'-1001', TELEGRAM_CALLBACK_ENABLED:'true', TELEGRAM_CALLBACK_CHAT_ID:'-1002' };
  assert.equal(telegramUrgentConfig(env).chatId,'-1001'); assert.equal(telegramCallbackConfig(env).chatId,'-1002');
  assert.deepEqual(telegramUrgentConfig(env).missing,[]);
+ assert.equal(telegramUrgentConfig(env).token,'urgent');
+ assert.equal(telegramCallbackConfig(env).token,'callback');
+ assert(telegramUrgentConfig({...env,TELEGRAM_URGENT_BOT_TOKEN:''}).missing.includes('bot token'));
+ assert(telegramCallbackConfig({...env,TELEGRAM_CALLBACK_BOT_TOKEN:''}).missing.includes('bot token'));
  assert(telegramCallbackConfig({...env,TELEGRAM_CALLBACK_CHAT_ID:'https://t.me/+invite'}).missing.includes('group chat ID'));
 });
 
