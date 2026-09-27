@@ -1038,7 +1038,15 @@ model ProcessingJob {
   bridgeStudy    AvailableBridgeStudy?
   patientId      String?
   patient        Patient?              @relation(fields: [patientId], references: [id], onDelete: SetNull)
+  // Local study ZIP lifecycle (server/services/studyArchive.service.ts):
+  // UPLOAD_FAILED -> retried until STORED; STORED -> local copy removed after the retention window (LOCAL_REMOVED).
+  archiveState          String?
+  archiveStoredAt       DateTime?
+  archiveUploadAttempts Int       @default(0)
+  archiveNextAttemptAt  DateTime?
+  archiveError          String?
 
+  @@index([archiveState, archiveStoredAt])
   @@index([clientId, patientId])
   @@index([clientId])
   @@index([status])

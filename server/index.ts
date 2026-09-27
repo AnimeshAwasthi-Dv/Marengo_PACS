@@ -17,6 +17,7 @@ import { holdSpecialXrayForManualSubmission } from '../src/specialXray';
 import { nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
 import { registerExternalViewerRoutes } from './viewer/routes';
+import { createViewerPreimporter } from './viewer/preimport';
 import bcrypt from 'bcryptjs'
 import { scopedShareToken, scopedShareReportId, verifyShareScope } from './shareScope'
 import { workspacePermissions, assignableCenterRoles } from '../src/workspacePermissions'
@@ -67,6 +68,7 @@ import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
 import { findStoredStudyObject, readStoredObject, storeObject, uploadReportHtmlToS3, type StorageKind } from './reportStorage'
 import { bridgeStudyS3KeyCandidates, studyViewerStorageKind } from './lib/studyStorage'
+import { startStudyArchiveMaintenance, storeOriginalStudy } from './services/studyArchive.service'
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
@@ -140,7 +142,12 @@ async function waitForViewerImport(importId: string) {
   return current
 }
 
-async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
+/**
+ * Hands the bridge study's archive to the DICOM viewer's import queue (uploading a local-only archive to S3 first) and
+ * returns the import, without waiting for it to finish. Returns a still-valid viewer URL when one is cached, and null
+ * when the study has no archive yet. Used when a study is opened and, ahead of that, by the pre-import sweep.
+ */
+async function startBridgeStudyViewerImport(studyId: string): Promise<{ importId: string; sourceIdentity: string; viewerUrl?: string } | null> {
   const study = await prisma.availableBridgeStudy.findUnique({
     where: { id: studyId },
     select: {
@@ -167,7 +174,7 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
   if (!storedStudy?.key && !discoveredStudy?.key && !archivePath) return null
   const cached = externalViewerImports.get(study.id)
   const sourceIdentity = storedStudy ? `${storedStudy.bucket}/${storedStudy.key}` : discoveredStudy ? `${discoveredStudy.bucket}/${discoveredStudy.key}` : archivePath ?? ''
-  if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return cached.viewerUrl
+  if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return { importId: cached.importId, sourceIdentity, viewerUrl: cached.viewerUrl }
   let importId = cached?.archivePath === sourceIdentity ? cached.importId : ''
   if (!importId) {
     const storage = storedStudy?.key || discoveredStudy?.key ? { key: storedStudy?.key ?? discoveredStudy!.key, bucket: storedStudy?.bucket ?? discoveredStudy!.bucket } : await storeObject({
@@ -187,6 +194,14 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
     importId = imported.id
     externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: imported.status, expiresAt: Date.now() + 60 * 60 * 1000 })
   }
+  return { importId, sourceIdentity }
+}
+
+async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
+  const started = await startBridgeStudyViewerImport(studyId)
+  if (!started) return null
+  if (started.viewerUrl) return started.viewerUrl
+  const { importId, sourceIdentity } = started
   const ready = await waitForViewerImport(importId)
   if (ready?.status !== 'completed') throw new Error('DICOM viewer is still indexing this study. Please try again shortly.')
   const session = await viewerServiceRequest<ViewerSessionResponse>('/api/v1/sessions', {
@@ -194,7 +209,7 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
     body: JSON.stringify({ studyId: importId }),
   })
   if (!session.viewerUrl) throw new Error('DICOM viewer service did not return a viewer URL')
-  externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: 'completed', viewerUrl: session.viewerUrl, expiresAt: session.expiresAt ?? Date.now() + 55 * 60 * 1000 })
+  externalViewerImports.set(studyId, { archivePath: sourceIdentity, importId, status: 'completed', viewerUrl: session.viewerUrl, expiresAt: session.expiresAt ?? Date.now() + 55 * 60 * 1000 })
   return session.viewerUrl
 }
 
@@ -4478,7 +4493,31 @@ const httpServer = app.listen(port, host, () => {
   setInterval(() => void processPendingPacsReturnJobs(), 5 * 60 * 1000).unref()
   setInterval(() => void recoverStaleOutboundSubmissions(), 10 * 60 * 1000).unref()
   if (features.billing) setInterval(() => void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error)), 24 * 60 * 60 * 1000).unref()
+  startViewerPreimport()
+  startStudyArchiveMaintenance()
 })
+
+/**
+ * Pre-imports new CT/MR/PET/NM studies into the external viewer so opening one never waits on indexing.
+ * In-process timer (single replica, see Harness/memory/constraint-single-replica.md). DICOM_VIEWER_PREIMPORT=false turns it off.
+ */
+function startViewerPreimport() {
+  if (process.env.DICOM_VIEWER_PREIMPORT === 'false') return console.log('Viewer pre-import disabled by DICOM_VIEWER_PREIMPORT=false')
+  try { viewerServiceConfig() } catch { return console.log('Viewer pre-import off: the DICOM viewer service is not configured') }
+  const preimporter = createViewerPreimporter({
+    findRecent: (since) => prisma.availableBridgeStudy.findMany({
+      // updatedAt is indexed; the modality filter narrows the page to studies the external viewer opens.
+      where: { updatedAt: { gte: since }, modalities: { hasSome: ['CT', 'MR', 'MRI', 'PT', 'PET', 'NM'] } },
+      select: { id: true, modalities: true },
+      orderBy: { updatedAt: 'desc' },
+      take: 25,
+    }),
+    startImport: async (studyId) => (await startBridgeStudyViewerImport(studyId)) ? 'started' : 'unavailable',
+  })
+  const sweep = () => void preimporter.sweep().catch((error) => console.error('Viewer pre-import sweep failed', error))
+  setTimeout(sweep, 20_000).unref()
+  setInterval(sweep, 60_000).unref()
+}
 
 async function resumeQueuedProcessingJobs() {
   const jobs = await prisma.processingJob.findMany({
@@ -5401,16 +5440,8 @@ async function queueTeleradiologyOnlyJob(input: {
   const billableUnits = billableUnitsForStudy(input.serviceName, input.serviceType, input.job.imageCount || Number(input.dicomMetadata.numberOfInstances ?? 1) || 1)
   const studyUid = input.dicomMetadata.studyInstanceUid ?? `APP-${input.job.id}`
   const modality = input.dicomMetadata.modality ?? defaultModalityForServiceType(input.serviceType)
-  const originalStudyStorage = await storeObject({
-    kind: studyStorageKind(input.serviceType),
-    keyParts: ['studies', input.job.id, input.job.uploadName],
-    body: fsSync.createReadStream(input.job.uploadPath),
-    contentType: 'application/zip',
-    localPath: input.job.uploadPath,
-  }).catch((error) => {
-    console.warn(`Unable to upload study ${input.job.id} to S3:`, error instanceof Error ? error.message : error)
-    return null
-  })
+  // A failed upload is retried in the background; the local ZIP stays until S3 has it (studyArchive.service).
+  const originalStudyStorage = await storeOriginalStudy(input.job)
   const refreshedJob = await prisma.processingJob.findUnique({ where: { id: input.job.id }, select: { patientId: true } })
   const matchedPatient = refreshedJob?.patientId ? null : input.dicomMetadata.patientId?.trim()
     ? await prisma.patient.findFirst({ where: { clientId: input.job.clientId, patientIdentifier: { equals: input.dicomMetadata.patientId.trim(), mode: 'insensitive' } }, select: { id: true, clinicalHistory: true } })
@@ -6306,10 +6337,8 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
         data: { workflowStatus: 'SubmittedToRenewist' },
       }),
     ])
-    await Promise.all([
-      deleteLocalUploadFile(input.studyZipPath),
-      normalizedStudy?.zipPath && normalizedStudy.zipPath !== input.studyZipPath ? deleteLocalUploadFile(normalizedStudy.zipPath) : Promise.resolve(),
-    ])
+    // The original ZIP is kept for retries and QuickView; studyArchive.service removes it once S3 has held it for the retention window.
+    if (normalizedStudy?.zipPath && normalizedStudy.zipPath !== input.studyZipPath) await deleteLocalUploadFile(normalizedStudy.zipPath)
     const acceptedJob = await prisma.processingJob.findUnique({ where: { id: input.processingJobId }, select: { clientId: true } })
     if (acceptedJob) {
       await enqueueStudyStatusNotification(prisma, {
@@ -7248,14 +7277,6 @@ function getDicomMetadataValue(value: unknown, key: string) {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null
   const found = (metadata as Record<string, unknown>)[key]
   return typeof found === 'string' && found.trim() ? found.trim() : null
-}
-
-function studyStorageKind(serviceType: ServiceType): StorageKind {
-  if (serviceType.startsWith('ct')) return 'ct-studies'
-  if (serviceType.startsWith('mri') || serviceType === 'mrcp' || serviceType.startsWith('mra')) return 'mri-studies'
-  if (serviceType === 'mammography') return 'mammography-studies'
-  if (serviceType.includes('xray')) return 'xray-studies'
-  return 'original-studies'
 }
 
 
