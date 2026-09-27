@@ -1,3 +1,4 @@
+import { uploadModalityCodes, uploadDicomModality, modalityLabel } from '../src/modalities'
 import { sendStudyBundle, StudyArchiveError, type BundleStudySource } from './studyBundle'
 import { registerWorklistRoutes } from './routers/worklist.router'
 import { registerReportRoutes } from './routers/reports.router'
@@ -2223,8 +2224,8 @@ app.get('/api/client/study-sync/available-studies/:studyId/download', requireAut
 
 app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireClientUser, requireWorkspaceAction('upload'), async (req, res) => {
   const clientId = req.user!.clientId!
-  const modality = z.enum(['XRAY', 'CT', 'MRI']).parse(String(req.params.modality).toUpperCase())
-  const dicomModality = modality === 'XRAY' ? 'DX' : modality === 'MRI' ? 'MR' : 'CT'
+  const modality = z.enum(uploadModalityCodes).parse(String(req.params.modality).toUpperCase())
+  const dicomModality = uploadDicomModality(modality)
   try {
     const upload = await saveManualAvailableStudyUpload(req)
     const extracted: DicomStudyMetadata = await extractDicomStudyMetadata(upload.filePath).catch(() => ({}))
@@ -2243,7 +2244,7 @@ app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireC
         accessionNumber: extracted.accession ?? null,
         studyDate: extracted.studyDate ?? null,
         studyTime: extracted.studyTime ?? null,
-        studyDescription: extracted.studyDescription ?? extracted.seriesDescription ?? extracted.protocolName ?? `${modality === 'XRAY' ? 'X-ray' : modality} manual upload`,
+        studyDescription: extracted.studyDescription ?? extracted.seriesDescription ?? extracted.protocolName ?? `${modalityLabel(modality)} manual upload`,
         modalities: classifyBreastXrayModalities([extracted.modality ?? dicomModality], extracted.bodyPartExamined),
         referringPhysician: extracted.referringPhysician ?? null,
         archiveName: upload.uploadName,
