@@ -910,7 +910,7 @@ export type AdminOverview = {
   billing?: BillingSnapshot;
 };
 
-export type ModalityTab = 'ALL' | 'MRI' | 'CT' | 'Mammography' | 'X-RAY' | 'PET-CT' | 'USG';
+export type ModalityTab = 'ALL' | 'MRI' | 'CT' | 'Mammography' | 'X-Ray' | 'Special X-Ray' | 'PET-CT' | 'USG';
 
 export type SortDirection = "asc" | "desc";
 

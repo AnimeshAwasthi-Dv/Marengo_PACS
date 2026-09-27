@@ -7,15 +7,7 @@ import type { Express, Request, RequestHandler, Response } from 'express'
 import type { Prisma } from '@prisma/client'
 import { ZodError } from 'zod'
 import { requireAuth, requireSuperAdmin } from './auth'
-import {
-  accountStatusSchema,
-  adminRadiologistCreateSchema,
-  adminRadiologistScopeSchema,
-  groupAdminCreateSchema,
-  managedRadiologistScope,
-  passwordConfirmationSchema,
-  type AdminRadiologistScope,
-} from './adminOrganizationContracts'
+import { accountStatusSchema, adminRadiologistScopeSchema, groupAdminCreateSchema, managedRadiologistScope, passwordConfirmationSchema, type AdminRadiologistScope } from './adminOrganizationContracts'
 import { prisma } from './db'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -225,85 +217,6 @@ export function registerAdminOrganizationRoutes(app: Express) {
     res.download(documentPath, existing.documentName || path.basename(documentPath))
   }))
 
-  app.post('/api/admin/radiologists', ...secured, adminHandler(async (req, res) => {
-    const body = adminRadiologistCreateSchema.parse(req.body)
-    const group = await findMarengoGroup()
-    const target = await resolveRadiologistTarget(body.scope, group)
-    await assertEmailIsAvailable(body.email)
-
-    const savedPaths: string[] = []
-    try {
-      let signatureImageUrl = body.signatureImageUrl
-      if (body.signatureImageData) {
-        const signature = await saveSignatureImage(body.signatureImageData)
-        signatureImageUrl = signature.publicPath
-        savedPaths.push(signature.filePath)
-      }
-      let documentUrl: string | null = null
-      let documentName: string | null = null
-      if (body.documentData) {
-        const document = await saveRadiologistDocument(body.documentData, body.documentName)
-        documentUrl = document.publicPath
-        documentName = document.documentName
-        savedPaths.push(document.filePath)
-      }
-
-      const temporaryPassword = generatePortalPassword()
-      const passwordHash = await bcrypt.hash(temporaryPassword, 12)
-      const result = await prisma.$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: {
-            userId: userIdForEmail(body.email),
-            email: body.email,
-            name: body.fullName,
-            passwordHash,
-            lastGeneratedPassword: null,
-            role: 'RADIOLOGIST',
-            clientId: target.clientId,
-            providerCode: target.providerCode,
-            active: true,
-          },
-          select: portalUserSelect,
-        })
-        const profile = await tx.radiologistProfile.create({
-          data: {
-            fullName: body.fullName,
-            email: body.email,
-            phone: body.phone || null,
-            qualification: body.qualification,
-            medicalRegistrationNumber: body.medicalRegistrationNumber,
-            organisationName: body.organisationName || target.organisationName,
-            signatureImageUrl: signatureImageUrl || null,
-            documentUrl,
-            documentName,
-            active: true,
-            userId: user.id,
-            clientId: target.clientId,
-            providerCode: target.providerCode,
-            managerUserId: null,
-          },
-          include: { user: { select: portalUserSelect } },
-        })
-        await tx.auditLog.create({
-          data: {
-            clientId: target.clientId,
-            actorUserId: req.user!.sub,
-            action: body.scope === 'MARENGO_GROUP' ? 'ADMIN_GROUP_RADIOLOGIST_CREATED' : 'ADMIN_RENEWIST_RADIOLOGIST_CREATED',
-            metadata: { radiologistId: profile.id, userId: user.id, email: user.email, scope: body.scope },
-            ipAddress: req.ip,
-          },
-        })
-        return { profile: { ...profile, scope: body.scope, accessActive: true }, user }
-      })
-
-      setCredentialResponseHeaders(res)
-      res.status(201).json({ ...result, temporaryPassword })
-    } catch (error) {
-      await Promise.all(savedPaths.map((filePath) => fs.rm(filePath, { force: true }).catch(() => undefined)))
-      throw error
-    }
-  }))
-
   app.patch('/api/admin/radiologists/:radiologistId/status', ...secured, adminHandler(async (req, res) => {
     const body = accountStatusSchema.parse(req.body)
     const group = await findMarengoGroup()
@@ -467,19 +380,6 @@ function radiologistScopeWhere(groupId: string, scope: AdminRadiologistScope | n
   return { OR: [groupScope, renewistScope] }
 }
 
-async function resolveRadiologistTarget(scope: AdminRadiologistScope, group: MarengoGroup) {
-  if (scope === 'MARENGO_GROUP') {
-    return { clientId: group.id, providerCode: null, organisationName: group.name }
-  }
-  const provider = await prisma.teleradiologyProvider.findUnique({
-    where: { code: renewistProviderCode },
-    select: { code: true, name: true, active: true },
-  })
-  if (!provider) throw new AdminOrganizationError(409, 'The Renewist provider workspace has not been configured')
-  if (!provider.active) throw new AdminOrganizationError(409, 'The Renewist provider workspace is inactive')
-  return { clientId: null, providerCode: provider.code, organisationName: provider.name }
-}
-
 async function findManagedRadiologist(groupId: string, radiologistId: string) {
   const profile = await prisma.radiologistProfile.findUnique({
     where: { id: radiologistId },
@@ -524,51 +424,6 @@ function generatePortalPassword() {
 function setCredentialResponseHeaders(res: Response) {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private')
   res.setHeader('Pragma', 'no-cache')
-}
-
-async function saveSignatureImage(dataUrl: string) {
-  const match = dataUrl.match(/^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=]+)$/)
-  if (!match) throw new AdminOrganizationError(400, 'Signature image must be PNG, JPG, or WEBP')
-  const extension = match[1] === 'jpeg' ? 'jpg' : match[1]
-  const buffer = Buffer.from(match[2], 'base64')
-  if (!buffer.length || buffer.length > 2 * 1024 * 1024) throw new AdminOrganizationError(400, 'Signature image must be 2 MB or smaller')
-
-  const folder = path.join(uploadsPath, 'signatures')
-  await fs.mkdir(folder, { recursive: true })
-  const fileName = `${crypto.randomUUID()}.${extension}`
-  const filePath = path.join(folder, fileName)
-  await fs.writeFile(filePath, buffer)
-  return { publicPath: `/uploads/signatures/${fileName}`, filePath }
-}
-
-async function saveRadiologistDocument(dataUrl: string, originalName = 'radiologist-document') {
-  const match = dataUrl.match(/^data:(image\/(?:png|jpe?g|webp)|application\/pdf|application\/msword|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document);base64,([A-Za-z0-9+/=]+)$/)
-  if (!match) throw new AdminOrganizationError(400, 'Document must be an image, PDF, DOC, or DOCX')
-  const buffer = Buffer.from(match[2], 'base64')
-  if (!buffer.length || buffer.length > 8 * 1024 * 1024) throw new AdminOrganizationError(400, 'Document must be 8 MB or smaller')
-
-  const extensionByMime: Record<string, string> = {
-    'image/png': '.png',
-    'image/jpeg': '.jpg',
-    'image/jpg': '.jpg',
-    'image/webp': '.webp',
-    'application/pdf': '.pdf',
-    'application/msword': '.doc',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-  }
-  const extension = extensionByMime[match[1]]
-  const cleanName = sanitizeFileName(originalName || 'radiologist-document')
-  const baseName = sanitizeFileName(path.basename(cleanName, path.extname(cleanName)) || 'radiologist-document').slice(0, 80)
-  const fileName = `${baseName}-${crypto.randomUUID()}${extension}`
-  const folder = path.join(uploadsPath, 'radiologist-documents')
-  await fs.mkdir(folder, { recursive: true })
-  const filePath = path.join(folder, fileName)
-  await fs.writeFile(filePath, buffer)
-  return { publicPath: `/uploads/radiologist-documents/${fileName}`, filePath, documentName: `${baseName}${extension}` }
-}
-
-function sanitizeFileName(value: string) {
-  return value.replace(/[^a-zA-Z0-9._ -]+/g, '_').replace(/\.{2,}/g, '.').trim() || 'file'
 }
 
 async function resolveManagedUpload(publicPath: string, expectedFolder: string) {

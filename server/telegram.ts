@@ -1,9 +1,12 @@
+import { processPhysicianTelegramOutbox } from './physicianTelegram';
+import { telegramUrgentConfig } from './telegramPolicy';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import { studyTracking } from './studyTracking';
 import { sendTelegram, studyTatCategory, tatTargetSeconds, TelegramDeliveryError, telegramConfig, telegramMessage, telegramAlertConfig, telegramAlertMessage, tatAlertDue } from './telegramPolicy';
 import { enqueueTatAlerts } from './telegramAlerts';
 
+export const TELEGRAM_URGENT_EVENT = 'TELEGRAM_URGENT_STUDY';
 export const TELEGRAM_EVENT = 'TELEGRAM_STUDY_PROCESSING';
 export const TELEGRAM_ALERT_EVENT = 'TELEGRAM_TAT_ALERT';
 
@@ -13,12 +16,14 @@ export async function telegramCenterIds(config: ReturnType<typeof telegramConfig
   return [...new Set([...config.clientIds, ...centers.map(c => c.id)])];
 }
 
-export async function enqueueTelegramStudy(db: Pick<Prisma.TransactionClient, 'notificationOutbox' | 'client'>, job: { id: string; clientId: string; serviceType: string; priority: string | null; demoMode: boolean }, modality?: string, config = telegramConfig(), description?: string | null) {
-  if (!config.enabled || job.demoMode) return;
+export async function enqueueTelegramStudy(db: Pick<Prisma.TransactionClient, 'notificationOutbox' | 'client'>, job: { id: string; clientId: string; serviceType: string; priority: string | null; demoMode: boolean }, modality?: string, config = telegramConfig(), description?: string | null, eventType = TELEGRAM_EVENT, eventKey = job.id) {
+  if (eventType === TELEGRAM_EVENT && job.priority?.toUpperCase() === 'URGENT') await enqueueTelegramStudy(db, job, modality, telegramUrgentConfig(), description, TELEGRAM_URGENT_EVENT);
+  if (!config.enabled || job.demoMode || (eventType === TELEGRAM_URGENT_EVENT && job.priority?.toUpperCase() !== 'URGENT')) return;
   if (!(await telegramCenterIds(config, db)).includes(job.clientId)) return;
   const tatCategory = studyTatCategory(modality ?? job.serviceType, job.serviceType, description);
-  await db.notificationOutbox.upsert({ where: { idempotencyKey: `telegram:processing:${job.id}` }, update: {}, create: {
-    eventType: TELEGRAM_EVENT, aggregateType: 'ProcessingJob', aggregateId: job.id, idempotencyKey: `telegram:processing:${job.id}`,
+  const idempotencyKey = eventType === TELEGRAM_EVENT ? `telegram:processing:${job.id}` : `telegram:urgent:${eventKey}`;
+  await db.notificationOutbox.upsert({ where: { idempotencyKey }, update: {}, create: {
+    eventType, aggregateType: 'ProcessingJob', aggregateId: job.id, idempotencyKey,
     payload: { clientId: job.clientId, tatCategory, targetSeconds: tatTargetSeconds(tatCategory, job.priority), chatId: config.chatId },
   } });
 }
@@ -38,7 +43,7 @@ export async function processTelegramOutbox({ config = telegramConfig(), db = pr
       const payload = item.payload as Prisma.InputJsonObject;
       try {
         const tracking = await track(item.aggregateId, clientIds);
-        if (!tracking || payload.chatId !== config.chatId) {
+        if (!tracking || payload.chatId !== config.chatId || (eventType === TELEGRAM_URGENT_EVENT && tracking.priority.toUpperCase() !== 'URGENT')) {
           await db.notificationOutbox.update({ where: { id: item.id }, data: { status: 'DEAD', payload: { ...payload, error: 'Study scope or group configuration changed; review required' } } });
           continue;
         }
@@ -49,7 +54,7 @@ export async function processTelegramOutbox({ config = telegramConfig(), db = pr
           continue;
         }
         const message = eventType === TELEGRAM_ALERT_EVENT ? telegramAlertMessage(tracking, config.portalUrl) : telegramMessage(tracking, config.portalUrl);
-        const messageId = await send(config, message.text, message.url);
+        const messageId = await send(config, eventType === TELEGRAM_URGENT_EVENT ? message.text.replace('Study sent for processing', 'Urgent study status update') : message.text, message.url);
         await db.notificationOutbox.update({ where: { id: item.id }, data: { status: 'SENT', processedAt: new Date(), payload: { ...payload, messageId } } });
       } catch (error) {
         const code = error instanceof TelegramDeliveryError ? error.code : 0;
@@ -67,6 +72,8 @@ export async function processTelegramOutbox({ config = telegramConfig(), db = pr
 }
 
 export function startTelegramWorker() {
+  const urgentConfig = telegramUrgentConfig();
+  if (urgentConfig.enabled && urgentConfig.missing.length) console.warn('Urgent Telegram configuration incomplete:', urgentConfig.missing.join(', '), '(check TELEGRAM_URGENT_BOT_TOKEN and TELEGRAM_URGENT_CHAT_ID).');
   const tick = () => void processTelegramOutbox().catch(() => console.warn('Telegram queue unavailable; delivery will retry.'));
   tick();
   setInterval(tick, 10000).unref();
@@ -74,6 +81,11 @@ export function startTelegramWorker() {
     const config = telegramAlertConfig();
     void enqueueTatAlerts({ config }).then(() => processTelegramOutbox({ config, eventType: TELEGRAM_ALERT_EVENT, leadMinutes: config.leadMinutes })).catch(() => console.warn('Telegram TAT alerts unavailable; will retry.'));
   };
+  const urgent = () => void processTelegramOutbox({ config: telegramUrgentConfig(), eventType: TELEGRAM_URGENT_EVENT }).catch(() => console.warn('Urgent study notifications will retry.'));
+  const callbacks = () => void processPhysicianTelegramOutbox().catch(() => console.warn('Physician callback notifications will retry.'));
+  urgent(); callbacks();
+  setInterval(urgent, 10000).unref();
+  setInterval(callbacks, 10000).unref();
   alerts();
   setInterval(alerts, 30000).unref();
 }

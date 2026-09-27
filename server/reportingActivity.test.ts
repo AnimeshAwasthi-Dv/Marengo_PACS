@@ -53,8 +53,9 @@ test('TAT groups modalities with min, max and study-weighted averages across the
  assert.deepEqual(stats.tatByModality.filter(group => group.samples > 0), [
   { modality: 'CT', minimumMinutes: 0, maximumMinutes: 10, averageMinutes: 4, samples: 3 },
   { modality: 'MRI', minimumMinutes: 2, maximumMinutes: 10, averageMinutes: 6, samples: 2 },
+  { modality: 'PET-CT', minimumMinutes: 1, maximumMinutes: 1, averageMinutes: 1, samples: 1 },
  ]);
- assert.deepEqual(stats.tatByModality.map(group => group.modality), modalityCodes.filter(code => code !== 'NM').map(modalityLabel));
+ assert.deepEqual(stats.tatByModality.map(group => group.modality), modalityCodes.map(modalityLabel));
  const empty = reportingActivity([], statisticsRange('2026-09-22', '2026-09-22')).tatByModality;
- assert.deepEqual(empty, modalityCodes.filter(code => code !== 'NM').map(code => ({ modality: modalityLabel(code), minimumMinutes: null, maximumMinutes: null, averageMinutes: null, samples: 0 })));
+ assert.deepEqual(empty, modalityCodes.map(code => ({ modality: modalityLabel(code), minimumMinutes: null, maximumMinutes: null, averageMinutes: null, samples: 0 })));
 });

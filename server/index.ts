@@ -1,3 +1,4 @@
+import { captureWatiWebhookSecret } from './wati';
 import { uploadModalityCodes, uploadDicomModality, modalityLabel } from '../src/modalities'
 import { sendStudyBundle, StudyArchiveError, type BundleStudySource } from './studyBundle'
 import { registerWorklistRoutes } from './routers/worklist.router'
@@ -36,7 +37,7 @@ import helmet from 'helmet'
 import morgan from 'morgan'
 import net from 'node:net'
 import path from 'node:path'
-import { pipeline } from 'node:stream/promises'
+
 import { fileURLToPath } from 'node:url'
 import Busboy from 'busboy'
 
@@ -50,7 +51,7 @@ import { Prisma } from '@prisma/client'
 import { login, requireAuth, requireClientUser, requireProviderAdmin, requireProviderStaff, requireRadiologist, requireSuperAdmin } from './auth'
 import { registerAdminOrganizationRoutes } from './adminOrganization'
 import { billingRouter, clientBillingRouter, generateDueMonthlyInvoices, getAdminBillingSnapshot, getClientBillingSnapshot, handleRazorpayWebhook, recordBillingEvent } from './billing'
-import { allocatePacsEndpoint, isTeleradiologyWorkflow, normalizeAeTitle, validatePacsProcessing } from './dicom'
+import { allocatePacsEndpoint, isTeleradiologyWorkflow, normalizeAeTitle } from './dicom'
 import { prisma } from './db'
 import { getDeploymentFeatures, publicDeploymentFeatures } from './deploymentProfile'
 import { renderHtmlReportPdf, sendApprovedReportToPacs } from './pacsSender'
@@ -66,13 +67,13 @@ import type { ProviderStudySubmission } from './providerAdapters'
 import { ProviderSubmissionError } from './providerAdapters'
 import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
-import { findStoredStudyObject, readStoredObject, storeObject, uploadReportHtmlToS3, type StorageKind } from './reportStorage'
+import { findStoredStudyObject, readStoredObject, storeObject, type StorageKind } from './reportStorage'
 import { bridgeStudyS3KeyCandidates, studyViewerStorageKind } from './lib/studyStorage'
 import { startStudyArchiveMaintenance, storeOriginalStudy } from './services/studyArchive.service'
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
-import { aiServiceTypeForServiceName, aiServiceTypeForServiceType, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
+import { aiServiceTypeForServiceType, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
 
 dotenv.config({
   path: process.env.LOAD_STORAGE_ENV === 'true' ? ['.env', '.env.storage'] : ['.env'],
@@ -237,6 +238,7 @@ function requireDeploymentFeature(feature: 'billing' | 'calling' | 'notification
   }
 }
 
+app.use('/api/v1/whatsapp/wati/webhook', captureWatiWebhookSecret)
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') ?? true }))
 app.use(compression({ threshold: 1024 }))
 app.use('/api', (req, res, next) => {
@@ -1688,68 +1690,6 @@ app.post('/api/provider/managers/:managerUserId/reset-password', requireAuth, re
   res.json({ user, temporaryPassword })
 })
 
-app.post('/api/provider/radiologists', requireAuth, requireProviderStaff, async (req, res) => {
-  const body = z.object({
-    fullName: z.string().min(2),
-    email: z.string().email(),
-    phone: z.string().optional().default(''),
-    qualification: z.string().min(2),
-    medicalRegistrationNumber: z.string().min(2),
-    organisationName: z.string().min(2),
-    signatureImageUrl: z.string().optional().default(''),
-    signatureImageData: z.string().optional().default(''),
-    documentData: z.string().optional().default(''),
-    documentName: z.string().optional().default(''),
-  }).parse(req.body)
-  const providerCode = req.user!.providerCode!
-  const { signatureImageData, documentData, documentName, ...profileInput } = body
-  let signatureImageUrl = profileInput.signatureImageUrl
-  let documentUrl = ''
-  try {
-    signatureImageUrl = signatureImageData ? await saveSignatureImage(signatureImageData) : profileInput.signatureImageUrl
-    documentUrl = documentData ? await saveRadiologistDocument(documentData, documentName) : ''
-  } catch (error) {
-    return res.status(400).json({ message: error instanceof Error ? error.message : 'Invalid radiologist upload' })
-  }
-
-  const temporaryPassword = generatePortalPassword()
-  const passwordHash = await bcrypt.hash(temporaryPassword, 12)
-  const result = await prisma.$transaction(async (tx) => {
-    const user = await tx.user.create({
-      data: {
-        userId: userIdForEmail(body.email),
-        email: body.email,
-        name: body.fullName,
-        passwordHash,
-        lastGeneratedPassword: null,
-        role: 'RADIOLOGIST',
-        clientId: null,
-        providerCode,
-      },
-      select: portalUserSelect,
-    })
-    const profile = await tx.radiologistProfile.create({
-      data: {
-        ...profileInput,
-        signatureImageUrl,
-        documentUrl,
-        documentName: documentUrl ? sanitizeFileName(documentName || 'radiologist-document') : null,
-        userId: user.id,
-        clientId: null,
-        providerCode,
-        managerUserId: req.user!.role === 'PROVIDER_MANAGER' ? req.user!.sub : null,
-      },
-      include: { user: { select: portalUserSelect } },
-    })
-    await tx.auditLog.create({
-      data: { actorUserId: req.user!.sub, action: 'PROVIDER_RADIOLOGIST_CREATED', metadata: { providerCode, email: body.email } },
-    })
-    return { profile, user }
-  })
-
-  res.status(201).json({ ...result, temporaryPassword })
-})
-
 app.post('/api/provider/radiologists/:radiologistId/reset-password', requireAuth, requireProviderStaff, async (req, res) => {
   const existing = await prisma.radiologistProfile.findFirstOrThrow({
     where: { id: String(req.params.radiologistId), providerCode: req.user!.providerCode },
@@ -3119,6 +3059,7 @@ app.post('/api/client/processing-jobs/:jobId/mark-urgent', requireAuth, requireC
       metadata: { processingJobId: job.id, uploadName: job.uploadName, previousPriority: job.priority ?? 'REGULAR' },
     },
   })
+  await enqueueTelegramStudy(prisma, updated).catch(() => console.warn('Urgent Telegram notification could not be queued.'));
   res.json(formatProcessingStatus(updated))
 })
 
@@ -3816,73 +3757,6 @@ app.post('/api/client/reports/:reportId/call-bookings', requireAuth, requireWork
   res.status(201).json(booking)
 })
 
-app.post('/api/client/radiologists', requireAuth, requireClientUser, async (req, res) => {
-  const body = z.object({
-    fullName: z.string().min(2),
-    email: z.string().email(),
-    phone: z.string().optional().default(''),
-    qualification: z.string().min(2),
-    medicalRegistrationNumber: z.string().min(2),
-    organisationName: z.string().min(2),
-    signatureImageUrl: z.string().optional().default(''),
-    signatureImageData: z.string().optional().default(''),
-    documentData: z.string().optional().default(''),
-    documentName: z.string().optional().default(''),
-  }).parse(req.body)
-  const managementClient = await prisma.client.findUniqueOrThrow({
-    where: { id: req.user!.clientId! },
-    select: { id: true, kind: true, name: true },
-  })
-  if (managementClient.kind !== 'GROUP') {
-    return res.status(403).json({ message: 'Only Marengo Group Admin can create radiologist logins' })
-  }
-  const { signatureImageData, documentData, documentName, ...profileInput } = body
-  let signatureImageUrl = profileInput.signatureImageUrl
-  let documentUrl = ''
-  try {
-    signatureImageUrl = signatureImageData ? await saveSignatureImage(signatureImageData) : profileInput.signatureImageUrl
-    documentUrl = documentData ? await saveRadiologistDocument(documentData, documentName) : ''
-  } catch (error) {
-    return res.status(400).json({ message: error instanceof Error ? error.message : 'Invalid radiologist upload' })
-  }
-
-  const temporaryPassword = generatePortalPassword()
-  const passwordHash = await bcrypt.hash(temporaryPassword, 12)
-  const result = await prisma.$transaction(async (tx) => {
-    const user = await tx.user.create({
-      data: {
-        userId: userIdForEmail(body.email),
-        email: body.email,
-        name: body.fullName,
-        passwordHash,
-        lastGeneratedPassword: null,
-        role: 'RADIOLOGIST',
-        clientId: managementClient.id,
-      },
-      select: portalUserSelect,
-    })
-    const profile = await tx.radiologistProfile.create({
-      data: {
-        ...profileInput,
-        signatureImageUrl,
-        documentUrl,
-        documentName: documentUrl ? sanitizeFileName(documentName || 'radiologist-document') : null,
-        userId: user.id,
-        clientId: managementClient.id,
-        providerCode: null,
-        organisationName: managementClient.name,
-      },
-      include: { user: { select: portalUserSelect } },
-    })
-    await tx.auditLog.create({
-      data: { clientId: managementClient.id, actorUserId: req.user!.sub, action: 'GROUP_RADIOLOGIST_CREATED', metadata: { email: body.email } },
-    })
-    return { profile, user }
-  })
-
-  res.status(201).json({ ...result, temporaryPassword })
-})
-
 app.patch('/api/client/radiologists/:radiologistId', requireAuth, requireClientUser, async (req, res) => {
   const body = z.object({
     fullName: z.string().min(2),
@@ -4295,80 +4169,6 @@ app.get('/api/app/jobs/:jobId/report', requireAuth, async (req, res) => {
   if (!job) return res.status(404).json({ message: 'Job not found' })
   if (!['completed', 'sent_to_radiologist', 'sent_to_pacs', 'awaiting_radiologist', 'submitted_to_outsourced_teleradiology'].includes(job.status) || !job.reportHtml) return res.status(409).json({ message: 'Report is not ready yet', status: job.status })
   res.type('html').send(job.reportHtml)
-})
-
-app.post('/api/dicom/mock-receive', requireAuth, requireSuperAdmin, async (req, res) => {
-  const body = z.object({
-    receivingPort: z.number().int(),
-    aeTitle: z.string(),
-    studyUid: z.string(),
-    modality: z.enum(['DX', 'CR', 'CT']),
-  }).parse(req.body)
-
-  const validation = await validatePacsProcessing(body.receivingPort, normalizeAeTitle(body.aeTitle))
-  const config = 'config' in validation ? validation.config : undefined
-  if (!validation.allowed || !config) return res.status(403).json(validation)
-
-  const study = await prisma.study.upsert({
-    where: { studyUid: body.studyUid },
-    update: {
-      clientId: config.clientId,
-      modality: body.modality,
-      status: 'SUCCESS',
-      aiResponse: { impression: 'AI response pending integration with the configured inference service.' },
-      reportJson: { returnFormat: config.returnFormat },
-    },
-    create: {
-      clientId: config.clientId,
-      studyUid: body.studyUid,
-      modality: body.modality,
-      status: 'SUCCESS',
-      aiResponse: { impression: 'AI response pending integration with the configured inference service.' },
-      reportJson: { returnFormat: config.returnFormat },
-    },
-  })
-
-  await prisma.job.create({
-    data: { clientId: config.clientId, studyId: study.id, serviceName: config.clientService.service.name, status: 'SUCCESS', attempts: 1, latencyMs: 41000 },
-  })
-  if (!isTeleradiologyWorkflow(config.clientService.workflowType)) {
-    await prisma.clientService.update({
-      where: { id: config.clientServiceId },
-      data: { usedCredits: { increment: 1 } },
-    })
-  }
-  const reportSetting = await prisma.reportFormatSetting.findFirst({
-    where: { clientId: config.clientId, serviceName: config.clientService.service.name },
-  })
-
-  const teleradiologyProviderCode = isTeleradiologyWorkflow(config.clientService.workflowType)
-    ? config.teleradiologyProviderCode ?? process.env.TELERADIOLOGY_DEFAULT_PROVIDER ?? 'RENEWIST'
-    : null
-  const requiresRadiologistReview = Boolean(reportSetting?.radiologistReviewEnabled || teleradiologyProviderCode)
-  if (requiresRadiologistReview) {
-    const activeRadiologistCount = await prisma.radiologistProfile.count({ where: teleradiologyProviderCode ? { providerCode: teleradiologyProviderCode, active: true } : { clientId: config.clientId, active: true } })
-    const reportId = await nextReportId({ clientCode: config.client.code, serviceCode: config.clientService.service.code })
-    const review = await prisma.reportReview.create({
-      data: {
-        id: reportId,
-        clientId: config.clientId,
-        studyId: study.id,
-        radiologistId: null,
-        serviceName: config.clientService.service.name,
-        studyUid: body.studyUid,
-        modality: body.modality,
-        status: activeRadiologistCount ? 'PENDING' : 'FAILED',
-        outputFormat: reportSetting.outputFormat,
-        aiReportJson: { ...(study.aiResponse as Record<string, unknown> ?? {}), workflow: { providerCode: teleradiologyProviderCode, radiologistReviewEnabled: requiresRadiologistReview } },
-        editedReportJson: study.aiResponse ?? {},
-      },
-    })
-    await prisma.reportAuditLog.create({
-      data: { reportId: review.id, action: activeRadiologistCount ? 'REPORT_PARKED_FOR_REVIEW' : 'NO_RADIOLOGIST_AVAILABLE', metadata: { studyUid: body.studyUid, activeRadiologistCount, providerCode: teleradiologyProviderCode } },
-    })
-  }
-
-  res.status(201).json({ study, message: 'DICOM processing completed and credit deducted.' })
 })
 
 app.post('/api/admin/jobs/:jobId/retry', requireAuth, requireSuperAdmin, async (req, res) => {
@@ -4834,23 +4634,6 @@ async function getDemoUploadStatus(clientId: string) {
     }
   }
   return { demoMode: true, allowed: true, used, limit }
-}
-
-function isFinalMammographyPollStatus(status: string) {
-  return /^(complete|completed|done|success|succeeded|finished|failed|failure|error|cancelled|canceled)$/i.test(status)
-}
-
-function getMammographyUpstreamJobId(value: unknown): string | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const object = value as Record<string, unknown>
-  const direct = object.upstreamJobId ?? object.job_id ?? object.jobId
-  if (typeof direct === 'string' && direct.trim()) return direct.trim()
-  const response = object.upstreamResponse
-  if (response && typeof response === 'object' && !Array.isArray(response)) {
-    const responseJobId = (response as Record<string, unknown>).job_id ?? (response as Record<string, unknown>).jobId
-    if (typeof responseJobId === 'string' && responseJobId.trim()) return responseJobId.trim()
-  }
-  return getMammographyUpstreamJobId(object.previousStatus)
 }
 
 async function startAllDicomReceivers() {
@@ -5750,19 +5533,6 @@ function buildRenewistUnavailableAiReportJson(input: {
   }
 }
 
-function rawRenewistAiReportJson(
-  upstreamResults?: Array<{ ok: boolean; json?: unknown; name?: string; sourceName?: string; uploadName?: string }>,
-  fallbackSections?: Record<string, unknown>,
-  modality = 'X-Ray',
-) {
-  const raw = (upstreamResults ?? [])
-    .filter((item) => item.ok && item.json !== undefined && item.json !== null)
-    .map((item) => item.json)
-  if (raw.length === 1) return ensureRenewistAiReportAvailable({ ...(raw[0] && typeof raw[0] === 'object' && !Array.isArray(raw[0]) ? raw[0] as Record<string, unknown> : { result: raw[0] }), raw_ai_report: raw[0] }, true, modality)
-  if (raw.length > 1) return ensureRenewistAiReportAvailable({ reports: raw, raw_ai_reports: raw }, true, modality)
-  return ensureRenewistAiReportAvailable(fallbackSections ?? {}, Boolean(fallbackSections && Object.keys(fallbackSections).length), modality)
-}
-
 function rawRenewistReportJsonFromStoredReport(value: unknown, modality = 'X-Ray') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value ?? {}
   const record = value as Record<string, unknown>
@@ -5807,67 +5577,6 @@ function ensureRenewistAiReportAvailable(value: unknown, available: boolean, mod
   const findings = text || fallback.findings
   const impression = text || fallback.impression
   return { ai_report_available: available, modality, findings, observations: findings, impression, conclusion: impression, report: { examination: modality, findings, impression, raw: value } }
-}
-
-function buildRenewistAiReportJson(input: {
-  serviceName: string
-  serviceType: string
-  dicomMetadata: DicomMetadata
-  sections?: Record<string, unknown>
-  upstreamResults?: Array<{ name: string; sourceName?: string; uploadName?: string; ok: boolean; status?: number; latencyMs?: number; json?: unknown; error?: string }>
-  rawAiJson?: unknown
-}): RenewistAiReportPayload {
-  const modality = renewistModalityForStudy(input)
-  const successfulRawResponses = (input.upstreamResults ?? [])
-    .filter((item) => item.ok && item.json)
-    .map((item) => item.json)
-  const findings = cleanRenewistReportText(
-    input.sections?.findings
-    ?? input.sections?.Findings
-    ?? findNestedReportText(successfulRawResponses, ['findings', 'finding', 'observations', 'observation']),
-  )
-  const impression = cleanRenewistReportText(
-    input.sections?.impression
-    ?? input.sections?.Impression
-    ?? findNestedReportText(successfulRawResponses, ['impression', 'summary', 'conclusion', 'diagnosis']),
-  )
-
-  const fallback = renewistFallbackReportText()
-  const outboundFindings = findings || fallback.findings
-  const outboundImpression = impression || fallback.impression
-  const aiReportAvailable = Boolean(successfulRawResponses.length && (findings || impression))
-
-  if (!successfulRawResponses.length && !findings && !impression) {
-    return {
-      modality,
-      ai_report_available: false,
-      report: {
-        findings: outboundFindings,
-        impression: outboundImpression,
-      },
-      findings: outboundFindings,
-      observations: outboundFindings,
-      impression: outboundImpression,
-      conclusion: outboundImpression,
-      raw_ai_json: input.rawAiJson ?? input.sections ?? null,
-      upstream_raw_json: successfulRawResponses,
-    }
-  }
-
-  return {
-    modality,
-    ai_report_available: aiReportAvailable,
-    report: {
-      findings: outboundFindings,
-      impression: outboundImpression,
-    },
-    findings: outboundFindings,
-    observations: outboundFindings,
-    impression: outboundImpression,
-    conclusion: outboundImpression,
-    raw_ai_json: input.rawAiJson ?? input.sections ?? null,
-    upstream_raw_json: successfulRawResponses,
-  }
 }
 
 function renewistFallbackReportText() {
@@ -6438,11 +6147,6 @@ async function getAccessibleProcessingJob(jobId: string, user: { role: string; c
   if (user.role === 'SUPER_ADMIN') return job
   if (user.clientId && job.clientId === user.clientId) return job
   return null
-}
-
-async function getLatestProcessingPriority(jobId: string, fallback?: string | null) {
-  const latest = await prisma.processingJob.findUnique({ where: { id: jobId }, select: { priority: true } })
-  return latest?.priority ?? fallback ?? 'REGULAR'
 }
 
 function formatProcessingStatus(job: {

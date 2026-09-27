@@ -1,3 +1,5 @@
+import { watiConfigured } from './wati';
+import { telegramCallbackConfig } from './telegramPolicy';
 import crypto from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { scopedShareToken, verifyShareScope } from './shareScope';
@@ -16,7 +18,7 @@ export function matchingPhysician(recipients: Physician[], names: string[], clie
   const keys = [...new Set(names.map(physicianNameKey).filter(Boolean))];
   // Conflicting metadata or duplicate configured names require an administrator to resolve them.
   if (keys.length !== 1) return null;
-  const matches = recipients.filter(person => person.role === PHYSICIAN_ROLE && person.active && person.phoneE164
+  const matches = recipients.filter(person => person.role === PHYSICIAN_ROLE && person.active && /^\+[1-9]\d{7,14}$/.test(person.phoneE164 ?? '')
     && person.verificationStatus === 'VERIFIED' && ['OPTED_IN', 'APPROVED', 'ACTIVE'].includes(person.consentStatus)
     && (!person.clientId || person.clientId === clientId) && physicianNameKey(person.name) === keys[0]);
   return matches.length === 1 ? matches[0] : null;
@@ -37,24 +39,27 @@ export async function reportPhysicianNames(db: PrismaClient, report: { clientId:
   return [...bridges.map(study => study.referringPhysician ?? ''), ...metadataPhysicians(report.editedReportJson), ...metadataPhysicians(report.aiReportJson)].filter(Boolean);
 }
 
-export function reportReadyTemplate(to: string, url: string, outboxId: string, name: string, language: string) {
+export type PhysicianTemplateFields = { name: string; age: string; study: string };
+
+export function reportReadyTemplate(to: string, url: string, outboxId: string, name: string, language: string, fields: PhysicianTemplateFields = { name: 'Not available', age: 'Not available', study: 'Not available' }) {
   return {
     messaging_product: 'whatsapp', recipient_type: 'individual', to: to.replace(/^\+/, ''), type: 'template',
     template: { name, language: { code: language }, components: [
-      { type: 'body', parameters: [{ type: 'text', text: url }] },
+      { type: 'body', parameters: [fields.name, fields.age, fields.study, url].map(text => ({ type: 'text', text })) },
       { type: 'button', sub_type: 'quick_reply', index: '0', parameters: [{ type: 'payload', payload: `physician_call:${outboxId}` }] },
     ] },
   };
 }
 
 export function physicianWhatsappReady(env: NodeJS.ProcessEnv = process.env) {
+  if (env.WHATSAPP_PROVIDER === 'wati') return watiConfigured(env) && Boolean(env.PORTAL_BASE_URL?.trim());
   return env.WHATSAPP_CLOUD_API_ENABLED === 'true' && ['WHATSAPP_CLOUD_API_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_APP_SECRET', 'WHATSAPP_REPORT_READY_TEMPLATE_NAME', 'PORTAL_BASE_URL'].every(key => Boolean(env[key]?.trim()));
 }
 
 // Reconciliation covers every report approval path, including external provider returns.
 // Existing reports from before a recipient was configured are not broadcast retroactively.
 export async function enqueuePhysicianReports(db: PrismaClient) {
-  const recipients = await db.notificationRecipient.findMany({ where: { role: PHYSICIAN_ROLE, active: true } });
+  const recipients = (await db.notificationRecipient.findMany({ where: { role: PHYSICIAN_ROLE, active: true, verificationStatus: 'VERIFIED', consentStatus: { in: ['OPTED_IN', 'APPROVED', 'ACTIVE'] }, phoneE164: { not: null } } })).filter(person => /^\+[1-9]\d{7,14}$/.test(person.phoneE164 ?? '') && person.verificationStatus === 'VERIFIED' && ['OPTED_IN', 'APPROVED', 'ACTIVE'].includes(person.consentStatus));
   if (!recipients.length) return;
   const since = new Date(Math.min(...recipients.map(person => person.createdAt.getTime())));
   let cursor: string | undefined;
@@ -64,10 +69,10 @@ export async function enqueuePhysicianReports(db: PrismaClient) {
       orderBy: { id: 'asc' }, take: 100, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
     for (const report of reports) {
-      const recipient = matchingPhysician(recipients, await reportPhysicianNames(db, report), report.clientId);
-      if (!recipient || (report.approvedAt ?? report.createdAt) < recipient.createdAt) continue;
       const idempotencyKey = `physician-report:${report.id}`;
       if (await db.notificationOutbox.findUnique({ where: { idempotencyKey }, select: { id: true } })) continue;
+      const recipient = matchingPhysician(recipients, await reportPhysicianNames(db, report), report.clientId);
+      if (!recipient || (report.approvedAt ?? report.createdAt) < recipient.createdAt) continue;
       await db.$transaction(async tx => {
         const existing = await tx.reportPublicShare.findUnique({ where: { reportId: report.id } });
         // Respect expired/revoked existing links rather than silently re-enabling access.
@@ -123,6 +128,14 @@ export async function requestPhysicianCall(db: PrismaClient, from: string, outbo
         idempotencyKey: `physician-call:${outboxId}`,
       },
     });
+    const telegram = telegramCallbackConfig();
+    if (telegram.enabled) await tx.notificationOutbox.upsert({
+      where: { idempotencyKey: 'telegram:physician-call:' + outboxId }, update: {}, create: {
+        eventType: 'TELEGRAM_PHYSICIAN_CALLBACK', aggregateType: 'NotificationEvent', aggregateId: event.id,
+        idempotencyKey: 'telegram:physician-call:' + outboxId,
+        payload: { clientId: report.clientId, chatId: telegram.chatId, reportId: report.id },
+      },
+    });
     const users = await tx.user.findMany({ where: { active: true, OR: [{ role: 'SUPER_ADMIN' }, ...(report.radiologist?.userId ? [{ id: report.radiologist.userId, role: 'RADIOLOGIST' as const }] : [])] }, select: { id: true, role: true } });
     await tx.notificationDelivery.createMany({ skipDuplicates: true, data: users.map(user => ({
       eventId: event.id, clientId: report.clientId, recipientUserId: user.id, recipientOrganization: user.role === 'SUPER_ADMIN' ? 'DECTROCEL' : 'RADIOLOGIST',
@@ -130,4 +143,29 @@ export async function requestPhysicianCall(db: PrismaClient, from: string, outbo
     })) });
   });
   return true;
+}
+
+function metadataText(value: unknown, keys: string[], depth = 0): string | undefined {
+  if (!value || typeof value !== 'object' || depth > 5) return;
+  for (const [key, item] of Object.entries(value)) {
+    if (keys.includes(key.toLowerCase().replace(/[^a-z0-9]/g, '')) && (typeof item === 'string' || typeof item === 'number') && String(item).trim()) return String(item).trim();
+  }
+  for (const item of Object.values(value)) { const result = metadataText(item, keys, depth + 1); if (result) return result; }
+}
+
+export function physicianTemplateFields(report: { patientName?: string | null; serviceName?: string; aiReportJson?: unknown; editedReportJson?: unknown }, bridge?: { patientName?: string | null; patientAge?: string | null; studyDescription?: string | null }): PhysicianTemplateFields {
+  const metadata = (keys: string[]) => metadataText(report.editedReportJson, keys) || metadataText(report.aiReportJson, keys);
+  const rawAge = bridge?.patientAge?.trim() || metadata(['patientage','age','00101010']) || '';
+  const dicomAge = /^(\d{3})([DWMY])$/i.exec(rawAge);
+  const age = dicomAge ? Number(dicomAge[1]) + ' ' + ({ D: 'days', W: 'weeks', M: 'months', Y: 'years' } as Record<string,string>)[dicomAge[2].toUpperCase()] : rawAge;
+  return {
+    name: (report.patientName?.trim() || bridge?.patientName?.trim() || 'Not available').replace(/\^/g, ' '),
+    age: age || 'Not available',
+    study: bridge?.studyDescription?.trim() || metadata(['studydescription','00081030']) || report.serviceName?.trim() || 'Not available',
+  };
+}
+
+export async function physicianDeliveryFields(db: PrismaClient, report: Parameters<typeof physicianTemplateFields>[0] & { clientId: string; studyUid: string | null }) {
+  const bridges = report.studyUid ? await db.availableBridgeStudy.findMany({ where: { clientId: report.clientId, studyInstanceUid: report.studyUid }, select: { patientName: true, patientAge: true, studyDescription: true }, orderBy: { updatedAt: 'desc' }, take: 1 }) : [];
+  return physicianTemplateFields(report, bridges[0]);
 }
