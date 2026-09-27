@@ -10611,13 +10611,19 @@ function MarengoUnifiedWorklist({
   function priorityBadge(study: BridgeStudy, urgent: boolean, reported: boolean, mobile = false) {
     const className = `${mobile ? "pw-mobile-priority" : "pw-priority"} ${urgent ? "urgent" : "routine"}`;
     if (reported || !permissions.submit) return <span className={className} title={reported ? "Reported study priority is read-only" : undefined}>{urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}</span>;
-    return <select className={className} value={urgent ? "URGENT" : "REGULAR"}
+    const nextLabel = urgent ? "Routine" : "Urgent";
+    return <button type="button" className={className}
       disabled={prioritySaving.has(study.id)} aria-busy={prioritySaving.has(study.id)}
-      aria-label={`Priority for ${study.patientName || study.id}`} title="Select study priority"
-      onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
-      onChange={event => { const selected = event.target.value; if (selected === "URGENT" || selected === "REGULAR") void changeStudyPriority(study, selected); }}>
-      <option value="REGULAR">Routine</option><option value="URGENT">Urgent</option>
-    </select>;
+      aria-label={`Mark ${study.patientName || study.id} ${nextLabel}`} title={`Mark this study ${nextLabel}`}
+      onDoubleClick={event => event.stopPropagation()}
+      onClick={event => {
+        event.stopPropagation();
+        // A double-click must not undo the first click after a fast save.
+        if (event.detail > 1) return;
+        void changeStudyPriority(study, urgent ? "REGULAR" : "URGENT");
+      }}>
+      {prioritySaving.has(study.id) ? <LoaderCircle size={12} className="pw-spinning"/> : urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}
+    </button>;
   }
   function beginSend(study: BridgeStudy) {
     setFeedback(null);
