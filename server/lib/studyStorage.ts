@@ -2,6 +2,15 @@ import type { StorageKind } from '../reportStorage'
 
 // Shared by the external viewer import and QuickView so both find a study ZIP in S3 the same way.
 
+/** Bucket kind an original study ZIP is stored under, by processing service type. */
+export function studyStorageKind(serviceType: string): StorageKind {
+  if (serviceType.startsWith('ct')) return 'ct-studies'
+  if (serviceType.startsWith('mri') || serviceType === 'mrcp' || serviceType.startsWith('mra')) return 'mri-studies'
+  if (serviceType === 'mammography') return 'mammography-studies'
+  if (serviceType.includes('xray')) return 'xray-studies'
+  return 'original-studies'
+}
+
 export function studyViewerStorageKind(modalities: string[] | null | undefined): Extract<StorageKind, 'ct-studies' | 'mri-studies' | 'xray-studies' | 'mammography-studies'> {
   const values = new Set((modalities ?? []).map(value => value.toUpperCase()))
   if (values.has('CT')) return 'ct-studies'
