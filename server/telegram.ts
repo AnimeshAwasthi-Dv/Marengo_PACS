@@ -72,6 +72,8 @@ export async function processTelegramOutbox({ config = telegramConfig(), db = pr
 }
 
 export function startTelegramWorker() {
+  const urgentConfig = telegramUrgentConfig();
+  if (urgentConfig.enabled && urgentConfig.missing.length) console.warn('Urgent Telegram configuration incomplete:', urgentConfig.missing.join(', '), '(check TELEGRAM_URGENT_BOT_TOKEN and TELEGRAM_URGENT_CHAT_ID).');
   const tick = () => void processTelegramOutbox().catch(() => console.warn('Telegram queue unavailable; delivery will retry.'));
   tick();
   setInterval(tick, 10000).unref();

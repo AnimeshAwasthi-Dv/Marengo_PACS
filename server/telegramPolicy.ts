@@ -124,11 +124,11 @@ export async function sendTelegram(config: TelegramConfig, text: string, url: st
 /** Separate operational destinations; center scope is inherited from the study integration. */
 export function telegramUrgentConfig(env: NodeJS.ProcessEnv = process.env) {
   return telegramConfig({ ...env, TELEGRAM_ENABLED: env.TELEGRAM_URGENT_ENABLED,
-    TELEGRAM_BOT_TOKEN: env.TELEGRAM_URGENT_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN,
+    TELEGRAM_BOT_TOKEN: env.TELEGRAM_URGENT_BOT_TOKEN,
     TELEGRAM_CHAT_ID: env.TELEGRAM_URGENT_CHAT_ID });
 }
 export function telegramCallbackConfig(env: NodeJS.ProcessEnv = process.env) {
   return telegramConfig({ ...env, TELEGRAM_ENABLED: env.TELEGRAM_CALLBACK_ENABLED,
-    TELEGRAM_BOT_TOKEN: env.TELEGRAM_CALLBACK_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN,
+    TELEGRAM_BOT_TOKEN: env.TELEGRAM_CALLBACK_BOT_TOKEN,
     TELEGRAM_CHAT_ID: env.TELEGRAM_CALLBACK_CHAT_ID });
 }

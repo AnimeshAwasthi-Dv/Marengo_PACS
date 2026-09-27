@@ -5650,7 +5650,7 @@ function ClientStudySyncView({
         <button
           className="available-study-send-button inline-flex items-center gap-1.5 rounded-md bg-sky-600 px-2.5 py-2 text-xs font-bold text-white disabled:opacity-50"
           disabled={!canSend || sendingId === study.id}
-          onClick={() => { setSendStudy(study); setSendPriority("REGULAR"); }}
+          onClick={() => { setSendStudy(study); setSendPriority(worklistPriority(study.priority ?? study.processingJob?.priority)); }}
           title="Send for reporting"
           type="button"
         >
@@ -10532,7 +10532,7 @@ function MarengoUnifiedWorklist({
   const indicationPrefilledFor = useRef("");
   const drawerStudyId = (sendStudy ?? detailStudy)?.id ?? "";
   const drawerRowStudy = drawerStudyId ? rows.find(({ study }) => study.id === drawerStudyId)?.study : undefined;
-  const drawerDetailKey = `${drawerStudyId}:${drawerRowStudy?.updatedAt ?? ""}:${drawerRowStudy?.processingJob?.status ?? ""}`;
+  const drawerDetailKey = `${drawerStudyId}:${drawerRowStudy?.updatedAt ?? ""}:${drawerRowStudy?.processingJob?.status ?? ""}:${drawerRowStudy?.priority ?? ""}`;
   const drawerDetailReady = !drawerStudyId || studyDetail?.id === drawerStudyId || Boolean(studyDetailError) || Array.isArray((drawerRowStudy ?? sendStudy ?? detailStudy)?.attachments);
   useEffect(() => {
     if (!drawerStudyId || !["SUPER_ADMIN", "CLIENT_USER"].includes(user.role)) return;
@@ -10591,6 +10591,14 @@ function MarengoUnifiedWorklist({
       const result = await api<{ priority: "URGENT" | "REGULAR"; message: string }>(`/api/workspace/studies/${encodeURIComponent(study.id)}/priority`, token, { method: "POST", body: JSON.stringify({ priority }) });
       priorityRevision.current += 1;
       setWorklistStudies(previous => previous.map(item => item.id === study.id ? { ...item, priority: result.priority, processingJob: item.processingJob ? { ...item.processingJob, priority: result.priority } : item.processingJob } : item));
+      const updatePriority = (item: BridgeStudy | null): BridgeStudy | null => item?.id === study.id
+        ? { ...item, priority: result.priority, processingJob: item.processingJob ? { ...item.processingJob, priority: result.priority } : item.processingJob } : item;
+      setStudyDetail(updatePriority);
+      setDetailStudy(updatePriority);
+      setSendStudy(updatePriority);
+      if (sendStudy?.id === study.id) setPriority(result.priority);
+      // Refresh dashboard jobs as well as the worklist, without treating a refresh failure as a failed save.
+      void reload().catch(() => {});
       setFeedback({ text: result.message, error: false });
     } catch (error) {
       setFeedback({ text: error instanceof Error ? error.message : "Unable to update priority. Please try again.", error: true });
@@ -10603,8 +10611,13 @@ function MarengoUnifiedWorklist({
   function priorityBadge(study: BridgeStudy, urgent: boolean, reported: boolean, mobile = false) {
     const className = `${mobile ? "pw-mobile-priority" : "pw-priority"} ${urgent ? "urgent" : "routine"}`;
     if (reported || !permissions.submit) return <span className={className} title={reported ? "Reported study priority is read-only" : undefined}>{urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}</span>;
-    const nextLabel = urgent ? "Routine" : "Urgent";
-    return <button className={className} disabled={prioritySaving.has(study.id)} aria-busy={prioritySaving.has(study.id)} aria-label={`Mark ${study.patientName || study.id} ${nextLabel}`} title={`Mark this study ${nextLabel}`} onDoubleClick={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); void changeStudyPriority(study, urgent ? "REGULAR" : "URGENT"); }}>{prioritySaving.has(study.id) ? <LoaderCircle size={12} className="pw-spinning"/> : urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}</button>;
+    return <select className={className} value={urgent ? "URGENT" : "REGULAR"}
+      disabled={prioritySaving.has(study.id)} aria-busy={prioritySaving.has(study.id)}
+      aria-label={`Priority for ${study.patientName || study.id}`} title="Select study priority"
+      onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
+      onChange={event => { const selected = event.target.value; if (selected === "URGENT" || selected === "REGULAR") void changeStudyPriority(study, selected); }}>
+      <option value="REGULAR">Routine</option><option value="URGENT">Urgent</option>
+    </select>;
   }
   function beginSend(study: BridgeStudy) {
     setFeedback(null);
