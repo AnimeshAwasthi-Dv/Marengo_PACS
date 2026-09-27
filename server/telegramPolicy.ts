@@ -108,15 +108,27 @@ export class TelegramDeliveryError extends Error {
   constructor(public code: number, public retryAfter = 0) { super(`Telegram delivery failed (code ${code})`); }
 }
 
-export async function sendTelegram(config: TelegramConfig, text: string, url: string, transport: typeof fetch = fetch) {
+export async function sendTelegram(config: TelegramConfig, text: string, url: string, transport: typeof fetch = fetch, buttonLabel = 'Study status & TAT') {
   let response: Response;
   try {
     response = await transport(`https://api.telegram.org/bot${config.token}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15000),
-      body: JSON.stringify({ chat_id: config.chatId, text, protect_content: true, link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: [[{ text: 'Study status & TAT', url }]] } }),
+      body: JSON.stringify({ chat_id: config.chatId, text, protect_content: true, link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: [[{ text: buttonLabel, url }]] } }),
     });
   } catch { throw new TelegramDeliveryError(0); }
   const body = await response.json().catch(() => ({})) as { ok?: boolean; error_code?: number; parameters?: { retry_after?: number }; result?: { message_id?: number } };
   if (!response.ok || !body.ok || !body.result?.message_id) throw new TelegramDeliveryError(body.error_code ?? response.status, Number(body.parameters?.retry_after) || 0);
   return body.result.message_id;
+}
+
+/** Separate operational destinations; center scope is inherited from the study integration. */
+export function telegramUrgentConfig(env: NodeJS.ProcessEnv = process.env) {
+  return telegramConfig({ ...env, TELEGRAM_ENABLED: env.TELEGRAM_URGENT_ENABLED,
+    TELEGRAM_BOT_TOKEN: env.TELEGRAM_URGENT_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID: env.TELEGRAM_URGENT_CHAT_ID });
+}
+export function telegramCallbackConfig(env: NodeJS.ProcessEnv = process.env) {
+  return telegramConfig({ ...env, TELEGRAM_ENABLED: env.TELEGRAM_CALLBACK_ENABLED,
+    TELEGRAM_BOT_TOKEN: env.TELEGRAM_CALLBACK_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID: env.TELEGRAM_CALLBACK_CHAT_ID });
 }

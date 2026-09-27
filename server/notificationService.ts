@@ -62,38 +62,6 @@ export async function createDomainNotification(db: DbClient, input: DomainNotifi
       })
     }
 
-    const whatsappRecipients = await resolveWhitelistedPhones(tx, input)
-    if (whatsappRecipients.length) {
-      await tx.notificationOutbox.upsert({
-        where: { idempotencyKey: `${input.idempotencyKey}:whatsapp` },
-        update: {},
-        create: {
-          eventType: input.eventType,
-          aggregateType: input.aggregateType,
-          aggregateId: input.aggregateId,
-          idempotencyKey: `${input.idempotencyKey}:whatsapp`,
-          payload: jsonObject({
-            category: input.category,
-            clientId: input.clientId ?? null,
-            message: input.message,
-            to: whatsappRecipients.map((item) => item.phoneE164),
-            notificationEventId: event.id,
-          }),
-        },
-      })
-      await tx.notificationDelivery.createMany({
-        data: whatsappRecipients.map((recipient) => ({
-          eventId: event.id,
-          clientId: input.clientId ?? null,
-          recipientUserId: recipient.userId,
-          recipientOrganization: recipient.organization,
-          recipientKey: `phone:${recipient.phoneE164}`,
-          channel: 'WHATSAPP',
-          status: 'QUEUED',
-        })),
-        skipDuplicates: true,
-      })
-    }
     return event
   }
   return '$transaction' in db ? db.$transaction(execute) : execute(db)
@@ -115,25 +83,6 @@ async function resolvePortalRecipients(db: DbClient, input: DomainNotificationIn
     userId: user.id,
     organization: user.role === 'SUPER_ADMIN' ? 'DECTROCEL' : user.providerCode || (user.role === 'RADIOLOGIST' ? 'RADIOLOGIST' : 'CLIENT'),
   }))
-}
-
-async function resolveWhitelistedPhones(db: DbClient, input: DomainNotificationInput) {
-  const organizations = input.organizations.filter((item) => item !== 'CLIENT' && item !== 'RADIOLOGIST')
-  return db.notificationRecipient.findMany({
-    where: {
-      active: true,
-      role: { not: 'REFERRING_PHYSICIAN' },
-      verificationStatus: 'VERIFIED',
-      consentStatus: { in: ['OPTED_IN', 'APPROVED', 'ACTIVE'] },
-      phoneE164: { not: null },
-      OR: [
-        ...(organizations.length ? [{ organization: { in: organizations } }] : []),
-        ...(input.clientId ? [{ clientId: input.clientId }] : []),
-      ],
-      AND: [{ OR: [{ notificationCategories: { has: input.category } }, { notificationCategories: { has: 'ALL' } }] }],
-    },
-    select: { phoneE164: true, userId: true, organization: true },
-  }).then((rows) => rows.filter((row): row is { phoneE164: string; userId: string | null; organization: string } => Boolean(row.phoneE164)))
 }
 
 export function maskPatientReference(value?: string | null) {

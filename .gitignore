@@ -23,3 +23,7 @@ Faller.md
 *.test.tsx
 server/testing/
 !server/reportingActivity.test.ts
+
+!server/workflowUpdates.test.ts
+
+!server/wati.test.ts
