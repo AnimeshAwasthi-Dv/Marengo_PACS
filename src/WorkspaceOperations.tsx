@@ -2,7 +2,7 @@ import { modalityCodes, modalityLabel } from './modalities';
 import { ReportingActivity, type ReportingActivityData } from './features/analytics/ReportingActivity';
 import { useState } from 'react';
 import { Activity, BarChart3, CalendarDays, ChevronLeft, ChevronRight, Download, RefreshCw } from 'lucide-react';
-import { BarChart, Bar, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { BarChart, Bar, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useLiveRefresh } from './useLiveRefresh';
 
 type StudyRow = {
@@ -12,6 +12,7 @@ type StudyRow = {
   service?: string; units?: number | null; amountMinor?: number | null; currency?: string; billingStatus?: string; invoice?: string;
 };
 type Statistics = {
+  tatByModality: { modality: string; minimumMinutes: number | null; maximumMinutes: number | null; averageMinutes: number | null; samples: number }[];
   reporting: ReportingActivityData; tatStudies: {study:number;id:string;modality:string;minutes:number}[];
   modalities: string[]; tatDaily: { day: string; minutes: number | null; samples: number }[];
   rows: StudyRow[]; daily: { day: string; received: number; processed: number; reported: number }[];
@@ -88,7 +89,23 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
         </>}
       </section>
       {mode === 'analytics' && <div className="pw-stats-switch" role="tablist" aria-label="Analytics view"><button role="tab" aria-selected={view === 'studies'} className={view === 'studies' ? 'active' : ''} onClick={() => setView('studies')}>Study TAT</button><button role="tab" aria-selected={view === 'daily'} className={view === 'daily' ? 'active' : ''} onClick={() => setView('daily')}><BarChart3 size={15}/>Daily activity</button><button role="tab" aria-selected={view === 'reporting'} className={view === 'reporting' ? 'active' : ''} onClick={() => setView('reporting')}>Reporting activity</button></div>}
-      {mode === 'analytics' && view === 'studies' && <section className="pw-tat-chart" aria-label="Reporting turnaround time chart"><h2>Reporting TAT by study - minutes</h2><ResponsiveContainer width="100%" height={250}><BarChart data={data.tatStudies} margin={{ top: 16, right: 16, left: 24, bottom: 22 }}><CartesianGrid stroke="#465364" vertical={false}/><XAxis dataKey="study" allowDecimals={false} tick={{ fill: '#c3ccd9', fontSize: 11 }} label={{ value: 'Number of studies', position: 'insideBottom', offset: -5, fill: '#c3ccd9' }}/><YAxis tick={{ fill: '#c3ccd9', fontSize: 11 }} label={{ value: 'Time taken (minutes)', angle: -90, position: 'insideLeft', fill: '#c3ccd9' }}/><Tooltip labelFormatter={label => `Study ${label}`} formatter={(value, _name, item) => [`${Number(value).toFixed(2)} minutes`, item.payload.modality || 'Reporting TAT']} contentStyle={{ background: '#252d37', color: '#edf2f8' }}/><Bar dataKey="minutes" name="Reporting time (minutes)" fill="#75a5ef" isAnimationActive={false}/></BarChart></ResponsiveContainer>{!data.tatStudies.length && <p className="pw-empty">No completed studies with recorded TAT in this period.</p>}<p className="pw-help">Each bar is one study, numbered in report completion order. Time is from submission to finalized report. Studies without recorded submission and completion times are excluded.</p></section>}
+      {mode === 'analytics' && view === 'studies' && <section className="pw-tat-chart" aria-label="Reporting turnaround time by modality">
+        <h2>Reporting TAT by modality - minutes</h2>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={data.tatByModality} margin={{ top: 16, right: 16, left: 24, bottom: 10 }}>
+            <CartesianGrid stroke="#465364" vertical={false}/>
+            <XAxis dataKey="modality" interval={0} height={65} tick={{ fill: '#c3ccd9', fontSize: 11 }} label={{ value: 'Modality', position: 'insideBottom', offset: 0, fill: '#c3ccd9' }}/>
+            <YAxis domain={[0, 'auto']} tick={{ fill: '#c3ccd9', fontSize: 11 }} label={{ value: 'Time taken (minutes)', angle: -90, position: 'insideLeft', fill: '#c3ccd9' }}/>
+            <Tooltip formatter={(value, name) => [`${Number(value).toFixed(2)} minutes`, name]} contentStyle={{ background: '#252d37', color: '#edf2f8' }}/>
+            <Legend/>
+            <Bar dataKey="maximumMinutes" name="Maximum time" fill="#d8b778" isAnimationActive={false}/>
+            <Bar dataKey="minimumMinutes" name="Minimum time" fill="#66c4ac" isAnimationActive={false}/>
+            <Bar dataKey="averageMinutes" name="Average time" fill="#75a5ef" isAnimationActive={false}/>
+          </BarChart>
+        </ResponsiveContainer>
+        {!data.tatByModality.some(group => group.samples > 0) && <p className="pw-empty">No completed studies with recorded TAT in this period.</p>}
+        <p className="pw-help">Each modality shows the maximum, minimum, and average time from submission to finalized report for the selected period. Studies without recorded submission and completion times are excluded. Studies with multiple modalities contribute to each listed modality. Modalities without recorded TAT remain on the axis with no bars.</p>
+      </section>}
       {mode === 'analytics' && view === 'reporting' ? <ReportingActivity data={data.reporting}/> : mode === 'analytics' && view === 'daily' ? <div className="pw-stats-scroll">
         <div className="pw-chart-legend"><span><i style={{ background: '#75a5ef' }}/>Received</span><span><i style={{ background: '#66c4ac' }}/>Hourly volume</span><span><i style={{ background: '#d8b778' }}/>Modality share</span></div>
         <div className="pw-analytics-grid">

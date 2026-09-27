@@ -1,4 +1,4 @@
-import { modalityCodes, modalityCode, modalityLabel } from './modalities';
+import { modalityCodes, modalityCode, modalityLabel, uploadModalityCodes, uploadDicomModality } from './modalities';
 import LoginView from './LoginView';
 import './pacs-workspace.css';
 import { needsFullAdminOverview } from './lib/adminOverview';
@@ -11094,7 +11094,7 @@ function MarengoUnifiedWorklist({
           <div className="pw-drawer-body">
             {feedback?.error && <div className="pw-alert" role="alert">{feedback.text}</div>}
             {uploadOpen ? <>
-              <label className="pw-field">Modality<select value={uploadModality} onChange={(event) => setUploadModality(event.target.value)} disabled={uploadingStudy}><option value="XRAY">X-ray</option><option value="CT">CT</option><option value="MRI">MRI</option></select></label>
+              <label className="pw-field">Modality<select value={uploadModality} onChange={(event) => setUploadModality(event.target.value)} disabled={uploadingStudy}>{uploadModalityCodes.map(code => <option key={code} value={code}>{modalityLabel(code)}</option>)}</select></label>
               <label className="pw-upload-zone"><UploadCloud size={32}/><strong>{uploadFile?.name ?? "Choose study file"}</strong><span>{uploadFile ? `${(uploadFile.size / 1024 / 1024).toFixed(1)} MB` : "DICOM, ZIP, JPG or PNG"}</span><input ref={uploadInputRef} aria-label="Study file" accept=".zip,.dcm,.dicom,.jpg,.jpeg,.png" type="file" disabled={uploadingStudy} onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}/></label>
             </> : (() => {
               const currentStudy = rows.find((row) => row.study.id === (sendStudy ?? detailStudy)?.id)?.study;
@@ -14351,11 +14351,7 @@ function ReportReviewsTable({
 
 function ManualStudyUploadView({ token, client, reload, notice }: { token: string; client: Client; reload: () => Promise<void>; notice: (message: string) => void }) {
   const [modality, setModality] = useState("XRAY");
-  const services = [
-    { serviceType: "XRAY", name: "X-ray" },
-    { serviceType: "CT", name: "CT" },
-    { serviceType: "MRI", name: "MRI" },
-  ];
+  const services = uploadModalityCodes.map(code => ({ serviceType: code, name: modalityLabel(code) }));
   const serviceType = modality;
   const setServiceType = setModality;
   const [studyFile, setStudyFile] = useState<File | null>(null);
@@ -14410,7 +14406,7 @@ function ManualStudyUploadView({ token, client, reload, notice }: { token: strin
         patientAge: text("x00101010"),
         patientSex: text("x00100040"),
         studyDescription: text("x00081030") || text("x0008103e"),
-        modalities: [text("x00080060") || (modality === "XRAY" ? "DX" : modality === "MRI" ? "MR" : "CT")],
+        modalities: [text("x00080060") || uploadDicomModality(modality)],
         studyDate: text("x00080020"),
         accessionNumber: text("x00080050"),
         studyInstanceUid: text("x0020000d"),
