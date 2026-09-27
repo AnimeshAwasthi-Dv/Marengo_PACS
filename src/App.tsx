@@ -10763,10 +10763,10 @@ function MarengoUnifiedWorklist({
       });
       const body = await response.json().catch(() => null);
       if (!response.ok) throw new Error(body?.message ?? "Unable to upload study");
-      notice("Study uploaded and added to the PACS worklist.");
+      notice(body?.message ?? "Study uploaded and added to the PACS worklist.");
       setUploadOpen(false);
       setUploadFile(null);
-      setFeedback({ text: "Study uploaded and added to the worklist.", error: false });
+      setFeedback({ text: body?.message ?? "Study uploaded and added to the worklist.", error: false });
       await Promise.all([reload(), loadWorklistStudies(true)]);
     } catch (error) {
       setFeedback({ text: error instanceof Error ? error.message : "Unable to upload study", error: true });
@@ -14432,7 +14432,7 @@ function ManualStudyUploadView({ token, client, reload, notice }: { token: strin
       if (!response.ok) throw new Error(body?.message ?? "Unable to upload study.");
       setSelectedStudyMetadata(body.study as BridgeStudy);
       setStudyFile(null); if (inputRef.current) inputRef.current.value = "";
-      notice("Study uploaded to Available study. Open it there to add details and continue processing."); await reload();
+      notice(body?.message ?? "Study uploaded to Available study. Open it there to add details and continue processing."); await reload();
     } catch (error) { notice(error instanceof Error ? error.message : "Unable to upload study."); }
     finally { setUploading(false); }
   }
