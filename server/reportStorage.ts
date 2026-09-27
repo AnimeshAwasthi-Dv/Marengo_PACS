@@ -68,12 +68,12 @@ function getS3ClientConfig() {
   }
 }
 
-export async function storeObject(input: { kind: StorageKind; keyParts: string[]; body: PutObjectCommand['input']['Body']; contentType: string; localPath?: string }): Promise<StoredObject | null> {
+export async function storeObject(input: { kind: StorageKind; keyParts: string[]; body: PutObjectCommand['input']['Body']; contentType: string; localPath?: string; abortSignal?: AbortSignal }): Promise<StoredObject | null> {
   const config = getS3Config(input.kind)
   if (!config) return null
   const key = [config.prefix, ...input.keyParts].filter(Boolean).join('/')
   const client = new S3Client({ region: config.region, endpoint: config.endpoint, forcePathStyle: config.forcePathStyle, credentials: config.credentials })
-  await client.send(new PutObjectCommand({ Bucket: config.bucket, Key: key, Body: input.body, ContentType: input.contentType }))
+  await client.send(new PutObjectCommand({ Bucket: config.bucket, Key: key, Body: input.body, ContentType: input.contentType }), { abortSignal: input.abortSignal })
   const base = config.publicBaseUrl?.replace(/\/+$/g, '')
   const url = config.public && base ? `${base}/${key}` : `s3://${config.bucket}/${key}`
   return { key, url, bucket: config.bucket, localPath: input.localPath }
