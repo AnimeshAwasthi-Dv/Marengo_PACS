@@ -66,7 +66,6 @@ import {
 import { useLiveRefresh } from "./useLiveRefresh";
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
-  ChangeEvent,
   FormEvent,
   ReactNode,
 } from "react";
@@ -258,15 +257,7 @@ const serviceTypeLabels: Record<string, string> = {
   "special-xray-contrast-media": "Special X-ray (contrast media)",
   mammography: "Mammography",
 };
-const modalityTabs = [
-  "ALL",
-  "MRI",
-  "CT",
-  "Mammography",
-  "X-RAY",
-  "PET-CT",
-  "USG",
-] as const;
+const modalityTabs = ["ALL", "X-Ray", "Special X-Ray", "CT", "MRI", "Mammography", "PET-CT", "USG"] as const;
 
 
 
@@ -276,10 +267,11 @@ function normalizeModalityTab(value?: string | null): ModalityTab | null {
     .trim()
     .toLowerCase();
   if (!text) return null;
-  if (/\b(pet[\s-]?ct|pt)\b/.test(text)) return "PET-CT";
+  if (/\b(pet[\s=-]?ct|pt|nm|nmr|nuclear medicine)\b/.test(text)) return "PET-CT";
   if (/\b(mammography|mammo|mg)\b/.test(text)) return "Mammography";
   if (/\b(ultrasound|usg|us)\b/.test(text)) return "USG";
-  if (/\b(x[\s-]?ray|xray|dx|cr)\b/.test(text)) return "X-RAY";
+  if (/special[ _-]*x[ _-]*ray/.test(text)) return "Special X-Ray";
+  if (/\b(x[\s-]?ray|xray|dx|cr)\b/.test(text)) return "X-Ray";
   if (/\b(mri|mr|mra|mrv|mrs|mrcp)\b/.test(text)) return "MRI";
   if (/\bct\b|computed tomography/.test(text)) return "CT";
   return null;
@@ -626,15 +618,6 @@ const reportSections = [
   "Recommendation",
   "Disclaimer",
 ];
-const signatureTypes = ["image/png", "image/jpeg", "image/webp"];
-const radiologistDocumentTypes = [
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-];
 const signatureDetailOptions: Array<[string, string]> = [
   ["fullName", "Radiologist name"],
   ["qualification", "Qualification"],
@@ -652,38 +635,6 @@ function formatJson(value: unknown) {
   } catch {
     return String(value ?? "");
   }
-}
-
-function readSignatureFile(file: File): Promise<string> {
-  if (!signatureTypes.includes(file.type))
-    return Promise.reject(
-      new Error("Upload PNG, JPG, or WEBP signature images only."),
-    );
-  if (file.size > 2 * 1024 * 1024)
-    return Promise.reject(
-      new Error("Signature image must be 2 MB or smaller."),
-    );
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Unable to read signature image."));
-    reader.readAsDataURL(file);
-  });
-}
-
-function readRadiologistDocument(file: File): Promise<string> {
-  if (!radiologistDocumentTypes.includes(file.type))
-    return Promise.reject(
-      new Error("Upload image, PDF, DOC, or DOCX documents only."),
-    );
-  if (file.size > 8 * 1024 * 1024)
-    return Promise.reject(new Error("Document must be 8 MB or smaller."));
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Unable to read document."));
-    reader.readAsDataURL(file);
-  });
 }
 
 
@@ -2621,40 +2572,6 @@ function CredentialField({
           {visible ? <EyeOff size={16} /> : <Eye size={16} />}
         </button>
       </span>
-    </label>
-  );
-}
-
-function FileInput({
-  label,
-  fileName,
-  onChange,
-  accept = signatureTypes.join(","),
-  hint = "PNG, JPG, or WEBP up to 2 MB",
-}: {
-  label: string;
-  fileName: string;
-  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
-  accept?: string;
-  hint?: string;
-}) {
-  return (
-    <label className="grid gap-1.5 text-sm font-semibold text-slate-700 md:col-span-2">
-      {label}
-      <span className="flex flex-col gap-2 rounded-md border border-dashed border-slate-300 bg-white px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <span className="text-sm font-medium text-slate-500">
-          {fileName || hint}
-        </span>
-        <span className="inline-flex w-full justify-center rounded-md bg-slate-900 px-3 py-2 text-sm font-bold text-white sm:w-auto">
-          Choose file
-        </span>
-      </span>
-      <input
-        accept={accept}
-        className="sr-only"
-        type="file"
-        onChange={onChange}
-      />
     </label>
   );
 }
@@ -5733,7 +5650,7 @@ function ClientStudySyncView({
         <button
           className="available-study-send-button inline-flex items-center gap-1.5 rounded-md bg-sky-600 px-2.5 py-2 text-xs font-bold text-white disabled:opacity-50"
           disabled={!canSend || sendingId === study.id}
-          onClick={() => { setSendStudy(study); setSendPriority("REGULAR"); }}
+          onClick={() => { setSendStudy(study); setSendPriority(worklistPriority(study.priority ?? study.processingJob?.priority)); }}
           title="Send for reporting"
           type="button"
         >
@@ -6977,10 +6894,10 @@ function EmptyState({ message, title }: { message: string; title?: string }) {
   );
 }
 
-function WhatsAppBotView({
+function PhysicianWhatsappView({
   token,
   notice,
-  physicianConfiguration = false,
+  physicianConfiguration = true,
   centers = [],
 }: {
   token: string;
@@ -7058,129 +6975,25 @@ function WhatsAppBotView({
     await loadConfig();
   }
 
-  async function processOutbox() {
-    await api<{ processed: boolean }>(
-      "/api/v1/whatsapp/outbox/process",
-      token,
-      { method: "POST" },
-    );
-    notice("WhatsApp outbox processed.");
-    await loadConfig();
-  }
-
-  const payloadMessage = (payload: unknown) => {
-    if (!payload || typeof payload !== "object" || Array.isArray(payload))
-      return "-";
-    const message = (payload as Record<string, unknown>).message;
-    return typeof message === "string" ? message : "-";
-  };
-
   if (!config)
-    return <EmptyState message="Loading WhatsApp bot configuration..." />;
+    return <EmptyState message="Loading referring physician mappings..." />;
 
   return (
     <div className="grid gap-6 pw-whatsapp-sections">
-      <details><summary>Connection and delivery settings</summary><section className="soft-card rounded-lg p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-950">
-              {physicianConfiguration ? "WhatsApp Configuration" : "WhatsApp chatbot"}
-            </h2>
-            <p className="mt-1 text-sm text-slate-500">
-              Cloud API setup, notification recipients, and bot command
-              delivery.
-            </p>
-          </div>
-          <button
-            className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700"
-            onClick={() => void loadConfig()}
-            type="button"
-          >
-            <RefreshCw size={16} />
-            Refresh
-          </button>
-        </div>
-        <div className="mt-5 grid gap-4 md:grid-cols-3">
-          <MetricCard
-            icon={Bell}
-            label="Mode"
-            value={config.cloudApiEnabled ? "Live" : "Demo"}
-            sub={
-              config.outboundReady
-                ? "Compliant outbound ready"
-                : config.cloudApiEnabled
-                  ? "Configuration incomplete"
-                : "Messages logged locally"
-            }
-          />
-          <MetricCard
-            icon={Phone}
-            label="Recipients"
-            value={String(
-              config.recipients.filter((item) => item.active).length,
-            )}
-            sub={`${config.recipients.length} configured`}
-          />
-          <MetricCard
-            icon={ClipboardList}
-            label="Outbox"
-            value={String(config.summary.pendingCount)}
-            sub={`${config.summary.sentCount} sent, ${config.summary.failedCount} failed`}
-          />
-        </div>
-        <div className="mt-5 grid gap-4 md:grid-cols-2">
-          <TextInput
-            label="Callback URL"
-            value={config.callbackUrl ?? config.webhookUrl}
-            readOnly
-          />
-          <CredentialField
-            label="Verify token"
-            value={config.webhookVerifyToken ?? ""}
-            emptyText={config.hasWebhookVerifyToken ? "Configured" : "Missing"}
-          />
-          <TextInput
-            label="Bot command"
-            value={config.commandExample}
-            readOnly
-          />
-          <TextInput
-            label="API token"
-            value={config.hasCloudApiToken ? "Configured" : "Missing"}
-            readOnly
-          />
-          <TextInput
-            label="Phone number ID"
-            value={config.hasPhoneNumberId ? "Configured" : "Missing"}
-            readOnly
-          />
-          <TextInput
-            label="Webhook app secret"
-            value={config.hasAppSecret ? "Configured" : "Missing"}
-            readOnly
-          />
-          <TextInput
-            label="Approved utility template"
-            value={config.hasUtilityTemplate ? "Configured" : "Missing"}
-            readOnly
-          />
-        </div>
-      </section></details>
-
       {physicianConfiguration && <section className="soft-card rounded-lg p-5">
         <h3 className="font-semibold">Referring physician reports</h3>
         <p className="mt-2 text-sm">Match the physician name to the study’s referring-physician DICOM tag. Approved reports are sent only to the matching verified recipient. Duplicate names require a center selection to distinguish them.</p>
-        <p className="mt-2 text-sm">{config.physicianReportReady ? "Report-link delivery is configured." : "Report-link delivery is waiting for the WhatsApp app secret and approved report-ready template."}</p>
+        <p className="mt-2 text-sm">{config.physicianReportReady ? "Report-link delivery is configured." : "Report-link delivery is waiting for messaging configuration and template approval."}</p>
         <h3 className="mt-5 font-semibold">Radiologist call requests</h3>
-        <p className="text-sm">Superadmin and the assigned radiologist receive a portal notification when a physician requests a call.</p>
+        <p className="text-sm">The team receives a notification in the configured Telegram callback group when a physician requests a radiologist call.</p>
         {config.callRequests?.length ? <div className="mt-3 grid gap-3">{config.callRequests.map(request => <div key={request.id} className="rounded border p-3 text-sm">
           <p>{request.message}</p><p className="mt-1 text-slate-500">{request.status} · {new Date(request.createdAt).toLocaleString()}</p>
           {request.status === "PENDING" && <button type="button" className="mt-2 font-semibold text-sky-700" onClick={() => void api(`/api/v1/whatsapp/physician-calls/${request.id}`, token, { method: "PATCH", body: JSON.stringify({ status: "COMPLETED" }) }).then(loadConfig).catch(error => notice(error instanceof Error ? error.message : "Unable to update call request"))}>Mark handled</button>}
         </div>)}</div> : <p className="mt-3 text-sm text-slate-500">No physician call requests yet.</p>}
       </section>}
 
-      <details><summary>Add notification recipient</summary><FormCard
-        title="Add WhatsApp recipient"
+      <details open><summary>Map referring physician</summary><FormCard
+        title="Referring physician details"
         onSubmit={addRecipient}
         submitLabel={saving ? "Saving..." : "Add recipient"}
       >
@@ -7189,54 +7002,19 @@ function WhatsAppBotView({
           value={form.name}
           onChange={(value) => setForm({ ...form, name: value })}
         />
-        <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
-          Role
-          <select className="rounded-md border border-slate-200 bg-white px-3 py-2" value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value, organization: event.target.value === "REFERRING_PHYSICIAN" ? "DECTROCEL" : event.target.value })}>
-            {physicianConfiguration && <option value="REFERRING_PHYSICIAN">Referring physician</option>}
-            <option value="DECTROCEL">Dectrocel</option>
-            <option value="RENEWIST">Renewist</option>
-            <option value="MARENGO_MANAGEMENT">Marengo Management</option>
-          </select>
-        </label>
-        {form.role === "REFERRING_PHYSICIAN" && <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+{form.role === "REFERRING_PHYSICIAN" && <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
           Center scope
           <select className="rounded-md border border-slate-200 bg-white px-3 py-2" value={form.clientId} onChange={event => setForm({ ...form, clientId: event.target.value })}>
             <option value="">All centers (unique physician name required)</option>
             {centers.map(center => <option key={center.id} value={center.id}>{center.name}</option>)}
           </select>
         </label>}
-        <TextInput
-          label="Assigned user ID (optional)"
-          value={form.userId}
-          onChange={(value) => setForm({ ...form, userId: value })}
-        />
-        <TextInput
+<TextInput
           label="Phone (+country code or 10-digit Indian number)"
           value={form.phoneE164}
           onChange={(value) => setForm({ ...form, phoneE164: value })}
         />
-        <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
-          Categories
-          <select
-            className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-sky-400"
-            value={form.notificationCategories.join(",")}
-            onChange={(event) =>
-              setForm({
-                ...form,
-                notificationCategories: event.target.value
-                  .split(",")
-                  .filter(Boolean),
-              })
-            }
-          >
-            <option value="ALL">All notifications</option>
-            <option value="STUDY_STATUS,CALL_BOOKING">Study status + calls</option>
-            <option value="STUDY_STATUS">Study status only</option>
-            <option value="CALL_BOOKING">Call booking only</option>
-            <option value="QUERY,DEMO_REQUEST">Queries + demo requests</option>
-          </select>
-        </label>
-        <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
+<label className="grid gap-1.5 text-sm font-semibold text-slate-700">
           Verification
           <select className="rounded-md border border-slate-200 bg-white px-3 py-2" value={form.verificationStatus} onChange={(event) => setForm({ ...form, verificationStatus: event.target.value })}>
             <option value="VERIFIED">Verified</option><option value="PENDING">Pending</option><option value="REJECTED">Rejected</option>
@@ -7259,19 +7037,10 @@ function WhatsAppBotView({
             {form.role === "REFERRING_PHYSICIAN" ? "I confirm this physician agreed to receive report links and call-request updates on this number and was told how to opt out." : "I confirm this person explicitly agreed to receive the selected Dectrocel WhatsApp notifications and was told how to opt out."}
           </span>
         </label>
-        <label className="grid gap-1.5 text-sm font-semibold text-slate-700">
-          Authorized access
-          <select className="rounded-md border border-slate-200 bg-white px-3 py-2" value={form.accessCategories.join(",")} onChange={(event) => setForm({ ...form, accessCategories: event.target.value.split(",").filter(Boolean) })}>
-            <option value="NOTIFICATIONS">Notifications</option>
-            <option value="NOTIFICATIONS,STATISTICS,MANAGEMENT_BOT">Notifications + statistics + bot</option>
-            <option value="NOTIFICATIONS,BILLING,STATISTICS,MANAGEMENT_BOT">Management access</option>
-            <option value="ALL">All authorized features</option>
-          </select>
-        </label>
       </FormCard></details>
 
       <SimpleTable
-        title="Notification recipients"
+        title="Referring physician mappings"
         columns={["Name", "Category", "Phone", "Access", "Consent", "Verification", "Last notified", "Status", "Actions"]}
         rows={
           config.recipients.length
@@ -7292,65 +7061,7 @@ function WhatsAppBotView({
         }
       />
 
-      <section className="soft-card rounded-lg p-5">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-slate-950">
-            Recent WhatsApp outbox
-          </h2>
-          <button
-            className="inline-flex items-center gap-2 rounded-md bg-sky-600 px-3 py-2 text-sm font-bold text-white"
-            onClick={() => void processOutbox()}
-            type="button"
-          >
-            <RefreshCw size={16} />
-            Process now
-          </button>
-        </div>
-        <div className="table-scroll no-x-scroll">
-          <table className="report-table w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 text-xs uppercase text-slate-500">
-                <th className="py-3 pr-4">Event</th>
-                <th className="py-3 pr-4">Status</th>
-                <th className="py-3 pr-4">Attempts</th>
-                <th className="py-3 pr-4">Message</th>
-                <th className="py-3 pr-4">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {config.outbox.map((item) => (
-                <tr
-                  className="border-b border-slate-100 align-top"
-                  key={item.id}
-                >
-                  <td className="py-4 pr-4 font-semibold text-slate-800">
-                    {item.eventType}
-                  </td>
-                  <td className="py-4 pr-4">
-                    <StatusBadge status={item.status} />
-                  </td>
-                  <td className="py-4 pr-4 text-slate-700">{item.attempts}</td>
-                  <td className="py-4 pr-4 text-slate-700">
-                    <span className="line-clamp-3 whitespace-pre-wrap">
-                      {payloadMessage(item.payload)}
-                    </span>
-                  </td>
-                  <td className="py-4 pr-4 text-slate-700">
-                    {toDate(item.createdAt)}
-                  </td>
-                </tr>
-              ))}
-              {!config.outbox.length ? (
-                <tr>
-                  <td className="py-4 text-slate-600" colSpan={5}>
-                    No WhatsApp notifications queued yet.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-      </section>
+
     </div>
   );
 }
@@ -9487,7 +9198,7 @@ function AdminContent({
       />
     );
   if (active === "WhatsApp Bot" || active === "WhatsApp Whitelist" || active === "WhatsApp Configuration")
-    return <WhatsAppBotView token={token} notice={notice} physicianConfiguration centers={overview.clients} />;
+    return <PhysicianWhatsappView token={token} notice={notice} physicianConfiguration centers={overview.clients} />;
   if (active === "Alerts") return <AlertsView overview={overview} />;
   if (active === "Audit Logs") {
     return (
@@ -10701,7 +10412,7 @@ function MarengoUnifiedWorklist({
     return { study, job, report, state, needsAttention, receivedAt, tatStartAt, processedAt, referringDoctor, priority };
   }), [jobByStudyId, reportByUid, worklistStudies]);
 
-  const modalityOptions = useMemo(() => Array.from(new Set([...modalityCodes, ...rows.flatMap(({ study }) => (study.modalities ?? []).map(worklistModality).filter(Boolean))])).sort(), [rows]);
+  const modalityOptions = useMemo(() => Array.from(new Set([...modalityCodes, ...rows.flatMap(({ study }) => (study.modalities ?? []).map(worklistModality).filter(Boolean))])).sort((a, b) => { const order: readonly string[] = modalityCodes; return (order.indexOf(a) < 0 ? 99 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 99 : order.indexOf(b)) || a.localeCompare(b); }), [rows]);
   const searchedRows = useMemo(() => rows.filter(({ study, referringDoctor }) => searchableText([
         referringDoctor,
         study.patientName,
@@ -10821,7 +10532,7 @@ function MarengoUnifiedWorklist({
   const indicationPrefilledFor = useRef("");
   const drawerStudyId = (sendStudy ?? detailStudy)?.id ?? "";
   const drawerRowStudy = drawerStudyId ? rows.find(({ study }) => study.id === drawerStudyId)?.study : undefined;
-  const drawerDetailKey = `${drawerStudyId}:${drawerRowStudy?.updatedAt ?? ""}:${drawerRowStudy?.processingJob?.status ?? ""}`;
+  const drawerDetailKey = `${drawerStudyId}:${drawerRowStudy?.updatedAt ?? ""}:${drawerRowStudy?.processingJob?.status ?? ""}:${drawerRowStudy?.priority ?? ""}`;
   const drawerDetailReady = !drawerStudyId || studyDetail?.id === drawerStudyId || Boolean(studyDetailError) || Array.isArray((drawerRowStudy ?? sendStudy ?? detailStudy)?.attachments);
   useEffect(() => {
     if (!drawerStudyId || !["SUPER_ADMIN", "CLIENT_USER"].includes(user.role)) return;
@@ -10880,6 +10591,14 @@ function MarengoUnifiedWorklist({
       const result = await api<{ priority: "URGENT" | "REGULAR"; message: string }>(`/api/workspace/studies/${encodeURIComponent(study.id)}/priority`, token, { method: "POST", body: JSON.stringify({ priority }) });
       priorityRevision.current += 1;
       setWorklistStudies(previous => previous.map(item => item.id === study.id ? { ...item, priority: result.priority, processingJob: item.processingJob ? { ...item.processingJob, priority: result.priority } : item.processingJob } : item));
+      const updatePriority = (item: BridgeStudy | null): BridgeStudy | null => item?.id === study.id
+        ? { ...item, priority: result.priority, processingJob: item.processingJob ? { ...item.processingJob, priority: result.priority } : item.processingJob } : item;
+      setStudyDetail(updatePriority);
+      setDetailStudy(updatePriority);
+      setSendStudy(updatePriority);
+      if (sendStudy?.id === study.id) setPriority(result.priority);
+      // Refresh dashboard jobs as well as the worklist, without treating a refresh failure as a failed save.
+      void reload().catch(() => {});
       setFeedback({ text: result.message, error: false });
     } catch (error) {
       setFeedback({ text: error instanceof Error ? error.message : "Unable to update priority. Please try again.", error: true });
@@ -10893,7 +10612,18 @@ function MarengoUnifiedWorklist({
     const className = `${mobile ? "pw-mobile-priority" : "pw-priority"} ${urgent ? "urgent" : "routine"}`;
     if (reported || !permissions.submit) return <span className={className} title={reported ? "Reported study priority is read-only" : undefined}>{urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}</span>;
     const nextLabel = urgent ? "Routine" : "Urgent";
-    return <button className={className} disabled={prioritySaving.has(study.id)} aria-busy={prioritySaving.has(study.id)} aria-label={`Mark ${study.patientName || study.id} ${nextLabel}`} title={`Mark this study ${nextLabel}`} onDoubleClick={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); void changeStudyPriority(study, urgent ? "REGULAR" : "URGENT"); }}>{prioritySaving.has(study.id) ? <LoaderCircle size={12} className="pw-spinning"/> : urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}</button>;
+    return <button type="button" className={className}
+      disabled={prioritySaving.has(study.id)} aria-busy={prioritySaving.has(study.id)}
+      aria-label={`Mark ${study.patientName || study.id} ${nextLabel}`} title={`Mark this study ${nextLabel}`}
+      onDoubleClick={event => event.stopPropagation()}
+      onClick={event => {
+        event.stopPropagation();
+        // A double-click must not undo the first click after a fast save.
+        if (event.detail > 1) return;
+        void changeStudyPriority(study, urgent ? "REGULAR" : "URGENT");
+      }}>
+      {prioritySaving.has(study.id) ? <LoaderCircle size={12} className="pw-spinning"/> : urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}
+    </button>;
   }
   function beginSend(study: BridgeStudy) {
     setFeedback(null);
@@ -11221,7 +10951,7 @@ function ProviderContent({
   if (active === "Call Requests") return <CallRequestsView token={token} notice={notice} />;
   if (active === "AI Report Feedback") return <FeedbackDashboard token={token} notice={notice} />;
   if (active === "Analytics") return <ManagementAnalyticsView token={token} section="reporting" />;
-  if (active === "WhatsApp Whitelist") return <WhatsAppBotView token={token} notice={notice} />;
+  if (active === "WhatsApp Whitelist") return <PhysicianWhatsappView token={token} notice={notice} />;
   if (active === "Radiologist Feedback")
     return <FeedbackDashboard token={token} notice={notice} />;
   if (active === "Managers")
@@ -11388,7 +11118,7 @@ function ProviderContent({
   if (active === "Support")
     return <SupportCenterView token={token} role="provider" notice={notice} />;
   if (active === "WhatsApp Bot")
-    return <WhatsAppBotView token={token} notice={notice} />;
+    return <PhysicianWhatsappView token={token} notice={notice} />;
   if (active === "Portal Logs") {
     return (
       <AuditLogsView
@@ -12882,25 +12612,10 @@ function AdminRadiologistsView({
   const [radiologists, setRadiologists] = useState<RadiologistProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
-  const [createOpen, setCreateOpen] = useState(false);
   const [selectedRadiologist, setSelectedRadiologist] =
     useState<RadiologistProfile | null>(null);
   const [generatedPassword, setGeneratedPassword] = useState("");
-  const [signatureFileName, setSignatureFileName] = useState("");
-  const [documentFileName, setDocumentFileName] = useState("");
   const { confirmPassword, passwordPrompt } = usePasswordConfirmation();
-  const [form, setForm] = useState({
-    scope: "MARENGO_GROUP" as "MARENGO_GROUP" | "RENEWIST",
-    fullName: "",
-    email: "",
-    phone: "",
-    qualification: "",
-    medicalRegistrationNumber: "",
-    organisationName: "Marengo Asia Hospitals",
-    signatureImageData: "",
-    documentData: "",
-    documentName: "",
-  });
 
   async function loadRadiologists() {
     setLoading(true);
@@ -12953,75 +12668,6 @@ function AdminRadiologistsView({
       mounted = false;
     };
   }, [token]);
-
-  async function createRadiologist(event: FormEvent) {
-    event.preventDefault();
-    const result = await api<{
-      profile: RadiologistProfile;
-      temporaryPassword: string;
-    }>("/api/admin/radiologists", token, {
-      method: "POST",
-      body: JSON.stringify(form),
-    });
-    setCreateOpen(false);
-    setSelectedRadiologist(result.profile);
-    setGeneratedPassword(result.temporaryPassword);
-    setSignatureFileName("");
-    setDocumentFileName("");
-    setForm({
-      scope: "MARENGO_GROUP",
-      fullName: "",
-      email: "",
-      phone: "",
-      qualification: "",
-      medicalRegistrationNumber: "",
-      organisationName: "Marengo Asia Hospitals",
-      signatureImageData: "",
-      documentData: "",
-      documentName: "",
-    });
-    notice(
-      `${form.scope === "RENEWIST" ? "Renewist" : "Marengo"} radiologist login created: ${result.profile.email}.`,
-    );
-    await reload();
-    await loadRadiologists();
-  }
-
-  async function uploadSignature(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const signatureImageData = await readSignatureFile(file);
-      setForm((current) => ({ ...current, signatureImageData }));
-      setSignatureFileName(file.name);
-    } catch (error) {
-      notice(
-        error instanceof Error
-          ? error.message
-          : "Unable to upload signature image.",
-      );
-      event.target.value = "";
-    }
-  }
-
-  async function uploadDocument(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const documentData = await readRadiologistDocument(file);
-      setForm((current) => ({
-        ...current,
-        documentData,
-        documentName: file.name,
-      }));
-      setDocumentFileName(file.name);
-    } catch (error) {
-      notice(
-        error instanceof Error ? error.message : "Unable to upload document.",
-      );
-      event.target.value = "";
-    }
-  }
 
   async function resetRadiologistPassword(radiologist: RadiologistProfile) {
     const result = await api<{ user: User; temporaryPassword: string }>(
@@ -13083,18 +12729,11 @@ function AdminRadiologistsView({
               Radiologist access
             </h2>
             <p className="mt-1 text-sm text-slate-500">
-              Create and manage Marengo group viewers or Renewist reporting
+              Manage existing Marengo group viewers or Renewist reporting
               radiologists from Super Admin.
             </p>
           </div>
-          <button
-            className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-sky-600 px-4 py-3 text-sm font-bold text-white sm:w-auto"
-            onClick={() => setCreateOpen(true)}
-            type="button"
-          >
-            <Plus size={16} />
-            Create radiologist
-          </button>
+
         </div>
       </section>
 
@@ -13175,85 +12814,7 @@ function AdminRadiologistsView({
         </table>
       </section>
 
-      {createOpen ? (
-        <Modal
-          title="Create radiologist login"
-          onClose={() => setCreateOpen(false)}
-          wide
-        >
-          <FormCard
-            title="Radiologist profile"
-            onSubmit={createRadiologist}
-            submitLabel="Create login"
-          >
-            <SelectInput
-              label="Workspace"
-              value={form.scope}
-              onChange={(scope) =>
-                setForm({
-                  ...form,
-                  scope: scope as "MARENGO_GROUP" | "RENEWIST",
-                  organisationName:
-                    scope === "RENEWIST"
-                      ? "Renewist"
-                      : "Marengo Asia Hospitals",
-                })
-              }
-              options={[
-                ["MARENGO_GROUP", "Marengo group — read only"],
-                ["RENEWIST", "Renewist — reporting workflow"],
-              ]}
-            />
-            <TextInput
-              label="Full name"
-              value={form.fullName}
-              onChange={(fullName) => setForm({ ...form, fullName })}
-            />
-            <TextInput
-              label="Email"
-              type="email"
-              value={form.email}
-              onChange={(email) => setForm({ ...form, email })}
-            />
-            <TextInput
-              label="Phone"
-              value={form.phone}
-              onChange={(phone) => setForm({ ...form, phone })}
-            />
-            <TextInput
-              label="Qualification"
-              value={form.qualification}
-              onChange={(qualification) => setForm({ ...form, qualification })}
-            />
-            <TextInput
-              label="Medical registration number"
-              value={form.medicalRegistrationNumber}
-              onChange={(medicalRegistrationNumber) =>
-                setForm({ ...form, medicalRegistrationNumber })
-              }
-            />
-            <TextInput
-              label="Organisation name"
-              value={form.organisationName}
-              onChange={(organisationName) =>
-                setForm({ ...form, organisationName })
-              }
-            />
-            <FileInput
-              label="Signature image"
-              fileName={signatureFileName}
-              onChange={uploadSignature}
-            />
-            <FileInput
-              accept={radiologistDocumentTypes.join(",")}
-              fileName={documentFileName}
-              hint="Optional image, PDF, DOC, or DOCX up to 8 MB"
-              label="Optional document"
-              onChange={uploadDocument}
-            />
-          </FormCard>
-        </Modal>
-      ) : null}
+
 
       {selectedRadiologist ? (
         <RadiologistDetailModal
@@ -13288,76 +12849,10 @@ function ProviderRadiologistsView({
   reload: () => Promise<void>;
   notice: (message: string) => void;
 }) {
-  const [createOpen, setCreateOpen] = useState(false);
   const [selectedRadiologist, setSelectedRadiologist] =
     useState<RadiologistProfile | null>(null);
   const [generatedPassword, setGeneratedPassword] = useState("");
-  const [signatureFileName, setSignatureFileName] = useState("");
   const { confirmPassword, passwordPrompt } = usePasswordConfirmation();
-  const [form, setForm] = useState({
-    fullName: "",
-    email: "",
-    phone: "",
-    qualification: "",
-    medicalRegistrationNumber: "",
-    organisationName: "CONSULTANT RADIOLOGIST",
-    signatureImageUrl: "",
-    signatureImageData: "",
-    documentData: "",
-    documentName: "",
-  });
-
-  async function createRadiologist(event: FormEvent) {
-    event.preventDefault();
-    const result = await api<{
-      profile: RadiologistProfile;
-      temporaryPassword: string;
-    }>("/api/provider/radiologists", token, {
-      method: "POST",
-      body: JSON.stringify(form),
-    });
-    notice(
-      `Renewist radiologist login created for ${result.profile.email}. The one-time password is shown in the profile details.`,
-    );
-    setGeneratedPassword(result.temporaryPassword);
-    setSelectedRadiologist(result.profile);
-    setForm({
-      fullName: "",
-      email: "",
-      phone: "",
-      qualification: "",
-      medicalRegistrationNumber: "",
-      organisationName: "CONSULTANT RADIOLOGIST",
-      signatureImageUrl: "",
-      signatureImageData: "",
-      documentData: "",
-      documentName: "",
-    });
-    setSignatureFileName("");
-    setCreateOpen(false);
-    await reload();
-  }
-
-  async function uploadSignature(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const signatureImageData = await readSignatureFile(file);
-      setForm((current) => ({
-        ...current,
-        signatureImageData,
-        signatureImageUrl: "",
-      }));
-      setSignatureFileName(file.name);
-    } catch (error) {
-      notice(
-        error instanceof Error
-          ? error.message
-          : "Unable to upload signature image.",
-      );
-      event.target.value = "";
-    }
-  }
 
   async function resetRadiologistPassword(radiologist: RadiologistProfile) {
     const result = await api<{ user: User; temporaryPassword: string }>(
@@ -13400,18 +12895,11 @@ function ProviderRadiologistsView({
               Renewist radiologist logins
             </h2>
             <p className="mt-1 text-sm text-slate-500">
-              Create radiologist accounts for claiming AI-generated
+              Manage existing radiologist accounts and their
               teleradiology reports, editing, and signing before PACS push-back.
             </p>
           </div>
-          <button
-            className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-sky-600 px-4 py-3 text-sm font-bold text-white sm:w-auto"
-            onClick={() => setCreateOpen(true)}
-            type="button"
-          >
-            <Plus size={16} />
-            Create radiologist
-          </button>
+
         </div>
       </section>
       <AvailabilityCalendarScheduler
@@ -13428,83 +12916,7 @@ function ProviderRadiologistsView({
           setSelectedRadiologist(radiologist);
         }}
       />
-      {createOpen && (
-        <Modal
-          title="Create Renewist radiologist"
-          onClose={() => setCreateOpen(false)}
-          wide
-        >
-          <form
-            className="grid gap-5 xl:grid-cols-[1fr_0.9fr]"
-            onSubmit={createRadiologist}
-          >
-            <section className="rounded-lg border border-slate-200 bg-white p-5">
-              <h2 className="text-lg font-semibold text-slate-950">
-                Radiologist profile
-              </h2>
-              <div className="mt-5 grid gap-4 md:grid-cols-2">
-                <TextInput
-                  label="Full name"
-                  value={form.fullName}
-                  onChange={(value) => setForm({ ...form, fullName: value })}
-                />
-                <TextInput
-                  label="Email"
-                  value={form.email}
-                  onChange={(value) => setForm({ ...form, email: value })}
-                />
-                <TextInput
-                  label="Phone"
-                  value={form.phone}
-                  onChange={(value) => setForm({ ...form, phone: value })}
-                />
-                <TextInput
-                  label="Qualification"
-                  value={form.qualification}
-                  onChange={(value) =>
-                    setForm({ ...form, qualification: value })
-                  }
-                />
-                <TextInput
-                  label="Registration number"
-                  value={form.medicalRegistrationNumber}
-                  onChange={(value) =>
-                    setForm({ ...form, medicalRegistrationNumber: value })
-                  }
-                />
-                <TextInput
-                  label="Designation"
-                  value={form.organisationName}
-                  onChange={(value) =>
-                    setForm({ ...form, organisationName: value })
-                  }
-                />
-                <FileInput
-                  label="Digital signature"
-                  fileName={signatureFileName}
-                  onChange={uploadSignature}
-                />
-              </div>
-              <button
-                className="mt-5 inline-flex items-center gap-2 rounded-md bg-sky-600 px-4 py-3 text-sm font-bold text-white"
-                type="submit"
-              >
-                <Plus size={16} />
-                Create login
-              </button>
-            </section>
-            <SignaturePreview
-              fullName={form.fullName || "DR. RADIOLOGIST NAME"}
-              qualification={form.qualification || "MBBS, MD RADIODIAGNOSIS"}
-              registration={form.medicalRegistrationNumber || "REGISTRATION NO"}
-              designation={form.organisationName || "CONSULTANT RADIOLOGIST"}
-              signatureImageUrl={
-                form.signatureImageData || form.signatureImageUrl
-              }
-            />
-          </form>
-        </Modal>
-      )}
+
       {selectedRadiologist && (
         <RadiologistDetailModal
           generatedPassword={generatedPassword}
@@ -13525,51 +12937,6 @@ function ProviderRadiologistsView({
   );
 }
 
-function SignaturePreview({
-  fullName,
-  qualification,
-  registration,
-  designation,
-  signatureImageUrl,
-}: {
-  fullName: string;
-  qualification: string;
-  registration: string;
-  designation: string;
-  signatureImageUrl?: string | null;
-}) {
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5">
-      <h2 className="text-lg font-semibold text-slate-950">
-        Signature preview
-      </h2>
-      <div className="mt-5 grid min-h-[360px] place-items-center rounded-lg border border-slate-200 bg-white p-8 text-center">
-        <div>
-          <div className="mx-auto flex h-32 items-end justify-center">
-            {signatureImageUrl ? (
-              <img
-                alt="Digital signature preview"
-                className="max-h-28 max-w-72 object-contain"
-                src={signatureImageUrl}
-              />
-            ) : (
-              <span className="text-sm font-semibold text-slate-400">
-                Upload signature
-              </span>
-            )}
-          </div>
-          <div className="mt-9 space-y-2 font-serif text-slate-950">
-            <p className="text-xl font-bold uppercase">{fullName}</p>
-            <p className="text-lg font-bold uppercase">{qualification}</p>
-            <p className="text-base">Reg No. {registration}</p>
-            <p className="text-lg uppercase">{designation}</p>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function ClientRadiologistsView({
   token,
   client,
@@ -13581,26 +12948,11 @@ function ClientRadiologistsView({
   reload: () => Promise<void>;
   notice: (message: string) => void;
 }) {
-  const [createOpen, setCreateOpen] = useState(false);
   const [selectedRadiologist, setSelectedRadiologist] =
     useState<RadiologistProfile | null>(null);
   const [generatedPassword, setGeneratedPassword] = useState("");
   const { confirmPassword, passwordPrompt } = usePasswordConfirmation();
   const isMarengoGroup = client.code === "MARENGO";
-  const [form, setForm] = useState({
-    fullName: "",
-    email: "",
-    phone: "",
-    qualification: "",
-    medicalRegistrationNumber: "",
-    organisationName: client.name,
-    signatureImageUrl: "",
-    signatureImageData: "",
-    documentData: "",
-    documentName: "",
-  });
-  const [signatureFileName, setSignatureFileName] = useState("");
-  const [documentFileName, setDocumentFileName] = useState("");
   const assignedServiceNames = client.services.map(
     (service) => service.service.name,
   );
@@ -13651,78 +13003,6 @@ function ClientRadiologistsView({
         : "Radiologist review disabled. Reports will send directly to PACS.",
     );
     await reload();
-  }
-
-  async function createRadiologist(event: FormEvent) {
-    event.preventDefault();
-    const result = await api<{
-      profile: RadiologistProfile;
-      temporaryPassword: string;
-    }>("/api/client/radiologists", token, {
-      method: "POST",
-      body: JSON.stringify(form),
-    });
-    notice(
-      `Radiologist login created for ${result.profile.email}. The one-time password is shown in the profile details.`,
-    );
-    setGeneratedPassword(result.temporaryPassword);
-    setSelectedRadiologist(result.profile);
-    setForm({
-      fullName: "",
-      email: "",
-      phone: "",
-      qualification: "",
-      medicalRegistrationNumber: "",
-      organisationName: client.name,
-      signatureImageUrl: "",
-      signatureImageData: "",
-      documentData: "",
-      documentName: "",
-    });
-    setSignatureFileName("");
-    setDocumentFileName("");
-    setCreateOpen(false);
-    await reload();
-  }
-
-  async function uploadSignature(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const signatureImageData = await readSignatureFile(file);
-      setForm((current) => ({
-        ...current,
-        signatureImageData,
-        signatureImageUrl: "",
-      }));
-      setSignatureFileName(file.name);
-    } catch (error) {
-      notice(
-        error instanceof Error
-          ? error.message
-          : "Unable to upload signature image.",
-      );
-      event.target.value = "";
-    }
-  }
-
-  async function uploadDocument(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const documentData = await readRadiologistDocument(file);
-      setForm((current) => ({
-        ...current,
-        documentData,
-        documentName: file.name,
-      }));
-      setDocumentFileName(file.name);
-    } catch (error) {
-      notice(
-        error instanceof Error ? error.message : "Unable to upload document.",
-      );
-      event.target.value = "";
-    }
   }
 
   async function resetRadiologistPassword(radiologist: RadiologistProfile) {
@@ -13798,14 +13078,7 @@ function ClientRadiologistsView({
               </span>
             </label>
           )}
-          <button
-            className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-sky-600 px-4 py-3 text-sm font-bold text-white sm:w-auto"
-            onClick={() => setCreateOpen(true)}
-            type="button"
-          >
-            <Plus size={16} />
-            Create radiologist
-          </button>
+
         </div>
       </section>
       <RadiologistListing
@@ -13817,69 +13090,7 @@ function ClientRadiologistsView({
           setSelectedRadiologist(radiologist);
         }}
       />
-      {createOpen && (
-        <Modal
-          title={
-            isMarengoGroup
-              ? "Create view-only radiologist"
-              : "Create radiologist user"
-          }
-          onClose={() => setCreateOpen(false)}
-        >
-          <FormCard
-            title="Radiologist profile"
-            onSubmit={createRadiologist}
-            submitLabel="Create login"
-          >
-            <TextInput
-              label="Full name"
-              value={form.fullName}
-              onChange={(value) => setForm({ ...form, fullName: value })}
-            />
-            <TextInput
-              label="Email"
-              value={form.email}
-              onChange={(value) => setForm({ ...form, email: value })}
-            />
-            <TextInput
-              label="Phone"
-              value={form.phone}
-              onChange={(value) => setForm({ ...form, phone: value })}
-            />
-            <TextInput
-              label="Qualification"
-              value={form.qualification}
-              onChange={(value) => setForm({ ...form, qualification: value })}
-            />
-            <TextInput
-              label="Medical registration number"
-              value={form.medicalRegistrationNumber}
-              onChange={(value) =>
-                setForm({ ...form, medicalRegistrationNumber: value })
-              }
-            />
-            <TextInput
-              label="Organisation name"
-              value={form.organisationName}
-              onChange={(value) =>
-                setForm({ ...form, organisationName: value })
-              }
-            />
-            <FileInput
-              label="Signature image"
-              fileName={signatureFileName}
-              onChange={uploadSignature}
-            />
-            <FileInput
-              accept={radiologistDocumentTypes.join(",")}
-              fileName={documentFileName}
-              hint="Optional image, PDF, DOC, or DOCX up to 8 MB"
-              label="Optional document"
-              onChange={uploadDocument}
-            />
-          </FormCard>
-        </Modal>
-      )}
+
       {selectedRadiologist && (
         <RadiologistDetailModal
           generatedPassword={generatedPassword}
