@@ -44,7 +44,7 @@ import type { Request, Response } from 'express'
 import yauzl from 'yauzl'
 import yazl from 'yazl'
 import { z } from 'zod'
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import { login, requireAuth, requireClientUser, requireProviderAdmin, requireProviderStaff, requireRadiologist, requireSuperAdmin } from './auth'
 import { registerAdminOrganizationRoutes } from './adminOrganization'
 import { billingRouter, clientBillingRouter, generateDueMonthlyInvoices, getAdminBillingSnapshot, getClientBillingSnapshot, handleRazorpayWebhook, recordBillingEvent } from './billing'
@@ -2213,6 +2213,7 @@ app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireC
   try {
     const upload = await saveManualAvailableStudyUpload(req)
     const extracted: DicomStudyMetadata = await extractDicomStudyMetadata(upload.filePath).catch(() => ({}))
+    let alreadyExists = false
     const study = await prisma.availableBridgeStudy.create({
       data: {
         publicStudyId: `BS-${crypto.randomBytes(6).toString('hex').toUpperCase()}`,
@@ -2240,7 +2241,27 @@ app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireC
         lastSyncedAt: new Date(),
       },
       include: { dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 }, attachments: true, processingJob: true },
+    }).catch(async (error: unknown) => {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002' || !extracted.studyInstanceUid) throw error
+      const existing = await prisma.availableBridgeStudy.findUnique({
+        where: { clientId_agentId_studyInstanceUid: {
+          clientId, agentId: `PORTAL-MANUAL-${req.user!.sub}`, studyInstanceUid: extracted.studyInstanceUid,
+        } },
+        include: { dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 }, attachments: true, processingJob: true },
+      })
+      if (!existing) throw error
+      alreadyExists = true
+      await fs.unlink(upload.filePath).then(() => fs.rmdir(path.dirname(upload.filePath))).catch((cleanupError: unknown) => {
+        console.error('Unable to remove redundant manual study upload', cleanupError)
+      })
+      return existing
     })
+    if (alreadyExists) {
+      return res.status(200).json({
+        study: formatBridgeStudyForClient(study), already_exists: true, renewist_job_queued: false,
+        message: 'This study is already in the worklist. The existing study has been kept.',
+      })
+    }
     await prisma.auditLog.create({
       data: {
         clientId,
