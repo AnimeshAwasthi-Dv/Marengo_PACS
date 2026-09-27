@@ -18,3 +18,9 @@ export function modalityLabel(value: string) {
 export function modalityMatchesCode(value: string, selected: string) {
  return value.split(',').some(part => modalityCode(part) === modalityCode(selected));
 }
+
+export const uploadModalityCodes = ['XRAY', 'CT', 'MRI', 'MG', 'PT', 'US', 'SPECIALXRAY'] as const;
+export function uploadDicomModality(value: string) {
+ const code = modalityCode(value);
+ return code === 'XR' || code === 'SPECIALXRAY' ? 'DX' : code;
+}

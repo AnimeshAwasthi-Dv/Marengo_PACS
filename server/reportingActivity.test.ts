@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { reportingActivity, statisticsRange, type StatisticsRow } from './workspaceStatistics';
-import { modalityCode, modalityLabel, modalityMatchesCode } from '../src/modalities';
+import { modalityCodes, modalityCode, modalityLabel, modalityMatchesCode } from '../src/modalities';
 const row = (id:string, fields:Partial<StatisticsRow>):StatisticsRow => ({id, clientId:'c',center:'Center',patient:'',patientId:'',accession:'',modality:'CT',description:'',studyUid:id,jobId:null,demo:false,received:null,processed:null,reported:null,tatSeconds:null,...fields});
 test('reporting distinguishes submission activity from the received cohort at IST boundaries',()=>{
  const range=statisticsRange('2026-09-22','2026-09-22');
@@ -35,4 +35,26 @@ test('empty reporting period has zero-filled daily and hourly series',()=>{
  const stats=reportingActivity([],statisticsRange('2026-09-21','2026-09-22'));
  assert.equal(stats.daily.length,2);assert.equal(stats.hourly.length,24);
  assert.deepEqual(stats.totals,{submitted:0,received:0,sent:0,notSent:0});assert.deepEqual(stats.tatStudies,[]);
+});
+
+test('TAT groups modalities with min, max and study-weighted averages across the selected period', () => {
+ const reported = '2026-09-22T01:00:00Z';
+ const stats = reportingActivity([
+  row('nuclear', { reported, modality: 'NM', tatSeconds: 60 }),
+  row('ct-zero', { reported, modality: 'CT', tatSeconds: 0 }),
+  row('ct-two', { reported, modality: 'CT', tatSeconds: 120 }),
+  row('multi', { reported, modality: 'CT, MR, MRI', tatSeconds: 600 }),
+  row('mr', { reported, modality: 'MR', tatSeconds: 120 }),
+  row('missing', { reported, modality: 'CT', tatSeconds: null }),
+  row('negative', { reported, modality: 'CT', tatSeconds: -60 }),
+  row('invalid', { reported, modality: 'CT', tatSeconds: NaN }),
+  row('outside', { reported: '2026-09-23T01:00:00Z', modality: 'CT', tatSeconds: 9000 }),
+ ], statisticsRange('2026-09-22', '2026-09-22'));
+ assert.deepEqual(stats.tatByModality.filter(group => group.samples > 0), [
+  { modality: 'CT', minimumMinutes: 0, maximumMinutes: 10, averageMinutes: 4, samples: 3 },
+  { modality: 'MRI', minimumMinutes: 2, maximumMinutes: 10, averageMinutes: 6, samples: 2 },
+ ]);
+ assert.deepEqual(stats.tatByModality.map(group => group.modality), modalityCodes.filter(code => code !== 'NM').map(modalityLabel));
+ const empty = reportingActivity([], statisticsRange('2026-09-22', '2026-09-22')).tatByModality;
+ assert.deepEqual(empty, modalityCodes.filter(code => code !== 'NM').map(code => ({ modality: modalityLabel(code), minimumMinutes: null, maximumMinutes: null, averageMinutes: null, samples: 0 })));
 });
