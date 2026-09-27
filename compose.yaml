@@ -46,7 +46,7 @@ services:
     image: caddy:2-alpine
     environment:
       PORTAL_DOMAIN: ${PORTAL_DOMAIN:?Set PORTAL_DOMAIN in .env}
-    ports: ['80:80']
+    ports: ['80:80', '443:443', '443:443/udp']
     volumes:
       - ./deployment/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
