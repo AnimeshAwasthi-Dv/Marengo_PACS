@@ -16,6 +16,7 @@ import { holdSpecialXrayForManualSubmission } from '../src/specialXray';
 import { nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
 import { registerExternalViewerRoutes } from './viewer/routes';
+import { createViewerPreimporter } from './viewer/preimport';
 import bcrypt from 'bcryptjs'
 import { scopedShareToken, scopedShareReportId, verifyShareScope } from './shareScope'
 import { workspacePermissions, assignableCenterRoles } from '../src/workspacePermissions'
@@ -139,7 +140,12 @@ async function waitForViewerImport(importId: string) {
   return current
 }
 
-async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
+/**
+ * Hands the bridge study's archive to the DICOM viewer's import queue (uploading a local-only archive to S3 first) and
+ * returns the import, without waiting for it to finish. Returns a still-valid viewer URL when one is cached, and null
+ * when the study has no archive yet. Used when a study is opened and, ahead of that, by the pre-import sweep.
+ */
+async function startBridgeStudyViewerImport(studyId: string): Promise<{ importId: string; sourceIdentity: string; viewerUrl?: string } | null> {
   const study = await prisma.availableBridgeStudy.findUnique({
     where: { id: studyId },
     select: {
@@ -166,7 +172,7 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
   if (!storedStudy?.key && !discoveredStudy?.key && !archivePath) return null
   const cached = externalViewerImports.get(study.id)
   const sourceIdentity = storedStudy ? `${storedStudy.bucket}/${storedStudy.key}` : discoveredStudy ? `${discoveredStudy.bucket}/${discoveredStudy.key}` : archivePath ?? ''
-  if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return cached.viewerUrl
+  if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return { importId: cached.importId, sourceIdentity, viewerUrl: cached.viewerUrl }
   let importId = cached?.archivePath === sourceIdentity ? cached.importId : ''
   if (!importId) {
     const storage = storedStudy?.key || discoveredStudy?.key ? { key: storedStudy?.key ?? discoveredStudy!.key, bucket: storedStudy?.bucket ?? discoveredStudy!.bucket } : await storeObject({
@@ -186,6 +192,14 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
     importId = imported.id
     externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: imported.status, expiresAt: Date.now() + 60 * 60 * 1000 })
   }
+  return { importId, sourceIdentity }
+}
+
+async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
+  const started = await startBridgeStudyViewerImport(studyId)
+  if (!started) return null
+  if (started.viewerUrl) return started.viewerUrl
+  const { importId, sourceIdentity } = started
   const ready = await waitForViewerImport(importId)
   if (ready?.status !== 'completed') throw new Error('DICOM viewer is still indexing this study. Please try again shortly.')
   const session = await viewerServiceRequest<ViewerSessionResponse>('/api/v1/sessions', {
@@ -193,7 +207,7 @@ async function createBridgeStudyViewerUrl(studyId: string, _req: Request) {
     body: JSON.stringify({ studyId: importId }),
   })
   if (!session.viewerUrl) throw new Error('DICOM viewer service did not return a viewer URL')
-  externalViewerImports.set(study.id, { archivePath: sourceIdentity, importId, status: 'completed', viewerUrl: session.viewerUrl, expiresAt: session.expiresAt ?? Date.now() + 55 * 60 * 1000 })
+  externalViewerImports.set(studyId, { archivePath: sourceIdentity, importId, status: 'completed', viewerUrl: session.viewerUrl, expiresAt: session.expiresAt ?? Date.now() + 55 * 60 * 1000 })
   return session.viewerUrl
 }
 
@@ -4477,7 +4491,30 @@ const httpServer = app.listen(port, host, () => {
   setInterval(() => void processPendingPacsReturnJobs(), 5 * 60 * 1000).unref()
   setInterval(() => void recoverStaleOutboundSubmissions(), 10 * 60 * 1000).unref()
   if (features.billing) setInterval(() => void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error)), 24 * 60 * 60 * 1000).unref()
+  startViewerPreimport()
 })
+
+/**
+ * Pre-imports new CT/MR/PET/NM studies into the external viewer so opening one never waits on indexing.
+ * In-process timer (single replica, see Harness/memory/constraint-single-replica.md). DICOM_VIEWER_PREIMPORT=false turns it off.
+ */
+function startViewerPreimport() {
+  if (process.env.DICOM_VIEWER_PREIMPORT === 'false') return console.log('Viewer pre-import disabled by DICOM_VIEWER_PREIMPORT=false')
+  try { viewerServiceConfig() } catch { return console.log('Viewer pre-import off: the DICOM viewer service is not configured') }
+  const preimporter = createViewerPreimporter({
+    findRecent: (since) => prisma.availableBridgeStudy.findMany({
+      // updatedAt is indexed; the modality filter narrows the page to studies the external viewer opens.
+      where: { updatedAt: { gte: since }, modalities: { hasSome: ['CT', 'MR', 'MRI', 'PT', 'PET', 'NM'] } },
+      select: { id: true, modalities: true },
+      orderBy: { updatedAt: 'desc' },
+      take: 25,
+    }),
+    startImport: async (studyId) => (await startBridgeStudyViewerImport(studyId)) ? 'started' : 'unavailable',
+  })
+  const sweep = () => void preimporter.sweep().catch((error) => console.error('Viewer pre-import sweep failed', error))
+  setTimeout(sweep, 20_000).unref()
+  setInterval(sweep, 60_000).unref()
+}
 
 async function resumeQueuedProcessingJobs() {
   const jobs = await prisma.processingJob.findMany({

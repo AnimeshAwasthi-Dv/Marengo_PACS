@@ -24,6 +24,16 @@ export function normalizeModality(value: string | null | undefined) {
   return MODALITY_ALIASES[cleaned] ?? cleaned
 }
 
+// Values like "CT\SR" or "DX,OT" can come from DICOM multi-value fields or bridge metadata.
+function modalityCodes(values: Array<string | null | undefined>) {
+  return [...new Set(values.flatMap(value => (value ?? '').split(/[\\,/]/)).map(normalizeModality).filter((value): value is string => Boolean(value)))]
+}
+
+/** True when the study can only open in the external viewer (CT, MR, PET, NM), whatever the QuickView settings. */
+export function requiresExternalViewer(modalities: Array<string | null | undefined>) {
+  return modalityCodes(modalities).some(modality => EXTERNAL_ONLY_MODALITIES.has(modality))
+}
+
 export function quickViewConfig(env: NodeJS.ProcessEnv = process.env): QuickViewConfig {
   const maxBytes = Number(env.QUICKVIEW_MAX_BYTES)
   return { enabled: env.QUICKVIEW_ENABLED === 'true', maxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : DEFAULT_MAX_BYTES }
@@ -35,8 +45,7 @@ export function chooseViewerMode(
 ): ViewerDecision {
   if (!config.enabled) return { mode: 'external', reason: 'QuickView is disabled' }
   if (input.forceExternal) return { mode: 'external', reason: 'Full viewer requested' }
-  // Values like "CT\SR" or "DX,OT" can come from DICOM multi-value fields or bridge metadata.
-  const modalities = [...new Set(input.modalities.flatMap(value => (value ?? '').split(/[\\,/]/)).map(normalizeModality).filter((value): value is string => Boolean(value)))]
+  const modalities = modalityCodes(input.modalities)
   if (!modalities.length) return { mode: 'external', reason: 'Modality is unknown' }
   const externalOnly = modalities.find(modality => EXTERNAL_ONLY_MODALITIES.has(modality))
   if (externalOnly) return { mode: 'external', reason: `${externalOnly} studies always use the full DICOM viewer` }
