@@ -67,6 +67,7 @@ import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
 import { findStoredStudyObject, readStoredObject, storeObject, uploadReportHtmlToS3, type StorageKind } from './reportStorage'
 import { bridgeStudyS3KeyCandidates, studyViewerStorageKind } from './lib/studyStorage'
+import { startStudyArchiveMaintenance, storeOriginalStudy } from './services/studyArchive.service'
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
@@ -4492,6 +4493,7 @@ const httpServer = app.listen(port, host, () => {
   setInterval(() => void recoverStaleOutboundSubmissions(), 10 * 60 * 1000).unref()
   if (features.billing) setInterval(() => void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error)), 24 * 60 * 60 * 1000).unref()
   startViewerPreimport()
+  startStudyArchiveMaintenance()
 })
 
 /**
@@ -5437,16 +5439,8 @@ async function queueTeleradiologyOnlyJob(input: {
   const billableUnits = billableUnitsForStudy(input.serviceName, input.serviceType, input.job.imageCount || Number(input.dicomMetadata.numberOfInstances ?? 1) || 1)
   const studyUid = input.dicomMetadata.studyInstanceUid ?? `APP-${input.job.id}`
   const modality = input.dicomMetadata.modality ?? defaultModalityForServiceType(input.serviceType)
-  const originalStudyStorage = await storeObject({
-    kind: studyStorageKind(input.serviceType),
-    keyParts: ['studies', input.job.id, input.job.uploadName],
-    body: fsSync.createReadStream(input.job.uploadPath),
-    contentType: 'application/zip',
-    localPath: input.job.uploadPath,
-  }).catch((error) => {
-    console.warn(`Unable to upload study ${input.job.id} to S3:`, error instanceof Error ? error.message : error)
-    return null
-  })
+  // A failed upload is retried in the background; the local ZIP stays until S3 has it (studyArchive.service).
+  const originalStudyStorage = await storeOriginalStudy(input.job)
   const refreshedJob = await prisma.processingJob.findUnique({ where: { id: input.job.id }, select: { patientId: true } })
   const matchedPatient = refreshedJob?.patientId ? null : input.dicomMetadata.patientId?.trim()
     ? await prisma.patient.findFirst({ where: { clientId: input.job.clientId, patientIdentifier: { equals: input.dicomMetadata.patientId.trim(), mode: 'insensitive' } }, select: { id: true, clinicalHistory: true } })
@@ -6342,10 +6336,8 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
         data: { workflowStatus: 'SubmittedToRenewist' },
       }),
     ])
-    await Promise.all([
-      deleteLocalUploadFile(input.studyZipPath),
-      normalizedStudy?.zipPath && normalizedStudy.zipPath !== input.studyZipPath ? deleteLocalUploadFile(normalizedStudy.zipPath) : Promise.resolve(),
-    ])
+    // The original ZIP is kept for retries and QuickView; studyArchive.service removes it once S3 has held it for the retention window.
+    if (normalizedStudy?.zipPath && normalizedStudy.zipPath !== input.studyZipPath) await deleteLocalUploadFile(normalizedStudy.zipPath)
     const acceptedJob = await prisma.processingJob.findUnique({ where: { id: input.processingJobId }, select: { clientId: true } })
     if (acceptedJob) {
       await enqueueStudyStatusNotification(prisma, {
@@ -7284,14 +7276,6 @@ function getDicomMetadataValue(value: unknown, key: string) {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null
   const found = (metadata as Record<string, unknown>)[key]
   return typeof found === 'string' && found.trim() ? found.trim() : null
-}
-
-function studyStorageKind(serviceType: ServiceType): StorageKind {
-  if (serviceType.startsWith('ct')) return 'ct-studies'
-  if (serviceType.startsWith('mri') || serviceType === 'mrcp' || serviceType.startsWith('mra')) return 'mri-studies'
-  if (serviceType === 'mammography') return 'mammography-studies'
-  if (serviceType.includes('xray')) return 'xray-studies'
-  return 'original-studies'
 }
 
 
