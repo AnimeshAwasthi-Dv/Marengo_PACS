@@ -1,3 +1,5 @@
+import { enqueueTelegramStudy, TELEGRAM_URGENT_EVENT } from './telegram';
+import { telegramUrgentConfig } from './telegramPolicy';
 import { prisma } from './db';
 
 export async function markWorklistUrgent(studyId: string, clientIds: string[] | null, actorUserId: string, db = prisma) {
@@ -18,6 +20,8 @@ export async function setWorklistPriority(studyId: string, clientIds: string[] |
     if (previousPriority !== priority || study.priority !== priority) {
       await tx.availableBridgeStudy.update({ where: { id: study.id }, data: { priority } });
       if (job) await tx.processingJob.update({ where: { id: job.id }, data: { priority } });
+      const telegram = telegramUrgentConfig();
+      if (job && priority === 'URGENT' && telegram.enabled) await enqueueTelegramStudy(tx, { ...job, priority }, study.modalities?.[0], telegram, study.studyDescription, TELEGRAM_URGENT_EVENT, job.id + ':marked-urgent');
       await tx.auditLog.create({ data: { clientId: study.clientId, actorUserId, action: priority === 'URGENT' ? 'STUDY_MARKED_URGENT' : 'STUDY_MARKED_ROUTINE', metadata: { studyId: study.id, processingJobId: job?.id ?? null, previousPriority, priority, requiresProviderFollowUp, source: 'WORKLIST' } } });
     }
     return { studyId: study.id, priority, requiresProviderFollowUp, message: requiresProviderFollowUp

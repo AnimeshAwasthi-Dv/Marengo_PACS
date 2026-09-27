@@ -100,7 +100,7 @@ test('call button notifies only Superadmin and assigned radiologist, once across
 
 test('template supplies share link and a callback payload rather than a telephone dial action', () => {
   const message = reportReadyTemplate('+919876543210', 'https://portal.example.com/shared/token', 'outbox', 'approved_template', 'en');
-  assert.equal(message.template.components[0].parameters[0].text, 'https://portal.example.com/shared/token');
+  assert.equal(message.template.components[0].parameters[3].text, 'https://portal.example.com/shared/token');
   assert.equal(message.template.components[1].sub_type, 'quick_reply');
   assert.equal(message.template.components[1].parameters[0].payload, 'physician_call:outbox');
   assert.equal(physicianWhatsappReady({ WHATSAPP_CLOUD_API_ENABLED: 'true' }), false);

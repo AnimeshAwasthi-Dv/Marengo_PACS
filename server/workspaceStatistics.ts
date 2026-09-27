@@ -115,7 +115,7 @@ export function reportingActivity(rows: StatisticsRow[], range: ReturnType<typeo
    tatGroups.set(modality, group);
   }
  }
- const allTatModalities = [...new Set([...modalityCodes.map(modalityLabel), ...tatGroups.keys()])].filter(modality => modality !== modalityLabel('NM'));
+ const allTatModalities = [...new Set([...modalityCodes.map(modalityLabel), ...tatGroups.keys()])];
  const tatByModality = allTatModalities.map(modality => {
   const group = tatGroups.get(modality);
   return {
