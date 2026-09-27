@@ -1,4 +1,4 @@
-import { modalityLabel } from '../src/modalities';
+import { modalityCodes, modalityLabel } from '../src/modalities';
 const DAY = 86400000;
 const IST_OFFSET = 19800000;
 export const istDay = (value: Date | string) => new Date(new Date(value).getTime() + IST_OFFSET).toISOString().slice(0, 10);
@@ -101,5 +101,27 @@ export function reportingActivity(rows: StatisticsRow[], range: ReturnType<typeo
  const tatStudies = rows.filter(r=>inRange(r.reported) && r.tatSeconds !== null)
   .sort((a,b)=>(a.reported ?? '').localeCompare(b.reported ?? '') || a.id.localeCompare(b.id))
   .map((r,i)=>({study:i+1,id:r.id,modality:modalityLabel(r.modality),minutes:r.tatSeconds!/60}));
- return { daily, hourly, modalityDistribution, totals: {submitted:sum('submitted'),received:sum('received'),sent:sum('sent'),notSent:sum('notSent')}, tatStudies };
+ const tatGroups = new Map<string, { minimumMinutes: number; maximumMinutes: number; totalMinutes: number; samples: number }>();
+ for (const study of tatStudies) {
+  if (!Number.isFinite(study.minutes) || study.minutes < 0) continue;
+  const modalities = new Set(study.modality.split(',').map(value => modalityLabel(value.trim())).filter(Boolean));
+  if (!modalities.size) modalities.add('Other');
+  for (const modality of modalities) {
+   const group = tatGroups.get(modality) ?? { minimumMinutes: study.minutes, maximumMinutes: study.minutes, totalMinutes: 0, samples: 0 };
+   group.minimumMinutes = Math.min(group.minimumMinutes, study.minutes);
+   group.maximumMinutes = Math.max(group.maximumMinutes, study.minutes);
+   group.totalMinutes += study.minutes;
+   group.samples++;
+   tatGroups.set(modality, group);
+  }
+ }
+ const allTatModalities = [...new Set([...modalityCodes.map(modalityLabel), ...tatGroups.keys()])].filter(modality => modality !== modalityLabel('NM'));
+ const tatByModality = allTatModalities.map(modality => {
+  const group = tatGroups.get(modality);
+  return {
+   modality, minimumMinutes: group?.minimumMinutes ?? null, maximumMinutes: group?.maximumMinutes ?? null,
+   averageMinutes: group ? group.totalMinutes / group.samples : null, samples: group?.samples ?? 0,
+  };
+ });
+ return { daily, hourly, modalityDistribution, totals: {submitted:sum('submitted'),received:sum('received'),sent:sum('sent'),notSent:sum('notSent')}, tatStudies, tatByModality };
 }
