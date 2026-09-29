@@ -27,3 +27,6 @@ server/testing/
 !server/workflowUpdates.test.ts
 
 !server/wati.test.ts
+
+!server/centerUserCredentials.test.ts
+!server/renewistLocation.test.ts

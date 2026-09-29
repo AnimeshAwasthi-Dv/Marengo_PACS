@@ -8,7 +8,7 @@ import { studyTracking } from './studyTracking';
 import { setWorklistPriority } from './worklistPriority';
 import { redisNamespace } from './redisCache';
 import { requireWorkspaceCapability, workspaceAccess } from './workspaceAccess';
-import { reportingActivity, csvDocument, durationSeconds, istTimestamp, statisticsRange, summarizeStudies, type StatisticsRow } from './workspaceStatistics';
+import { modalityStatisticsExports, reportingActivity, csvDocument, durationSeconds, istTimestamp, statisticsRange, summarizeStudies, type StatisticsRow } from './workspaceStatistics';
 import { recordBillingEvent, repriceUninvoicedZeroBillingTransactions } from './billing';
 import { serviceNameForType } from './uploadPipeline';
 
@@ -274,15 +274,12 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
     });
     const charges = [...new Set(transactions.map(t => t.currency))].map(currency => ({ currency, amountMinor: transactions.filter(t => t.currency === currency).reduce((sum, t) => sum + t.amountMinor, 0) }));
     if (req.query.format === 'csv') {
+      const modalityExports = modalityStatisticsExports(result.rows, range, modality);
       const data: unknown[][] = view === 'billing' ? [
         ['Center', 'Patient', 'Patient ID', 'Accession', 'Study', 'Processed IST', 'Service', 'Units', 'Unit price', 'Amount', 'Currency', 'Billing status', 'Invoice'],
         ...billingRows.map(r => [r.center, r.patient, r.patientId, r.accession, r.description, istTimestamp(r.processed), r.service, r.units, r.unitPriceMinor === null ? '' : r.unitPriceMinor / 100, r.amountMinor === null ? '' : r.amountMinor / 100, r.currency, r.billingStatus, r.invoice]),
-      ] : req.query.export === 'reporting' ? [
-        ['Date IST', 'Submitted during day', 'Received during day', 'Received cohort sent by period end', 'Received cohort not sent by period end'], ...reporting.daily.map(d => [d.day, d.submitted, d.received, d.sent, d.notSent]),
-      ] : req.query.export === 'daily' ? [
-        ['Date IST', 'Received studies', 'Processed studies', 'Finalized reports'], ...result.daily.map(d => [d.day, d.received, d.processed, d.reported]),
-        [], ['Average TAT seconds', result.totals.averageTatSeconds], ['Completed TAT sample', result.totals.tatSampleSize],
-      ] : [
+      ] : req.query.export === 'reporting' ? modalityExports.reporting
+        : req.query.export === 'daily' ? modalityExports.daily : [
         ['Center', 'Patient', 'Patient ID', 'Accession', 'Modality', 'Study', 'Current status', 'Received IST', 'Processed IST', 'Reported IST', 'TAT seconds', 'TAT minutes', 'TB score', 'Report replaced', 'Replacement count', 'Replacement history', 'Demo'],
         ...result.rows.map(r => [r.center, r.patient, r.patientId, r.accession, r.modality, r.description, r.reported ? 'Reported' : r.processed ? 'Processed' : 'Available', istTimestamp(r.received), istTimestamp(r.processed), istTimestamp(r.reported), r.tatSeconds, r.tatSeconds === null ? '' : Math.round((r.tatSeconds / 60) * 100) / 100, r.tbScore ?? '', (r.replacementCount ?? 0) > 0 ? 'Yes' : 'No', r.replacementCount ?? 0, r.replacementHistory ?? '', r.demo]),
         [], ['Average TAT seconds', result.totals.averageTatSeconds], ['Average TAT minutes', result.totals.averageTatSeconds === null ? '' : Math.round((result.totals.averageTatSeconds / 60) * 100) / 100], ['Completed TAT sample', result.totals.tatSampleSize], ['Average TB score', result.totals.averageTbScore], ['TB score sample', result.totals.tbScoreSampleSize], ['Reports replaced after reported', result.totals.reportsReplaced],

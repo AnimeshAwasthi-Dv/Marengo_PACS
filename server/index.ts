@@ -1,3 +1,4 @@
+import { centerUserSchema, centerLoginConflictWhere } from './centerUserCredentials'
 import { captureWatiWebhookSecret } from './wati';
 import { uploadModalityCodes, uploadDicomModality, modalityLabel } from '../src/modalities'
 import { sendStudyBundle, StudyArchiveError, type BundleStudySource } from './studyBundle'
@@ -892,21 +893,21 @@ app.post('/api/admin/clients', requireAuth, requireSuperAdmin, async (req, res) 
 app.post('/api/admin/clients/:clientId/users', requireAuth, requireSuperAdmin, async (req, res) => {
   const clientId = String(req.params.clientId)
   const client = await prisma.client.findUniqueOrThrow({ where: { id: clientId }, select: { id: true, code: true, name: true } })
-  const body = z.object({
-    name: z.string().min(2),
-    email: z.string().email(),
-    portalRole: clientPortalRoleSchema,
-  }).parse(req.body)
+  const body = centerUserSchema.parse(req.body)
 
-  const temporaryPassword = generatePortalPassword()
+  const userId = body.userId || userIdForEmail(body.email)
+  if (await prisma.user.findFirst({ where: centerLoginConflictWhere(userId, body.email), select: { id: true } })) {
+    return res.status(409).json({ message: 'That username or email is already in use. Choose another.' })
+  }
+  const temporaryPassword = body.password || generatePortalPassword()
   const passwordHash = await bcrypt.hash(temporaryPassword, 12)
   const user = await prisma.user.create({
     data: {
-      userId: userIdForEmail(body.email),
+      userId,
       email: body.email,
       name: body.name,
       passwordHash,
-      lastGeneratedPassword: temporaryPassword,
+      lastGeneratedPassword: null,
       role: 'CLIENT_USER',
       portalRole: body.portalRole,
       clientId: client.id,
@@ -921,6 +922,7 @@ app.post('/api/admin/clients/:clientId/users', requireAuth, requireSuperAdmin, a
       metadata: { centerCode: client.code, email: body.email, portalRole: body.portalRole },
     },
   })
+  await invalidateDashboardCaches()
   res.status(201).json({ client, user, temporaryPassword })
 })
 
@@ -993,6 +995,14 @@ app.get('/api/admin/clients/:clientId/billing-usage', requireAuth, requireSuperA
     summary: { transactionCount: transactions.length, ...summary, currency: transactions[0]?.currency ?? 'INR' },
     transactions,
   })
+})
+
+app.patch('/api/admin/clients/:clientId/location', requireAuth, requireSuperAdmin, async (req, res) => {
+  const body = z.object({ location: z.string().trim().max(120) }).parse(req.body)
+  const client = await prisma.client.update({ where: { id: String(req.params.clientId) }, data: { location: body.location || null } })
+  await prisma.auditLog.create({ data: { clientId: client.id, actorUserId: req.user!.sub, action: 'CENTER_LOCATION_UPDATED', metadata: { location: client.location } } })
+  await invalidateDashboardCaches()
+  res.json({ id: client.id, location: client.location })
 })
 
 app.patch('/api/admin/clients/:clientId/hospital-slug', requireAuth, requireSuperAdmin, async (req, res) => {
@@ -2084,19 +2094,19 @@ app.post('/api/client/users', requireAuth, requireClientUser, async (req, res) =
   if (req.user!.portalRole !== 'IT_TEAM') return res.status(403).json({ message: 'Only IT Team users can create center logins' })
   const client = await prisma.client.findUniqueOrThrow({ where: { id: req.user!.clientId }, select: { id: true, code: true, name: true, kind: true } })
   if (client.kind !== 'CENTER') return res.status(403).json({ message: 'Use Marengo group user management for group accounts' })
-  const body = z.object({
-    name: z.string().min(2),
-    email: z.string().email(),
-    portalRole: clientPortalRoleSchema,
-  }).parse(req.body)
+  const body = centerUserSchema.parse(req.body)
 
   if (!assignableCenterRoles().includes(body.portalRole)) return res.status(403).json({ message: 'Center IT can create Front Desk, Technician and Radiology Manager accounts only.' })
 
-  const temporaryPassword = generatePortalPassword()
+  const userId = body.userId || userIdForEmail(body.email)
+  if (await prisma.user.findFirst({ where: centerLoginConflictWhere(userId, body.email), select: { id: true } })) {
+    return res.status(409).json({ message: 'That username or email is already in use. Choose another.' })
+  }
+  const temporaryPassword = body.password || generatePortalPassword()
   const passwordHash = await bcrypt.hash(temporaryPassword, 12)
   const user = await prisma.user.create({
     data: {
-      userId: userIdForEmail(body.email),
+      userId,
       email: body.email,
       name: body.name,
       passwordHash,
@@ -2115,6 +2125,7 @@ app.post('/api/client/users', requireAuth, requireClientUser, async (req, res) =
       metadata: { centerCode: client.code, email: body.email, portalRole: body.portalRole },
     },
   })
+  await invalidateDashboardCaches()
   res.status(201).json({ client, user, temporaryPassword })
 })
 
@@ -5897,7 +5908,10 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
     studyInstanceUid: String(input.studyInstanceUid ?? dicomMetadata.studyInstanceUid ?? ''),
     modality: String(input.modality ?? dicomMetadata.modality ?? ''),
   }) : null
-  const submissionInput = normalizedStudy ? { ...input, studyZipPath: normalizedStudy.zipPath } : input
+  const jobCenter = await prisma.processingJob.findUniqueOrThrow({
+    where: { id: input.processingJobId }, select: { client: { select: { location: true } } },
+  })
+  const submissionInput = { ...input, location: jobCenter.client.location, ...(normalizedStudy ? { studyZipPath: normalizedStudy.zipPath } : {}) }
   const requestHash = crypto.createHash('sha256').update(JSON.stringify(submissionInput)).digest('hex')
   await prisma.providerApiRequest.create({
     data: {
