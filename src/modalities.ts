@@ -22,4 +22,8 @@ export const uploadModalityCodes = ['XRAY', 'SPECIALXRAY', 'CT', 'MRI', 'MG', 'P
 export function uploadDicomModality(value: string) {
  const code = modalityCode(value);
  return code === 'XR' || code === 'SPECIALXRAY' ? 'DX' : code;
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> af9be0fa30c8cbd62724b1fe52224d5da5b8c3dd
