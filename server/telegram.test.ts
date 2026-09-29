@@ -66,6 +66,25 @@ test('Lost claim and changed recipient group cannot send a message', async () =>
   }
 });
 
+test('Completed studies suppress pending study and urgent Telegram alerts', async () => {
+  for (const eventType of [TELEGRAM_EVENT, 'TELEGRAM_URGENT_STUDY']) {
+    let final: Record<string, unknown> | undefined;
+    const db = { notificationOutbox: {
+      findMany: async () => [{ id: 'row', aggregateId: job.id, status: 'PENDING', attempts: 0, payload: { chatId: config.chatId, clientId: job.clientId } }],
+      updateMany: async () => ({ count: 1 }),
+      update: async ({ data }: { data: Record<string, unknown> }) => { final = data; },
+    } } as unknown as NonNullable<Parameters<typeof processTelegramOutbox>[0]>['db'];
+    await processTelegramOutbox({
+      db, config, eventType,
+      track: (async () => ({ id: job.id, priority: eventType === 'TELEGRAM_URGENT_STUDY' ? 'Urgent' : 'Routine', completedAt: '2026-09-29T09:30:00.000Z' })) as typeof studyTracking,
+      pause: async () => undefined,
+      send: async () => { assert.fail('Completed study must not send a Telegram alert'); },
+    });
+    assert.equal(final?.status, 'DEAD');
+    assert.equal((final?.payload as Record<string, unknown>).error, 'Signed report finalized; notification suppressed');
+  }
+});
+
 test('Tracking checks center scope before reading any integration data', async () => {
   const db = { processingJob: { findFirst: async ({ where }: { where: { id: string; clientId: { in: string[] } } }) => { assert.equal(where.id, 'outside-job'); assert.deepEqual(where.clientId.in, ['center-a']); return null; } } } as unknown as Parameters<typeof studyTracking>[2];
   assert.equal(await studyTracking('outside-job', ['center-a'], db), null);

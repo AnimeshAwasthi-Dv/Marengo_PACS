@@ -47,8 +47,15 @@ export async function processTelegramOutbox({ config = telegramConfig(), db = pr
           await db.notificationOutbox.update({ where: { id: item.id }, data: { status: 'DEAD', payload: { ...payload, error: 'Study scope or group configuration changed; review required' } } });
           continue;
         }
+        // An outbox item can remain pending while Telegram is unavailable or while a
+        // provider callback is being processed. Never send a stale operational alert
+        // after the signed report has already been finalized.
+        if (tracking.completedAt) {
+          await db.notificationOutbox.update({ where: { id: item.id }, data: { status: 'DEAD', payload: { ...payload, error: 'Signed report finalized; notification suppressed' } } });
+          continue;
+        }
         if (eventType === TELEGRAM_ALERT_EVENT && !tatAlertDue(tracking, leadMinutes)) {
-          await db.notificationOutbox.update({ where: { id: item.id }, data: tracking.completedAt || /cancel/i.test(tracking.processingStatus)
+          await db.notificationOutbox.update({ where: { id: item.id }, data: /cancel/i.test(tracking.processingStatus)
             ? { status: 'DEAD', payload: { ...payload, error: 'Report finalized or study cancelled; alert suppressed' } }
             : { status: 'PENDING', attempts: { decrement: 1 }, nextAttemptAt: new Date(Date.now() + 60000) } });
           continue;
