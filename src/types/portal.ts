@@ -146,6 +146,7 @@ export type ClientService = {
 };
 
 export type Client = {
+  location?: string | null;
   id: string;
   code: string;
   name: string;

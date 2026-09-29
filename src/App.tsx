@@ -1324,9 +1324,16 @@ function ClientsView({
   const [clientUserForm, setClientUserForm] = useState({
     name: "",
     email: "",
+    userId: "",
+    password: "",
     portalRole: "FRONT_DESK" as ClientPortalRole,
   });
 
+  const [centerLocation, setCenterLocation] = useState("");
+  const [createdCenterLogin, setCreatedCenterLogin] = useState<{ user: User; password: string } | null>(null);
+  const [creatingCenterLogin, setCreatingCenterLogin] = useState(false);
+  const [centerLoginError, setCenterLoginError] = useState("");
+  const [locationError, setLocationError] = useState("");
   const [discountPercent, setDiscountPercent] = useState("0");
   const [demoModeEnabled, setDemoModeEnabled] = useState(false);
   const [demoStudyLimit, setDemoStudyLimit] = useState("");
@@ -1374,6 +1381,8 @@ function ClientsView({
     });
     setCreateOpen(false);
     setSelectedClientId(result.client.id);
+    setCenterLocation(result.client.location ?? "");
+    setCreatedCenterLogin(null);
     setGeneratedPassword(result.temporaryPassword);
     setDiscountPercent(String(result.client.billingDiscountPercent ?? 0));
     setDemoModeEnabled(Boolean(result.client.demoModeEnabled));
@@ -1391,24 +1400,33 @@ function ClientsView({
 
   async function createClientUser(client: Client, event: FormEvent) {
     event.preventDefault();
-    const result = await api<{
-      client: Pick<Client, "id" | "code" | "name">;
-      user: User;
-      temporaryPassword: string;
-    }>(`/api/admin/clients/${client.id}/users`, token, {
-      method: "POST",
-      body: JSON.stringify(clientUserForm),
-    });
-    setClientUserForm({
-      name: "",
-      email: "",
-      portalRole: "FRONT_DESK",
-    });
-    setGeneratedPassword(result.temporaryPassword);
-    notice(
-      `${clientPortalRoleLabel(result.user.portalRole)} login created for ${result.user.email}.`,
-    );
-    await reload();
+    if (creatingCenterLogin) return;
+    setCreatingCenterLogin(true);
+    setCenterLoginError("");
+    setCreatedCenterLogin(null);
+    try {
+      const result = await api<{ user: User; temporaryPassword: string }>(`/api/admin/clients/${client.id}/users`, token, {
+        method: "POST", body: JSON.stringify(clientUserForm),
+      });
+      setClientUserForm({ name: "", email: "", userId: "", password: "", portalRole: "FRONT_DESK" });
+      setCreatedCenterLogin({ user: result.user, password: result.temporaryPassword });
+      notice(`${clientPortalRoleLabel(result.user.portalRole)} login created for ${result.user.email}.`);
+      await reload();
+    } catch (error) { setCenterLoginError(error instanceof Error ? error.message : "Unable to create login."); }
+    finally { setCreatingCenterLogin(false); }
+  }
+
+  async function saveCenterLocation(client: Client, event: FormEvent) {
+    event.preventDefault();
+    setLocationError("");
+    try {
+      const result = await api<{ location: string | null }>(`/api/admin/clients/${client.id}/location`, token, {
+        method: "PATCH", body: JSON.stringify({ location: centerLocation }),
+      });
+      setCenterLocation(result.location ?? "");
+      notice(`Location saved for ${client.name}.`);
+      await reload();
+    } catch (error) { setLocationError(error instanceof Error ? error.message : "Unable to save location."); }
   }
 
   async function toggleStatus(client: Client) {
@@ -1445,6 +1463,11 @@ function ClientsView({
 
   function openClientProfile(client: Client) {
     setSelectedClientId(client.id);
+    setCenterLocation(client.location ?? "");
+    setCreatedCenterLogin(null);
+    setCenterLoginError("");
+    setLocationError("");
+    setClientUserForm({ name: "", email: "", userId: "", password: "", portalRole: "FRONT_DESK" });
     setGeneratedPassword("");
     setDiscountPercent(String(client.billingDiscountPercent ?? 0));
     setDemoModeEnabled(Boolean(client.demoModeEnabled));
@@ -1748,6 +1771,12 @@ function ClientsView({
                   readOnly
                 />
               </div>
+              <form className="mt-5 grid gap-3 rounded-lg border border-slate-200 p-4 sm:grid-cols-[1fr_auto]" onSubmit={event => void saveCenterLocation(selectedClient, event)}>
+                <TextInput label="City / location sent to Renewist" value={centerLocation} onChange={setCenterLocation} maxLength={120} />
+                <button className="self-end rounded-md bg-sky-600 px-4 py-2 text-sm font-bold text-white" type="submit">Save location</button>
+                <p className="text-xs text-slate-500">Enter the center city, for example Ahmedabad. Until configured, the location sent to Renewist is empty.</p>
+                {locationError && <p role="alert" className="text-sm text-rose-700">{locationError}</p>}
+              </form>
               <label className="mt-5 flex items-center justify-between gap-3 rounded-lg border border-teal-100 bg-teal-50 p-4 text-sm font-semibold text-slate-700">
                 <span>
                   <span className="block text-sm font-bold uppercase text-teal-800">
@@ -1974,7 +2003,7 @@ function ClientsView({
                 </h3>
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
                   <TextInput
-                    label="User name"
+                    label="Full name"
                     value={clientUserForm.name}
                     onChange={(value) =>
                       setClientUserForm({ ...clientUserForm, name: value })
@@ -1988,6 +2017,8 @@ function ClientsView({
                       setClientUserForm({ ...clientUserForm, email: value })
                     }
                   />
+                  <TextInput label="Username (optional; generated if blank)" value={clientUserForm.userId} onChange={value => setClientUserForm({ ...clientUserForm, userId: value })} />
+                  <TextInput label="Password (optional; at least 12 characters)" type="password" value={clientUserForm.password} onChange={value => setClientUserForm({ ...clientUserForm, password: value })} />
                   <SelectInput
                     label="Portal role"
                     value={clientUserForm.portalRole}
@@ -2001,12 +2032,20 @@ function ClientsView({
                   />
                   <button
                     className="self-end rounded-md bg-sky-600 px-4 py-2 text-sm font-bold text-white"
+                    disabled={creatingCenterLogin}
                     type="submit"
                   >
-                    Create user
+                    {creatingCenterLogin ? "Creating..." : "Create user"}
                   </button>
                 </div>
+                {centerLoginError && <p role="alert" className="mt-3 text-sm text-rose-700">{centerLoginError}</p>}
+                {createdCenterLogin?.user.clientId === selectedClient.id && <div className="mt-4 space-y-2" role="status">
+                  <p className="text-sm font-semibold">Created {createdCenterLogin.user.name} - {clientPortalRoleLabel(createdCenterLogin.user.portalRole)}</p>
+                  <CredentialField label="Created username" value={createdCenterLogin.user.userId ?? createdCenterLogin.user.email} />
+                  <CredentialField label="One-time password - copy before closing" value={createdCenterLogin.password} />
+                </div>}
               </form>
+              <SimpleTable title="Center role-based users" columns={["Name", "Username", "Email", "Role", "Status"]} rows={(selectedClient.users ?? []).filter(user => user.role === "CLIENT_USER").map(user => [user.name, user.userId ?? "-", user.email, clientPortalRoleLabel(user.portalRole), <StatusBadge status={user.active === false ? "INACTIVE" : "ACTIVE"} />])} />
               <p className="pw-help">All Marengo services are available to this center.</p>
             </section>
 
@@ -4495,21 +4534,33 @@ function CenterUsersView({
   const [form, setForm] = useState({
     name: "",
     email: "",
+    userId: "",
+    password: "",
     portalRole: "FRONT_DESK" as ClientPortalRole,
   });
   const [temporaryPassword, setTemporaryPassword] = useState("");
+  const [createdUsername, setCreatedUsername] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
   const users = (client.users ?? []).filter((user) => user.role === "CLIENT_USER");
 
   async function createUser(event: FormEvent) {
     event.preventDefault();
-    const result = await api<{ user: User; temporaryPassword: string }>("/api/client/users", token, {
-      method: "POST",
-      body: JSON.stringify(form),
-    });
-    setTemporaryPassword(result.temporaryPassword);
-    setForm({ name: "", email: "", portalRole: "FRONT_DESK" });
-    notice(`${clientPortalRoleLabel(result.user.portalRole)} login created for ${result.user.email}.`);
-    await reload();
+    if (creating) return;
+    setCreating(true); setError("");
+    setTemporaryPassword(""); setCreatedUsername("");
+    try {
+      const result = await api<{ user: User; temporaryPassword: string }>("/api/client/users", token, {
+        method: "POST",
+        body: JSON.stringify(form),
+      });
+      setTemporaryPassword(result.temporaryPassword);
+      setCreatedUsername(result.user.userId ?? result.user.email);
+      setForm({ name: "", email: "", userId: "", password: "", portalRole: "FRONT_DESK" });
+      notice(`${clientPortalRoleLabel(result.user.portalRole)} login created for ${result.user.email}.`);
+      await reload();
+    } catch (error) { setError(error instanceof Error ? error.message : "Unable to create login."); }
+    finally { setCreating(false); }
   }
 
   return (
@@ -4521,9 +4572,9 @@ function CenterUsersView({
             Create role-based logins for {brandText(client.name)}.
           </p>
         </div>
-        <FormCard title="Create user" onSubmit={createUser} submitLabel="Create login">
+        <FormCard title="Create user" onSubmit={createUser} submitLabel={creating ? "Creating..." : "Create login"}>
           <TextInput
-            label="User name"
+            label="Full name"
             value={form.name}
             onChange={(value) => setForm({ ...form, name: value })}
           />
@@ -4533,6 +4584,10 @@ function CenterUsersView({
             value={form.email}
             onChange={(value) => setForm({ ...form, email: value })}
           />
+          <TextInput label="Username (optional; generated if blank)" value={form.userId} onChange={value => setForm({ ...form, userId: value })} />
+          <TextInput label="Password (optional; at least 12 characters)" type="password" value={form.password} onChange={value => setForm({ ...form, password: value })} />
+          {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
+          {createdUsername && <CredentialField label="Created username" value={createdUsername} />}
           <SelectInput
             label="Portal role"
             value={form.portalRole}

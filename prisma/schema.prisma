@@ -95,6 +95,7 @@ model Client {
   code                   String                    @unique
   name                   String
   hospitalSlug           String?                   @unique
+  location               String?
   kind                   ClientKind                @default(CENTER)
   parentClientId         String?
   facilityType           String

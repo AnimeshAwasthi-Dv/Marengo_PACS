@@ -4,6 +4,7 @@ export type ProviderStudySubmission = {
   accessionNumber?: string | null
   patientId?: string | null
   modality?: string | null
+  location?: string | null
   workflowType: 'AI_ONLY' | 'TELERADIOLOGY_ONLY' | 'AI_TELERADIOLOGY'
   priority?: string | null
   aiReportHtml?: string | null
