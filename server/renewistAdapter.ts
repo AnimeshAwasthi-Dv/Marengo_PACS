@@ -44,6 +44,7 @@ export class RenewistAdapter implements TeleradiologyProviderAdapter {
     const form = new FormData()
     form.append('job_id', input.dectrocelJobId)
     form.append('hospital_slug', hospitalSlug)
+    form.append('location', input.location?.trim() ?? '')
     form.append('submission_mode', 'SIGNED_REPORT_ONLY')
     form.append('patient_id', patientId)
     form.append('study_instance_uid', firstString(input.studyInstanceUid, dicomMetadata.studyInstanceUid))

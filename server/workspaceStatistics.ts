@@ -1,4 +1,4 @@
-import { modalityCodes, modalityLabel } from '../src/modalities';
+import { modalityCodes, modalityLabel, modalityMatchesCode } from '../src/modalities';
 const DAY = 86400000;
 const IST_OFFSET = 19800000;
 export const istDay = (value: Date | string) => new Date(new Date(value).getTime() + IST_OFFSET).toISOString().slice(0, 10);
@@ -124,4 +124,42 @@ export function reportingActivity(rows: StatisticsRow[], range: ReturnType<typeo
   };
  });
  return { daily, hourly, modalityDistribution, totals: {submitted:sum('submitted'),received:sum('received'),sent:sum('sent'),notSent:sum('notSent')}, tatStudies, tatByModality };
+}
+
+// Event counts use their own timestamps; TAT and TB averages use reports finalized in the period.
+export function modalityStatisticsExports(rows: StatisticsRow[], range: ReturnType<typeof statisticsRange>, selectedModality = '') {
+  const inRange = (at?: string | null) => !!at && Date.parse(at) >= +range.start && Date.parse(at) < +range.end;
+  const labels = (row: StatisticsRow) => {
+    const values = [...new Set(row.modality.split(',').map(modalityLabel).filter(Boolean))];
+    return values.length ? values : ['Other'];
+  };
+  const modalities = [...new Set([...modalityCodes.map(modalityLabel), ...rows.flatMap(labels)])]
+    .filter(modality => !selectedModality || modalityMatchesCode(modality, selectedModality));
+  const daily = new Map<string, { day: string; modality: string; received: number; sent: number; reported: number }>();
+  const summary = new Map(modalities.map(modality => [modality, { modality, received: 0, sent: 0, reported: 0, tatTotal: 0, tatSamples: 0, tbTotal: 0, tbSamples: 0 }]));
+  for (let t = +range.start; t < +range.end; t += DAY) {
+    const day = istDay(new Date(t));
+    for (const modality of modalities) daily.set(day + ':' + modality, { day, modality, received: 0, sent: 0, reported: 0 });
+  }
+  for (const row of rows) for (const modality of labels(row)) {
+    const group = summary.get(modality);
+    if (!group) continue;
+    for (const [key, at] of [['received', row.received], ['sent', row.submitted], ['reported', row.reported]] as const) {
+      if (inRange(at)) { daily.get(istDay(at!) + ':' + modality)![key]++; group[key]++; }
+    }
+    if (!inRange(row.reported)) continue;
+    if (row.tatSeconds !== null && Number.isFinite(row.tatSeconds) && row.tatSeconds >= 0) { group.tatTotal += row.tatSeconds; group.tatSamples++; }
+    if (typeof row.tbScore === 'number' && Number.isFinite(row.tbScore)) { group.tbTotal += row.tbScore; group.tbSamples++; }
+  }
+  const average = (total: number, count: number, divisor = 1) => count ? Math.round(total / count / divisor * 10000) / 10000 : null;
+  return {
+    daily: [
+      ['Date IST', 'Modality', 'Studies received', 'Studies sent for reporting', 'Studies reported'],
+      ...[...daily.values()].map(d => [d.day, d.modality, d.received, d.sent, d.reported]),
+    ] as unknown[][],
+    reporting: [
+      ['From IST', 'To IST', 'Modality', 'Studies received', 'Studies sent for reporting', 'Studies reported', 'Average TAT seconds', 'Average TAT minutes', 'TAT sample size', 'Average TB probability score (as supplied)', 'TB score sample size'],
+      ...[...summary.values()].map(g => [range.from, range.to, g.modality, g.received, g.sent, g.reported, average(g.tatTotal, g.tatSamples), average(g.tatTotal, g.tatSamples, 60), g.tatSamples, average(g.tbTotal, g.tbSamples), g.tbSamples]),
+    ] as unknown[][],
+  };
 }
