@@ -12,7 +12,7 @@ const fullRowSelect = {
   studyDate: true, studyTime: true, studyDescription: true, modalities: true, seriesCount: true,
   instanceCount: true, totalSizeBytes: true, localIp: true, localPort: true, localAeTitle: true,
   archiveName: true, clinicalIndication: true, processingJobId: true, availabilityStatus: true,
-  workflowStatus: true, lastSyncedAt: true, selectedAt: true, submittedAt: true,
+  workflowStatus: true, lastSyncedAt: true, selectedAt: true, submittedAt: true, autoSubmitAt: true,
   referringPhysician: true, firstDetectedAt: true, createdAt: true, priority: true,
   processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true } },
   dispatchRequests: {
@@ -32,7 +32,7 @@ const worklistRowSelect = {
   id: true, clientId: true, publicStudyId: true, studyInstanceUid: true,
   patientId: true, patientName: true, accessionNumber: true, studyDescription: true, modalities: true,
   referringPhysician: true, processingJobId: true, priority: true, availabilityStatus: true,
-  workflowStatus: true, lastSyncedAt: true, firstDetectedAt: true, createdAt: true, submittedAt: true, updatedAt: true,
+  workflowStatus: true, lastSyncedAt: true, firstDetectedAt: true, createdAt: true, submittedAt: true, autoSubmitAt: true, updatedAt: true,
   processingJob: { select: { id: true, status: true, completedAt: true, priority: true } },
   _count: { select: { attachments: true } },
 } satisfies Prisma.AvailableBridgeStudySelect
@@ -53,11 +53,11 @@ const pageArgs = (cursor: string | undefined, take: number) => ({
 const readOnly = process.env.DATABASE_READ_ONLY === 'true'
 
 export function findFullStudyPage(where: Prisma.AvailableBridgeStudyWhereInput, cursor: string | undefined, take: number) {
-  return prisma.availableBridgeStudy.findMany({ where, select: { ...fullRowSelect, priority: !readOnly }, ...pageArgs(cursor, take) })
+  return prisma.availableBridgeStudy.findMany({ where, select: { ...fullRowSelect, autoSubmitAt: !readOnly, priority: !readOnly }, ...pageArgs(cursor, take) })
 }
 
 export function findWorklistStudyPage(where: Prisma.AvailableBridgeStudyWhereInput, cursor: string | undefined, take: number) {
-  return prisma.availableBridgeStudy.findMany({ where, select: { ...worklistRowSelect, priority: !readOnly }, ...pageArgs(cursor, take) })
+  return prisma.availableBridgeStudy.findMany({ where, select: { ...worklistRowSelect, autoSubmitAt: !readOnly, priority: !readOnly }, ...pageArgs(cursor, take) })
 }
 
 /** One batched lookup per page (never per row); uses report_reviews(clientId, studyUid, status). */
@@ -107,7 +107,7 @@ export function findStudyDetail(scope: StudyScope, studyId: string) {
     where: { id: studyId, ...scope },
     select: {
       ...fullRowSelect,
-      priority: !readOnly,
+      autoSubmitAt: !readOnly, priority: !readOnly,
       updatedAt: true,
       processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true, error: true } },
     },

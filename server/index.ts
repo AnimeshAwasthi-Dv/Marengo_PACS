@@ -15,7 +15,8 @@ import QRCode from 'qrcode'
 import { preferredCallWindows, normalizeCallPhone } from './callScheduling'
 import { externalViewerOrigin } from './viewer/externalViewer';
 import { classifyBreastXrayModalities } from '../src/mammography';
-import { holdSpecialXrayForManualSubmission } from '../src/specialXray';
+import { AUTO_REPORTING_DELAY_MS, autoReportingEnabled } from '../src/autoReporting';
+import { modalityCodes } from '../src/modalities';
 import { nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
 import { registerExternalViewerRoutes } from './viewer/routes';
@@ -995,6 +996,25 @@ app.get('/api/admin/clients/:clientId/billing-usage', requireAuth, requireSuperA
     summary: { transactionCount: transactions.length, ...summary, currency: transactions[0]?.currency ?? 'INR' },
     transactions,
   })
+})
+
+app.patch('/api/admin/clients/:clientId/auto-reporting', requireAuth, requireSuperAdmin, async (req, res) => {
+  const body = z.object({ modalities: z.array(z.enum(modalityCodes)).max(modalityCodes.length) }).parse(req.body)
+  const clientId = String(req.params.clientId)
+  const modalities = [...new Set(body.modalities)]
+  const client = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM clients WHERE id = ${clientId} FOR NO KEY UPDATE`
+    const current = await tx.client.findUniqueOrThrow({ where: { id: clientId } })
+    if (current.kind !== 'CENTER') throw new Error('Automatic reporting is configured per center')
+    const updated = await tx.client.update({ where: { id: clientId }, data: { autoReportingModalities: modalities } })
+    const pending = await tx.availableBridgeStudy.findMany({ where: { clientId, processingJobId: null, autoSubmitAt: { not: null } }, select: { id: true, modalities: true, studyDescription: true } })
+    const cancelled = pending.filter(study => !autoReportingEnabled(modalities, study)).map(study => study.id)
+    if (cancelled.length) await tx.availableBridgeStudy.updateMany({ where: { id: { in: cancelled }, processingJobId: null }, data: { autoSubmitAt: null } })
+    await tx.auditLog.create({ data: { clientId, actorUserId: req.user!.sub, action: 'CENTER_AUTO_REPORTING_UPDATED', metadata: { before: current.autoReportingModalities, modalities, cancelledCount: cancelled.length } } })
+    return updated
+  })
+  await invalidateDashboardCaches()
+  res.json({ id: client.id, autoReportingModalities: client.autoReportingModalities })
 })
 
 app.patch('/api/admin/clients/:clientId/location', requireAuth, requireSuperAdmin, async (req, res) => {
@@ -2245,12 +2265,10 @@ app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireC
       requestedServiceType: inferBridgeServiceType({ modalities: study.modalities, studyDescription: study.studyDescription ?? undefined }),
       auditAction: 'MANUAL_STUDY_AUTO_SUBMITTED_TO_RENEWIST',
     })
-    const updated = renewistJob
-      ? await prisma.availableBridgeStudy.findUniqueOrThrow({
+    const updated = await prisma.availableBridgeStudy.findUniqueOrThrow({
         where: { id: study.id },
         include: { dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 }, attachments: true, processingJob: true },
       })
-      : study
     res.status(201).json({ study: formatBridgeStudyForClient(updated), renewist_job_queued: Boolean(renewistJob) })
   } catch (error) {
     res.status(400).json({ message: error instanceof Error ? error.message : 'Unable to park manual study upload' })
@@ -2277,6 +2295,9 @@ app.post('/api/client/study-sync/available-studies/:studyId/submit', requireAuth
     const serviceSelection = await resolveBridgeStudyService(clientId, serviceStudy, submission.serviceType)
     if (!serviceSelection) return res.status(400).json({ message: 'No active reporting service is configured for this study modality' })
     const job = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM available_bridge_studies WHERE id = ${study.id} FOR UPDATE`
+      const current = await tx.availableBridgeStudy.findUniqueOrThrow({ where: { id: study.id } })
+      if (current.processingJobId) throw new Error('Study is already queued for processing')
       await tx.bridgeStudyAttachment.createMany({ data: submission.attachments })
       const currentPriority = await tx.availableBridgeStudy.findUniqueOrThrow({ where: { id: study.id }, select: { priority: true } })
       const selectedPriority = currentPriority.priority === 'URGENT' ? 'URGENT' : submission.priority
@@ -2305,6 +2326,7 @@ app.post('/api/client/study-sync/available-studies/:studyId/submit', requireAuth
         data: {
           clinicalIndication: submission.noClinicalIndication ? null : submission.clinicalIndication || null,
           workflowStatus: 'QueuedForRenewist',
+          autoSubmitAt: null,
           priority: selectedPriority,
           selectedAt: new Date(),
           submittedAt: new Date(),
@@ -2348,6 +2370,7 @@ app.post('/api/client/study-sync/available-studies/:studyId/additional-info', re
       return res.status(400).json({ message: 'Upload up to 5 supporting files per study.' })
     }
     const updated = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM available_bridge_studies WHERE id = ${study.id} FOR UPDATE`
       await tx.bridgeStudyAttachment.createMany({ data: submission.attachments })
       await tx.availableBridgeStudy.update({
         where: { id: study.id },
@@ -2647,12 +2670,10 @@ app.post(['/api/v1/bridge/studies/upload', '/api/v1/study-bridge/studies/upload'
       size_bytes: String(study.totalSizeBytes),
       auto_queued: Boolean(autoQueuedJob),
       processing_job_id: autoQueuedJob?.id,
-      study: formatBridgeStudyForClient(autoQueuedJob
-        ? await prisma.availableBridgeStudy.findUniqueOrThrow({
+      study: formatBridgeStudyForClient(await prisma.availableBridgeStudy.findUniqueOrThrow({
           where: { id: study.id },
           include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
-        })
-        : study),
+        })),
     }
     if (autoQueuedJob) await recordStudyAcknowledgement(autoQueuedJob.id, 'BRIDGE_EXCHANGE', acknowledgement)
     res.status(201).json(acknowledgement)
@@ -4298,6 +4319,9 @@ const httpServer = app.listen(port, host, () => {
   else console.log('WhatsApp outbox worker disabled by deployment profile')
   if (features.billing) void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error))
   else console.log('Billing invoice worker disabled by deployment profile')
+  const autoReportingScan = nonOverlapping(dispatchDueAutomaticStudies)
+  setTimeout(autoReportingScan, 3000).unref()
+  setInterval(autoReportingScan, 5000).unref()
   const scan = nonOverlapping(scanInboundDicomStudies);
   setTimeout(scan, 3000).unref()
   setInterval(scan, 10000).unref()
@@ -4911,6 +4935,18 @@ async function queueInboundStudyIfReady(input: {
   await fs.writeFile(marker, new Date().toISOString())
 }
 
+async function dispatchDueAutomaticStudies() {
+  const due = await prisma.availableBridgeStudy.findMany({
+    where: { processingJobId: null, autoSubmitAt: { lte: new Date() }, availabilityStatus: 'Available' },
+    select: { id: true, clientId: true }, orderBy: { autoSubmitAt: 'asc' }, take: 100,
+  })
+  for (const study of due) {
+    try {
+      await autoQueueAvailableStudyForRenewist({ clientId: study.clientId, studyId: study.id, dispatchDue: true, auditAction: 'STUDY_AUTO_SUBMITTED_FOR_REPORTING' })
+    } catch (error) { console.error('Automatic reporting failed for ' + study.id, error) }
+  }
+}
+
 async function autoQueueAvailableStudyForRenewist(input: {
   clientId: string
   clientCode?: string
@@ -4921,51 +4957,46 @@ async function autoQueueAvailableStudyForRenewist(input: {
   priority?: 'REGULAR' | 'URGENT'
   demoMode?: boolean
   auditAction: string
+  dispatchDue?: boolean
 }) {
   const study = await prisma.availableBridgeStudy.findFirst({
-    where: { id: input.studyId, clientId: input.clientId },
-    include: { attachments: true },
+    where: { id: input.studyId, clientId: input.clientId }, include: { attachments: true },
   })
   if (!study || study.processingJobId || study.availabilityStatus !== 'Available' || !study.archivePath) return null
-  if (study.modalities.includes('MG')) return null
-  if (holdSpecialXrayForManualSubmission(study, input.serviceType ?? input.requestedServiceType)) return null
   const archiveMetadata = await extractDicomStudyMetadata(study.archivePath).catch(() => ({}))
   const dicomMetadata = mergeDicomMetadata(bridgeStudyDicomMetadata(study), archiveMetadata)
-  const inferredServiceType = inferBridgeServiceType({
-    modalities: dicomMetadata.modality ? [dicomMetadata.modality] : study.modalities,
-    bodyPartExamined: dicomMetadata.bodyPartExamined,
-    studyDescription: [
-      dicomMetadata.studyDescription,
-      dicomMetadata.bodyPartExamined,
-      dicomMetadata.protocolName,
-      study.studyDescription,
-    ].filter(Boolean).join(' ') || undefined,
-  })
-  const serviceType = input.serviceType ?? (
-    input.requestedServiceType && serviceMatchesBridgeInference(input.requestedServiceType, 'xray')
-      ? parseServiceType(input.requestedServiceType)
-      : undefined
-  )
-  const isXray = inferredServiceType === 'xray'
-    || Boolean(serviceType && aiServiceTypeForServiceType(serviceType) === 'xray')
-  if (inferredServiceType === 'mammography') {
-    const modalities = classifyBreastXrayModalities(study.modalities, dicomMetadata.bodyPartExamined)
-    if (modalities.includes('MG')) await prisma.availableBridgeStudy.update({ where: { id: study.id }, data: { modalities } })
+  const serviceStudy = bridgeStudyWithMetadata(study, archiveMetadata)
+  // Only receipt of a complete upload schedules a new countdown; old manual studies are never swept in.
+  if (!input.dispatchDue) {
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM clients WHERE id = ${input.clientId} FOR NO KEY UPDATE`
+      const client = await tx.client.findUniqueOrThrow({ where: { id: input.clientId } })
+      if (client.status !== 'ACTIVE' || !autoReportingEnabled(client.autoReportingModalities, serviceStudy)) return
+      await tx.availableBridgeStudy.updateMany({
+        where: { id: study.id, processingJobId: null, autoSubmitAt: null, availabilityStatus: 'Available' },
+        data: { autoSubmitAt: new Date(Date.now() + AUTO_REPORTING_DELAY_MS), modalities: serviceStudy.modalities, studyDescription: serviceStudy.studyDescription },
+      })
+    })
     return null
   }
-  if (inferredServiceType === 'special-xray-contrast-media' || !isXray) return null
-
-  const demoStatus = input.demoMode === undefined ? await getDemoUploadStatus(input.clientId) : { allowed: true, demoMode: input.demoMode, message: '' }
+  if (!study.autoSubmitAt || study.autoSubmitAt.getTime() > Date.now()) return null
+  const demoStatus = await getDemoUploadStatus(input.clientId)
   if (!demoStatus.allowed) return null
-  const serviceSelection = input.serviceType && input.workflowType
-    ? { serviceType: input.serviceType, workflowType: input.workflowType }
-    : await resolveBridgeStudyService(input.clientId, bridgeStudyWithMetadata(study, archiveMetadata), serviceType ?? 'xray')
+  const serviceSelection = await resolveBridgeStudyService(input.clientId, serviceStudy, input.serviceType ?? input.requestedServiceType)
   if (!serviceSelection) return null
 
   const job = await prisma.$transaction(async (tx) => {
-    const current = await tx.availableBridgeStudy.findUnique({ where: { id: study.id }, select: { processingJobId: true, priority: true } })
-    if (current?.processingJobId) return tx.processingJob.findUnique({ where: { id: current.processingJobId } })
-    const selectedPriority = current?.priority === 'URGENT' ? 'URGENT' : input.priority ?? 'REGULAR'
+    // Serialize with center setting changes, manual sends, and history saves.
+    await tx.$queryRaw`SELECT id FROM clients WHERE id = ${input.clientId} FOR NO KEY UPDATE`
+    await tx.$queryRaw`SELECT id FROM available_bridge_studies WHERE id = ${study.id} FOR UPDATE`
+    const client = await tx.client.findUniqueOrThrow({ where: { id: input.clientId } })
+    const current = await tx.availableBridgeStudy.findUnique({ where: { id: study.id }, include: { attachments: true } })
+    if (!current || current.processingJobId || !current.autoSubmitAt || current.autoSubmitAt.getTime() > Date.now() || current.availabilityStatus !== 'Available') return null
+    if (client.status !== 'ACTIVE' || !autoReportingEnabled(client.autoReportingModalities, current)) {
+      await tx.availableBridgeStudy.update({ where: { id: study.id }, data: { autoSubmitAt: null } })
+      return null
+    }
+    const selectedPriority = current.priority === 'URGENT' ? 'URGENT' : 'REGULAR'
     const processingJob = await tx.processingJob.create({
       data: {
         clientId: input.clientId,
@@ -4973,43 +5004,26 @@ async function autoQueueAvailableStudyForRenewist(input: {
         workflowType: serviceSelection.workflowType,
         clinicalStatus: 'QUEUED',
         priority: selectedPriority,
-        uploadName: study.archiveName ?? path.basename(study.archivePath!),
-        uploadPath: study.archivePath!,
+        uploadName: current.archiveName ?? path.basename(current.archivePath!),
+        uploadPath: current.archivePath!,
         demoMode: demoStatus.demoMode,
         upstreamStatus: {
           state: 'auto_queued_for_renewist',
           bridgeStudyId: study.id,
-          clinicalIndication: null,
-          noClinicalIndication: true,
+          clinicalIndication: current.clinicalIndication,
+          noClinicalIndication: !current.clinicalIndication,
           priority: selectedPriority,
-          supportingFiles: [],
+          supportingFiles: current.attachments.map(item => ({ name: item.originalName, sizeBytes: String(item.sizeBytes), mimeType: item.mimeType })),
           dicomMetadata,
         },
       },
     })
     await tx.availableBridgeStudy.update({
       where: { id: study.id },
-      data: {
-        clinicalIndication: null,
-        workflowStatus: 'QueuedForRenewist',
-        priority: selectedPriority,
-        selectedAt: new Date(),
-        submittedAt: new Date(),
-        processingJobId: processingJob.id,
-      },
+      data: { workflowStatus: 'QueuedForRenewist', autoSubmitAt: null, priority: selectedPriority, selectedAt: new Date(), submittedAt: new Date(), processingJobId: processingJob.id },
     })
     await tx.auditLog.create({
-      data: {
-        clientId: input.clientId,
-        action: input.auditAction,
-        metadata: {
-          studyId: study.id,
-          publicStudyId: study.publicStudyId,
-          processingJobId: processingJob.id,
-          serviceType: serviceSelection.serviceType,
-          noClinicalIndication: true,
-        },
-      },
+      data: { clientId: input.clientId, action: input.auditAction, metadata: { studyId: study.id, publicStudyId: study.publicStudyId, processingJobId: processingJob.id, serviceType: serviceSelection.serviceType, noClinicalIndication: !current.clinicalIndication } },
     })
     await enqueueTelegramStudy(tx, processingJob, study.modalities[0], undefined, study.studyDescription)
     return processingJob

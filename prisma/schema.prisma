@@ -103,6 +103,7 @@ model Client {
   email                  String
   billingDiscountPercent Float                     @default(0)
   studySyncEnabled       Boolean                   @default(false)
+  autoReportingModalities String[]                 @default(["XR"])
   demoModeEnabled        Boolean                   @default(false)
   demoStudyLimit         Int?
   status                 ClientStatus              @default(ACTIVE)
@@ -1086,6 +1087,7 @@ model AvailableBridgeStudy {
   archivePath        String?
   clinicalIndication String?
   submittedAt        DateTime?
+  autoSubmitAt       DateTime?
   priority           String                  @default("REGULAR")
   processingJobId    String?                 @unique
   availabilityStatus String                  @default("Available")
@@ -1105,6 +1107,7 @@ model AvailableBridgeStudy {
 
   @@unique([clientId, agentId, studyInstanceUid])
   @@index([clientId, workflowStatus, availabilityStatus])
+  @@index([autoSubmitAt, processingJobId])
   @@index([clientId, processingJobId, lastSyncedAt, id], map: "abs_client_pending_sync_idx")
   @@index([clientId, updatedAt, id], map: "abs_client_updated_idx")
   @@index([clientId, agentId])
