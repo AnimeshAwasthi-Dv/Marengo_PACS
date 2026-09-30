@@ -2365,33 +2365,40 @@ app.post('/api/client/study-sync/available-studies/:studyId/additional-info', re
 
   try {
     const submission = await saveBridgeStudySubmission(req, clientId, study.id)
-    if (study.attachments.length + submission.attachments.length > 5) {
+    try {
+      const updated = await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM available_bridge_studies WHERE id = ${study.id} FOR UPDATE`
+        const current = await tx.availableBridgeStudy.findUniqueOrThrow({
+          where: { id: study.id },
+          select: { processingJobId: true, clinicalIndication: true, attachments: { select: { id: true } } },
+        })
+        if (current.processingJobId) throw new Error('Study has already been submitted; clinical history can no longer be changed.')
+        if (current.attachments.length + submission.attachments.length > 5) throw new Error('Upload up to 5 supporting files per study.')
+        await tx.bridgeStudyAttachment.createMany({ data: submission.attachments })
+        await tx.availableBridgeStudy.update({
+          where: { id: study.id },
+          data: {
+            clinicalIndication: submission.noClinicalIndication ? null : submission.clinicalIndication || current.clinicalIndication,
+          },
+        })
+        await tx.auditLog.create({
+          data: {
+            clientId,
+            actorUserId: req.user!.sub,
+            action: 'BRIDGE_STUDY_ADDITIONAL_INFO_SAVED',
+            metadata: { studyId: study.id, publicStudyId: study.publicStudyId, attachmentCount: submission.attachments.length, hasClinicalIndication: Boolean(submission.clinicalIndication) },
+          },
+        })
+        return tx.availableBridgeStudy.findUniqueOrThrow({
+          where: { id: study.id },
+          include: { dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 }, attachments: { orderBy: { createdAt: 'desc' } }, processingJob: true },
+        })
+      })
+      res.status(200).json({ study: formatBridgeStudyForClient(updated) })
+    } catch (error) {
       await Promise.all(submission.attachments.map((attachment) => fs.rm(attachment.filePath, { force: true }).catch(() => undefined)))
-      return res.status(400).json({ message: 'Upload up to 5 supporting files per study.' })
+      throw error
     }
-    const updated = await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM available_bridge_studies WHERE id = ${study.id} FOR UPDATE`
-      await tx.bridgeStudyAttachment.createMany({ data: submission.attachments })
-      await tx.availableBridgeStudy.update({
-        where: { id: study.id },
-        data: {
-          clinicalIndication: submission.noClinicalIndication ? null : submission.clinicalIndication || study.clinicalIndication,
-        },
-      })
-      await tx.auditLog.create({
-        data: {
-          clientId,
-          actorUserId: req.user!.sub,
-          action: 'BRIDGE_STUDY_ADDITIONAL_INFO_SAVED',
-          metadata: { studyId: study.id, publicStudyId: study.publicStudyId, attachmentCount: submission.attachments.length, hasClinicalIndication: Boolean(submission.clinicalIndication) },
-        },
-      })
-      return tx.availableBridgeStudy.findUniqueOrThrow({
-        where: { id: study.id },
-        include: { dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 }, attachments: { orderBy: { createdAt: 'desc' } }, processingJob: true },
-      })
-    })
-    res.status(200).json({ study: formatBridgeStudyForClient(updated) })
   } catch (error) {
     res.status(400).json({ message: error instanceof Error ? error.message : 'Unable to save study details' })
   }
@@ -4940,11 +4947,32 @@ async function dispatchDueAutomaticStudies() {
     where: { processingJobId: null, autoSubmitAt: { lte: new Date() }, availabilityStatus: 'Available' },
     select: { id: true, clientId: true }, orderBy: { autoSubmitAt: 'asc' }, take: 100,
   })
-  for (const study of due) {
-    try {
-      await autoQueueAvailableStudyForRenewist({ clientId: study.clientId, studyId: study.id, dispatchDue: true, auditAction: 'STUDY_AUTO_SUBMITTED_FOR_REPORTING' })
-    } catch (error) { console.error('Automatic reporting failed for ' + study.id, error) }
+  // Metadata extraction can be slow. A small bounded pool prevents one large expiry burst
+  // from making later studies wait behind every earlier archive.
+  const concurrency = 5
+  for (let start = 0; start < due.length; start += concurrency) {
+    await Promise.all(due.slice(start, start + concurrency).map(async (study) => {
+      try {
+        await autoQueueAvailableStudyForRenewist({ clientId: study.clientId, studyId: study.id, dispatchDue: true, auditAction: 'STUDY_AUTO_SUBMITTED_FOR_REPORTING' })
+      } catch (error) { console.error('Automatic reporting failed for ' + study.id, error) }
+    }))
   }
+}
+
+async function cancelDueAutomaticStudy(clientId: string, studyId: string, reason: 'DEMO_LIMIT_REACHED' | 'NO_ACTIVE_REPORTING_SERVICE') {
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM clients WHERE id = ${clientId} FOR NO KEY UPDATE`
+    await tx.$queryRaw`SELECT id FROM available_bridge_studies WHERE id = ${studyId} FOR UPDATE`
+    const current = await tx.availableBridgeStudy.findFirst({
+      where: { id: studyId, clientId },
+      select: { processingJobId: true, autoSubmitAt: true, availabilityStatus: true, publicStudyId: true },
+    })
+    if (!current || current.processingJobId || !current.autoSubmitAt || current.autoSubmitAt > new Date() || current.availabilityStatus !== 'Available') return
+    await tx.availableBridgeStudy.update({ where: { id: studyId }, data: { autoSubmitAt: null } })
+    await tx.auditLog.create({
+      data: { clientId, action: 'STUDY_AUTO_SUBMISSION_CANCELLED', metadata: { studyId, publicStudyId: current.publicStudyId, reason } },
+    })
+  })
 }
 
 async function autoQueueAvailableStudyForRenewist(input: {
@@ -4981,9 +5009,15 @@ async function autoQueueAvailableStudyForRenewist(input: {
   }
   if (!study.autoSubmitAt || study.autoSubmitAt.getTime() > Date.now()) return null
   const demoStatus = await getDemoUploadStatus(input.clientId)
-  if (!demoStatus.allowed) return null
+  if (!demoStatus.allowed) {
+    await cancelDueAutomaticStudy(input.clientId, study.id, 'DEMO_LIMIT_REACHED')
+    return null
+  }
   const serviceSelection = await resolveBridgeStudyService(input.clientId, serviceStudy, input.serviceType ?? input.requestedServiceType)
-  if (!serviceSelection) return null
+  if (!serviceSelection) {
+    await cancelDueAutomaticStudy(input.clientId, study.id, 'NO_ACTIVE_REPORTING_SERVICE')
+    return null
+  }
 
   const job = await prisma.$transaction(async (tx) => {
     // Serialize with center setting changes, manual sends, and history saves.
