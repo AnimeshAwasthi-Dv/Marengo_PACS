@@ -157,6 +157,7 @@ export type Client = {
   email: string;
   billingDiscountPercent: number;
   studySyncEnabled?: boolean;
+  autoReportingModalities?: string[];
   demoModeEnabled?: boolean;
   demoStudyLimit?: number | null;
   status: ClientStatus;
@@ -231,6 +232,7 @@ export type BridgeStudy = {
   referringPhysician?: string | null;
   selectedAt?: string | null;
   submittedAt?: string | null;
+  autoSubmitAt?: string | null;
   updatedAt?: string;
   // Slim worklist rows carry the attachment count and the matching report instead of the full lists.
   attachmentCount?: number;
@@ -305,6 +307,7 @@ export type ProcessingJob = {
     studyDescription?: string | null;
     studyInstanceUid?: string | null;
     submittedAt?: string | null;
+  autoSubmitAt?: string | null;
     modalities?: string[] | null;
     accessionNumber?: string | null;
     studyDate?: string | null;

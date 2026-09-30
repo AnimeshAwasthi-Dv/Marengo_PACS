@@ -49,6 +49,7 @@ export function formatBridgeStudyForClient(study: {
   referringPhysician?: string | null
   selectedAt?: Date | null
   submittedAt?: Date | null
+  autoSubmitAt?: Date | null
   attachments?: Array<{ id: string; originalName: string; mimeType?: string | null; sizeBytes: bigint | number; createdAt: Date }>
   processingJob?: { id: string; status: string; clinicalStatus?: string | null; completedAt?: Date | null; priority?: string | null } | null
   dispatchRequests?: Array<{ requestId: string; status: string; progressPercentage: number; createdAt: Date; lastErrorMessage?: string | null }>
@@ -88,6 +89,7 @@ export function formatBridgeStudyForClient(study: {
     receivedAt: study.firstDetectedAt ?? study.createdAt ?? study.lastSyncedAt,
     referringPhysician: study.referringPhysician ?? null,
     selectedAt: study.selectedAt,
+    autoSubmitAt: study.processingJobId ? null : study.autoSubmitAt ?? null,
     submittedAt: study.submittedAt ?? null,
     attachments: (study.attachments ?? []).map((attachment) => ({
       id: attachment.id,
@@ -151,6 +153,7 @@ export function formatWorklistRow(study: StatusInput & {
   firstDetectedAt: Date | null
   createdAt: Date
   submittedAt: Date | null
+  autoSubmitAt?: Date | null
   updatedAt: Date
   processingJob: { id: string; status: string; completedAt: Date | null; priority: string | null } | null
   _count: { attachments: number }
@@ -174,6 +177,7 @@ export function formatWorklistRow(study: StatusInput & {
     workflowStatus: study.workflowStatus,
     lastSyncedAt: study.lastSyncedAt,
     receivedAt: study.firstDetectedAt ?? study.createdAt ?? study.lastSyncedAt,
+    autoSubmitAt: study.processingJobId ? null : study.autoSubmitAt ?? null,
     submittedAt: study.submittedAt,
     updatedAt: study.updatedAt,
     processingJob: study.processingJob,

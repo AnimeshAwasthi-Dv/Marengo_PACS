@@ -1,3 +1,4 @@
+import { autoReportingCountdown } from './autoReporting';
 import { modalityCodes, modalityCode, modalityLabel, uploadModalityCodes, uploadDicomModality } from './modalities';
 import LoginView from './LoginView';
 import './pacs-workspace.css';
@@ -1330,6 +1331,7 @@ function ClientsView({
   });
 
   const [centerLocation, setCenterLocation] = useState("");
+  const [savingAutoReporting, setSavingAutoReporting] = useState(false);
   const [createdCenterLogin, setCreatedCenterLogin] = useState<{ user: User; password: string } | null>(null);
   const [creatingCenterLogin, setCreatingCenterLogin] = useState(false);
   const [centerLoginError, setCenterLoginError] = useState("");
@@ -1414,6 +1416,18 @@ function ClientsView({
       await reload();
     } catch (error) { setCenterLoginError(error instanceof Error ? error.message : "Unable to create login."); }
     finally { setCreatingCenterLogin(false); }
+  }
+
+  async function setAutoReporting(client: Client, modality: string, enabled: boolean) {
+    setSavingAutoReporting(true);
+    try {
+      const current = client.autoReportingModalities ?? ["XR"];
+      const modalities = enabled ? [...new Set([...current, modality])] : current.filter(code => code !== modality);
+      await api(`/api/admin/clients/${client.id}/auto-reporting`, token, { method: "PATCH", body: JSON.stringify({ modalities }) });
+      await reload();
+      notice(`${modalityLabel(modality)} auto-send ${enabled ? "enabled" : "disabled"} for ${client.name}.`);
+    } catch (error) { notice(error instanceof Error ? error.message : "Unable to save automatic reporting settings."); }
+    finally { setSavingAutoReporting(false); }
   }
 
   async function saveCenterLocation(client: Client, event: FormEvent) {
@@ -1771,6 +1785,20 @@ function ClientsView({
                   readOnly
                 />
               </div>
+              {selectedClient.kind !== "GROUP" && <section className="mt-5 rounded-lg border border-slate-200 p-4" aria-label="Automatic reporting settings">
+                <h3 className="font-semibold">Automatically send for reporting</h3>
+                <p className="mt-1 text-sm text-slate-500">Choose modalities for this center. New studies wait five minutes after the upload is ready, allowing staff to save indication and history. Reporting TAT starts when sent.</p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {modalityCodes.map(code => {
+                    const enabled = (selectedClient.autoReportingModalities ?? ["XR"]).includes(code);
+                    return <div key={code} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 p-3 text-sm font-semibold">
+                      <span>{modalityLabel(code)}</span>
+                      <button type="button" role="switch" aria-checked={enabled} aria-label={`Automatically send ${modalityLabel(code)} for reporting`} disabled={savingAutoReporting} onClick={() => void setAutoReporting(selectedClient, code, !enabled)} className={`relative h-6 w-11 rounded-full transition-colors disabled:opacity-50 ${enabled ? "bg-sky-600" : "bg-slate-300"}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${enabled ? "left-5" : "left-0.5"}`} /></button>
+                    </div>;
+                  })}
+                </div>
+                <p className="mt-3 text-xs text-slate-500">Turning a modality off cancels pending auto-sends. Turning it on applies to new uploads; existing manual studies remain available to send manually.</p>
+              </section>}
               <form className="mt-5 grid gap-3 rounded-lg border border-slate-200 p-4 sm:grid-cols-[1fr_auto]" onSubmit={event => void saveCenterLocation(selectedClient, event)}>
                 <TextInput label="City / location sent to Renewist" value={centerLocation} onChange={setCenterLocation} maxLength={120} />
                 <button className="self-end rounded-md bg-sky-600 px-4 py-2 text-sm font-bold text-white" type="submit">Save location</button>
@@ -10183,6 +10211,7 @@ function WorkspaceActionDialog({ action, token, onClose, onSaved }: { action: Wo
   const [includeViewer, setIncludeViewer] = useState(false);
   const [share, setShare] = useState<{ url: string; qr: string; expiresAt: string } | null>(null);
   const [files, setFiles] = useState<File[]>([]);
+  const [clinicalHistory, setClinicalHistory] = useState(action.kind === "attach" ? action.study.clinicalIndication ?? "" : "");
   const [options, setOptions] = useState<CallOptions | null>(null);
   const [bookings, setBookings] = useState<ReportCallBooking[]>([]);
   const [duration, setDuration] = useState(15);
@@ -10221,13 +10250,14 @@ function WorkspaceActionDialog({ action, token, onClose, onSaved }: { action: Wo
         const url = result.url || `${window.location.origin}/shared/${encodeURIComponent(result.token)}`;
         setShare({ url, qr: result.qr, expiresAt: result.expiresAt });
       } else if (action.kind === "attach") {
-        if (!files.length || files.length > 5) throw new Error("Select between one and five supporting files.");
+        if (files.length > 5) throw new Error("Select up to five supporting files.");
         const body = new FormData();
         files.forEach((file) => body.append("attachments", file));
-        if (action.study.clinicalIndication) body.append("clinical_indication", action.study.clinicalIndication);
+        body.append("clinical_indication", clinicalHistory);
+        if (!clinicalHistory.trim()) body.append("no_clinical_indication", "true");
         const response = await fetch(`/api/client/study-sync/available-studies/${action.study.id}/additional-info`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body });
         if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.message || "Attachment upload failed."); }
-        setFiles([]); setSuccess("Supporting investigations attached."); await onSaved();
+        setFiles([]); setSuccess("Indication, history and supporting files saved."); await onSaved();
       } else {
         const slot = options?.slots.find((item) => item.id === slotId);
         if (!slot) throw new Error("Select a preferred time window.");
@@ -10259,7 +10289,7 @@ function WorkspaceActionDialog({ action, token, onClose, onSaved }: { action: Wo
       {action.kind === "share" && <><label className="pw-check"><input type="checkbox" checked={includeViewer} disabled={busy} onChange={(e) => { setIncludeViewer(e.target.checked); setShare(null); setSuccess(""); }}/>Include DICOM viewer</label><p className="pw-help">Anyone with this link can access the {includeViewer ? "report and images" : "report"} until it expires or is revoked.</p>
         {share && <div className="pw-share-result"><img src={share.qr} alt="QR code for shared report" width={240} height={240}/><label className="pw-field">Shareable link<input aria-label="Shareable link" readOnly value={share.url} onFocus={(e) => e.target.select()}/></label><div className="pw-inline-actions"><button type="button" onClick={() => { void navigator.clipboard.writeText(share.url).then(() => setSuccess("Link copied."), () => setError("Clipboard unavailable. Select and copy the link.")); }}>Copy link</button><a href={share.qr} download="marengo-report-qr.png">Download QR</a></div><p className="pw-help">Expires {istTimestamp(share.expiresAt).full}</p></div>}
         <button type="button" className="pw-revoke" disabled={busy} onClick={() => void revoke()}>Revoke existing links</button></>}
-      {action.kind === "attach" && <><label className="pw-upload-zone"><UploadCloud size={28}/><strong>Supporting files</strong><span>Up to 5 files, 512 MB per file</span><input aria-label="Supporting files" type="file" multiple disabled={busy} onChange={(e) => { const selected = Array.from(e.target.files ?? []); if (selected.length > 5 || selected.some((file) => file.size > 512 * 1024 * 1024)) { setError("Choose up to 5 files, each no larger than 512 MB."); setFiles([]); } else { setError(""); setFiles(selected); } }}/></label><ul className="pw-file-list">{files.map((file, index) => <li key={`${file.name}-${index}`}><FileText size={15}/><span>{file.name}</span><button type="button" aria-label={`Remove ${file.name}`} disabled={busy} onClick={() => setFiles(files.filter((_, i) => i !== index))}><X size={14}/></button></li>)}</ul></>}
+      {action.kind === "attach" && <><label className="pw-field">Clinical indication / history<textarea rows={5} value={clinicalHistory} disabled={busy} onChange={event => setClinicalHistory(event.target.value)} placeholder="Add clinical indication and relevant patient history" /></label><p className="pw-help">Save before auto-send to include this information in the reporting request.</p><label className="pw-upload-zone"><UploadCloud size={28}/><strong>Supporting files</strong><span>Up to 5 files, 512 MB per file</span><input aria-label="Supporting files" type="file" multiple disabled={busy} onChange={(e) => { const selected = Array.from(e.target.files ?? []); if (selected.length > 5 || selected.some((file) => file.size > 512 * 1024 * 1024)) { setError("Choose up to 5 files, each no larger than 512 MB."); setFiles([]); } else { setError(""); setFiles(selected); } }}/></label><ul className="pw-file-list">{files.map((file, index) => <li key={`${file.name}-${index}`}><FileText size={15}/><span>{file.name}</span><button type="button" aria-label={`Remove ${file.name}`} disabled={busy} onClick={() => setFiles(files.filter((_, i) => i !== index))}><X size={14}/></button></li>)}</ul></>}
       {action.kind === "call" && <><label className="pw-field">Duration<select value={duration} disabled={busy} onChange={(e) => setDuration(Number(e.target.value))}>{[5, 10, 15, 20, 30, 60].map((value) => <option key={value} value={value}>{value} minutes</option>)}</select></label>
         <label className="pw-field">Preferred time window (IST)<select aria-label="Preferred time window (IST)" required value={slotId} disabled={busy || loadingSlots} onChange={(e) => setSlotId(e.target.value)}><option value="">{loadingSlots ? "Loading appointments..." : "Select preferred time"}</option>{options?.slots.map((slot) => <option key={slot.id} value={slot.id}>{istTimestamp(slot.slotStart).full} - {slot.radiologist?.fullName || "Radiologist"}</option>)}</select></label>
         {!loadingSlots && options && !options.slots.length && <p className="pw-help">No appointments available for this duration.</p>}
@@ -10267,7 +10297,7 @@ function WorkspaceActionDialog({ action, token, onClose, onSaved }: { action: Wo
         {mode === "PHONE_CALL" && <label className="pw-field">Phone number<input type="tel" required value={phone} onChange={(e) => setPhone(e.target.value)}/></label>}
         {bookings.length > 0 && <><h4>Call requests</h4><ul className="pw-file-list">{bookings.map((booking) => <li key={booking.id}><CalendarDays size={15}/><span>{istTimestamp(booking.slotStart).full}<small>{booking.status?.replaceAll("_", " ")}</small>{booking.communicationMode === "PHONE_CALL" ? <a href={`tel:${booking.phoneNumber}`}>Call {booking.phoneNumber}</a> : booking.meetingUrl && <a href={booking.meetingUrl} target="_blank" rel="noreferrer">Join screen call</a>}</span></li>)}</ul></>}
       </>}
-    </div><footer className="pw-drawer-footer"><button type="button" disabled={busy} onClick={onClose}>Close</button><button className="pw-primary" disabled={busy || (action.kind === "attach" && !files.length) || (action.kind === "call" && (!slotId || loadingSlots))}>{busy ? <LoaderCircle size={16} className="pw-spinning"/> : action.kind === "share" ? <Share2 size={16}/> : action.kind === "call" ? <Phone size={16}/> : <UploadCloud size={16}/>}{action.kind === "share" ? "Generate link" : action.kind === "call" ? "Request call" : "Attach files"}</button></footer></form>
+    </div><footer className="pw-drawer-footer"><button type="button" disabled={busy} onClick={onClose}>Close</button><button className="pw-primary" disabled={busy || (action.kind === "call" && (!slotId || loadingSlots))}>{busy ? <LoaderCircle size={16} className="pw-spinning"/> : action.kind === "share" ? <Share2 size={16}/> : action.kind === "call" ? <Phone size={16}/> : <UploadCloud size={16}/>}{action.kind === "share" ? "Generate link" : action.kind === "call" ? "Request call" : "Save details"}</button></footer></form>
   </div></div>;
 }
 
@@ -10849,11 +10879,11 @@ function MarengoUnifiedWorklist({
                 <td className="pw-numeric">{study.accessionNumber || "-"}</td>
                 <td title={referringDoctor}>{referringDoctor || "-"}</td>
                 <td><span className="pw-modality">{study.modalities?.map(modalityLabel).join(", ") || "-"}</span></td>
-                <td title={study.studyDescription ?? ""}><span className="pw-description">{study.studyDescription || "Imaging study"}</span>{isSpecialXrayStudy(study) && <span className="pw-modality" title="Requires manual submission; automatic processing is disabled">Special X-ray</span>}</td>
+                <td title={study.studyDescription ?? ""}><span className="pw-description">{study.studyDescription || "Imaging study"}</span>{isSpecialXrayStudy(study) && <span className="pw-modality" title="Special X-ray">Special X-ray</span>}</td>
                 <td className="pw-received" title={istTimestamp(receivedAt).full}>{istTimestamp(receivedAt).date}<span>{istTimestamp(receivedAt).time}</span></td>
                 <td className="pw-received" title={istTimestamp(processedAt).full}>{istTimestamp(processedAt).date}<span>{istTimestamp(processedAt).time}</span></td>
                 <td className="pw-numeric pw-tat" title="Duration (HH:MM:SS)">{worklistDuration(tatStartAt, processedAt, clockTime)}</td>
-                <td><span className={`pw-status ${status.className}`}><i/>{status.label}</span>{needsAttention && <AlertTriangle className="pw-workflow-warning" size={13} aria-label="Workflow needs attention" />}</td>
+                <td><span className={`pw-status ${status.className}`}><i/>{status.label}</span>{study.autoSubmitAt && !study.processingJobId && <small className="block text-xs font-semibold text-sky-700">{autoReportingCountdown(study.autoSubmitAt, clockTime)}</small>}{needsAttention && <AlertTriangle className="pw-workflow-warning" size={13} aria-label="Workflow needs attention" />}</td>
                 <td><button className="pw-row-action send" onClick={() => { setFeedback(null); setDetailStudy(study); }}>Send<ArrowUpRight size={15} aria-hidden="true"/></button></td>
               </tr>;
             })}</tbody>
@@ -10892,10 +10922,11 @@ function MarengoUnifiedWorklist({
               const attachments = study.attachments ?? [];
               const pending = studyDetailError || "Loading...";
               return <><div className="pw-detail-patient"><span className="pw-modality">{study.modalities.map(modalityLabel).join(", ")}</span><h3>{study.patientName || "Unknown patient"}</h3><p>{study.patientAge || (detailReady ? "Age unavailable" : pending)} / {study.patientSex || "-"}<span>Patient ID {study.patientId || "-"}</span></p></div>
+                {study.autoSubmitAt && !study.processingJobId && <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900"><strong>{autoReportingCountdown(study.autoSubmitAt, clockTime)}</strong><p>Add and save indication, history or supporting files before the countdown ends. Reporting TAT starts after submission.</p></div>}
                 <dl className="pw-details"><dt>Accession number</dt><dd>{study.accessionNumber || "-"}</dd><dt>Referring doctor</dt><dd>{detailRow?.referringDoctor || study.referringPhysician || "-"}</dd><dt>Study</dt><dd>{study.studyDescription || "-"}</dd><dt>Received (IST)</dt><dd>{istTimestamp(detailRow?.receivedAt ?? study.receivedAt ?? study.lastSyncedAt).full}</dd><dt>Sent for reporting (IST)</dt><dd>{istTimestamp(detailRow?.tatStartAt).full}</dd><dt>Reported (IST)</dt><dd>{istTimestamp(detailRow?.processedAt).full}</dd><dt>TAT duration</dt><dd>{worklistDuration(detailRow?.tatStartAt, detailRow?.processedAt, clockTime)}</dd><dt>Series / images</dt><dd>{detailReady ? `${study.seriesCount} / ${study.instanceCount}` : pending}</dd><dt>Study UID</dt><dd>{study.studyInstanceUid}</dd></dl>
                 {!sendStudy && <div className="pw-study-tools" aria-label="Study actions">
                   <div className="pw-study-tool-row">
-                    {permissions.attach && <button onClick={() => setActionDialog({ kind: "attach", study })}><Plus size={14}/>Supporting investigation</button>}
+                    {permissions.attach && <button disabled={Boolean(study.processingJobId)} title={study.processingJobId ? "Study has already entered reporting" : "Add clinical indication, history or supporting files"} onClick={() => setActionDialog({ kind: "attach", study })}><Plus size={14}/>Add indication / history</button>}
                     <button className="pw-primary" disabled={!permissions.submit || detailRow?.state !== "AVAILABLE" || Boolean(study.processingJobId)} title={detailRow?.state !== "AVAILABLE" ? "Study has already entered reporting" : "Send study for reporting"} onClick={() => beginSend(study)}><Send size={14}/>Send for reporting</button>
                     {user.role === "SUPER_ADMIN" && detailRow?.state === "REPORTING" && study.processingJobId && <button className="pw-danger" disabled={terminatingStudyId === study.id} title="Cancel this processing job and make the study available to send again" onClick={() => void terminateProcessing(study)}><X size={14}/>{terminatingStudyId === study.id ? "Terminating..." : "Terminate processing"}</button>}
                   </div>

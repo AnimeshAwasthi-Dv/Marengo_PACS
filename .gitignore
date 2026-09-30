@@ -30,3 +30,4 @@ server/testing/
 
 !server/centerUserCredentials.test.ts
 !server/renewistLocation.test.ts
+!server/autoReporting.test.ts
