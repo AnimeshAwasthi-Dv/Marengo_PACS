@@ -5,7 +5,7 @@ import { redactExchange, studyTatCategory, tatTargetSeconds } from './telegramPo
 export async function studyTracking(jobId: string, clientIds: string[] | null, db = prisma) {
   const job = await db.processingJob.findFirst({ where: { id: jobId, ...(clientIds === null ? {} : { clientId: { in: clientIds } }) }, include: {
     bridgeStudy: { select: { studyInstanceUid: true, modalities: true, submittedAt: true, studyDescription: true, patientName: true, accessionNumber: true } },
-    client: { select: { name: true } },
+    client: { select: { name: true, location: true } },
   } });
   if (!job) return null;
   const mappings = await db.providerJobMapping.findMany({ where: { processingJobId: job.id } });
@@ -27,7 +27,7 @@ export async function studyTracking(jobId: string, clientIds: string[] | null, d
   ]) }, orderBy: { createdAt: 'desc' }, take: 50 }) : [];
   const acknowledgements = await db.jobStatusHistory.findMany({ where: { processingJobId: job.id, sourceSystem: { in: ['RENEWIST_EXCHANGE', 'BRIDGE_EXCHANGE'] } }, orderBy: { createdAt: 'desc' }, take: 50 });
   return {
-    id: job.id, center: job.client.name, patientName: job.bridgeStudy?.patientName ?? report?.patientName ?? null,
+    id: job.id, center: job.client.name, centerLocation: job.client.location, patientName: job.bridgeStudy?.patientName ?? report?.patientName ?? null,
     accession: job.bridgeStudy?.accessionNumber ?? report?.accession ?? null,
     modality, priority: job.priority === 'URGENT' ? 'Urgent' : 'Routine',
     status: finalized ? 'Reported' : /fail|error|cancel/i.test(job.status) ? 'Needs attention' : 'Reporting',
