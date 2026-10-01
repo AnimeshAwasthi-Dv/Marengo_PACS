@@ -49,6 +49,13 @@ test('Telegram message contains an IST deadline and authenticated link, not pati
   assert(result.text.includes('06:30:00 IST'));
   assert.equal(result.url, 'https://pacs.example.org/study-status/job-1');
   assert(!result.text.includes('token'));
+  assert(result.text.includes('Center: Unknown'));
+});
+
+test('Telegram message names the center and its location when set', () => {
+  const base = { id: 'job-1', modality: 'CR', priority: 'Routine', status: 'Reporting', startedAt: '2026-09-22T00:00:00.000Z', targetSeconds: 3600, completedAt: null };
+  assert(telegramMessage({ ...base, center: 'City Diagnostics', centerLocation: 'Pune' }, 'https://pacs.example.org').text.split('\n')[1] === 'Center: City Diagnostics, Pune');
+  assert(telegramMessage({ ...base, center: 'City Diagnostics', centerLocation: null }, 'https://pacs.example.org').text.includes('Center: City Diagnostics\n'));
 });
 
 test('Telegram sender protects content, disables previews and stores the returned message ID', async () => {
