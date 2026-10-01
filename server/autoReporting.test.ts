@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { AUTO_REPORTING_DELAY_MS, autoReportingCountdown, autoReportingEnabled, autoReportingModality } from '../src/autoReporting'
+import { AUTO_REPORTING_DELAY_MS, autoReportingCountdown, autoReportingDelayMs, autoReportingEnabled, autoReportingModality } from '../src/autoReporting'
 import { formatBridgeStudyForClient } from './lib/bridgeStudyFormat'
 import { worklistTatStart } from '../src/pacsWorklist'
 
@@ -29,6 +29,14 @@ test('special X-rays and mammograms do not inherit routine X-ray auto-send', () 
   assert.equal(autoReportingEnabled(['SPECIALXRAY'], special), true)
   assert.equal(autoReportingEnabled(['XR'], { modalities: ['MG', 'DX'] }), false)
   assert.equal(autoReportingEnabled(['MG'], { modalities: ['MG', 'DX'] }), true)
+})
+
+test('CXR studies skip the grace period without making every X-ray immediate', () => {
+  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'CXR PA view' }), 0)
+  assert.equal(autoReportingDelayMs({ modalities: ['CR'], studyDescription: 'X-Ray Chest AP' }), 0)
+  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'X-Ray Knee' }), AUTO_REPORTING_DELAY_MS)
+  assert.equal(autoReportingDelayMs({ modalities: ['CT'], studyDescription: 'CT Chest' }), AUTO_REPORTING_DELAY_MS)
+  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'Barium swallow' }), AUTO_REPORTING_DELAY_MS)
 })
 
 test('five-minute countdown is stable across refreshes and never goes negative', () => {
