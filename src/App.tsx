@@ -1787,7 +1787,7 @@ function ClientsView({
               </div>
               {selectedClient.kind !== "GROUP" && <section className="mt-5 rounded-lg border border-slate-200 p-4" aria-label="Automatic reporting settings">
                 <h3 className="font-semibold">Automatically send for reporting</h3>
-                <p className="mt-1 text-sm text-slate-500">Choose modalities for this center. Chest X-rays send immediately; other new studies wait five minutes after the upload is ready, allowing staff to save indication and history. Reporting TAT starts when sent.</p>
+                <p className="mt-1 text-sm text-slate-500">Choose modalities for this center. Routine X-rays send immediately; other new studies wait five minutes after the upload is ready, allowing staff to save indication and history. Reporting TAT starts when sent.</p>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   {modalityCodes.map(code => {
                     const enabled = (selectedClient.autoReportingModalities ?? ["XR"]).includes(code);

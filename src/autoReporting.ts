@@ -14,9 +14,9 @@ export function autoReportingEnabled(enabled: string[], study: { modalities: str
   return Boolean(modality && enabled.includes(modality));
 }
 
-/** Chest X-rays are safe to send immediately; other enabled studies retain the clinical-details window. */
+/** Routine X-rays are safe to send immediately; other enabled studies retain the clinical-details window. */
 export function autoReportingDelayMs(study: { modalities: string[]; studyDescription?: string | null }) {
-  if (autoReportingModality(study) === 'XR' && /\b(?:cxr|chest|thorax)\b/i.test(study.studyDescription ?? '')) return 0;
+  if (autoReportingModality(study) === 'XR') return 0;
   return AUTO_REPORTING_DELAY_MS;
 }
 

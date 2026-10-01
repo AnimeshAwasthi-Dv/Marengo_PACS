@@ -31,10 +31,11 @@ test('special X-rays and mammograms do not inherit routine X-ray auto-send', () 
   assert.equal(autoReportingEnabled(['MG'], { modalities: ['MG', 'DX'] }), true)
 })
 
-test('CXR studies skip the grace period without making every X-ray immediate', () => {
+test('routine X-rays skip the grace period while other modalities retain it', () => {
   assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'CXR PA view' }), 0)
   assert.equal(autoReportingDelayMs({ modalities: ['CR'], studyDescription: 'X-Ray Chest AP' }), 0)
-  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'X-Ray Knee' }), AUTO_REPORTING_DELAY_MS)
+  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'X-Ray Knee' }), 0)
+  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'X-Ray Lumbo-Sacral Spine' }), 0)
   assert.equal(autoReportingDelayMs({ modalities: ['CT'], studyDescription: 'CT Chest' }), AUTO_REPORTING_DELAY_MS)
   assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'Barium swallow' }), AUTO_REPORTING_DELAY_MS)
 })
