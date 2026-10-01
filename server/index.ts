@@ -15,7 +15,7 @@ import QRCode from 'qrcode'
 import { preferredCallWindows, normalizeCallPhone } from './callScheduling'
 import { externalViewerOrigin } from './viewer/externalViewer';
 import { classifyBreastXrayModalities } from '../src/mammography';
-import { AUTO_REPORTING_DELAY_MS, autoReportingEnabled } from '../src/autoReporting';
+import { autoReportingDelayMs, autoReportingEnabled } from '../src/autoReporting';
 import { modalityCodes } from '../src/modalities';
 import { nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
@@ -5002,7 +5002,7 @@ async function autoQueueAvailableStudyForRenewist(input: {
       if (client.status !== 'ACTIVE' || !autoReportingEnabled(client.autoReportingModalities, serviceStudy)) return
       await tx.availableBridgeStudy.updateMany({
         where: { id: study.id, processingJobId: null, autoSubmitAt: null, availabilityStatus: 'Available' },
-        data: { autoSubmitAt: new Date(Date.now() + AUTO_REPORTING_DELAY_MS), modalities: serviceStudy.modalities, studyDescription: serviceStudy.studyDescription },
+        data: { autoSubmitAt: new Date(Date.now() + autoReportingDelayMs(serviceStudy)), modalities: serviceStudy.modalities, studyDescription: serviceStudy.studyDescription },
       })
     })
     return null
