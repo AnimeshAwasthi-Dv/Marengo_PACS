@@ -18,7 +18,7 @@ export function telegramAlertMessage(input: Parameters<typeof telegramMessage>[0
   const due = Date.parse(input.startedAt) + input.targetSeconds! * 1000;
   const remaining = Math.ceil((due - now) / 60000);
   return { url, text: [
-    'Marengo | Report TAT alert', `Center: ${input.center}`, `Reference: ${input.id}`,
+    'Marengo | Report TAT alert', `Center: ${telegramCenter(input)}`, `Reference: ${input.id}`,
     `Modality: ${input.modality} | Priority: ${input.priority}`, 'Signed report not yet available',
     remaining > 0 ? `Time remaining: ${remaining} min` : `TAT breached: ${Math.abs(remaining)} min overdue`,
     `Due: ${new Date(due).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })} IST`, url,
@@ -90,12 +90,17 @@ export function redactExchange(value: unknown, depth = 0): unknown {
   return value;
 }
 
-export function telegramMessage(input: { id: string; modality: string; tatCategory?: string; priority: string; status: string; startedAt: string; targetSeconds: number | null; completedAt: string | null }, portalUrl: string) {
+/** `Name, Location` (location omitted when unset) so the group can tell centers apart. */
+export function telegramCenter(input: { center?: string | null; centerLocation?: string | null }) {
+  return [input.center, input.centerLocation].map(s => s?.trim()).filter(Boolean).join(', ') || 'Unknown';
+}
+
+export function telegramMessage(input: { id: string; center?: string | null; centerLocation?: string | null; modality: string; tatCategory?: string; priority: string; status: string; startedAt: string; targetSeconds: number | null; completedAt: string | null }, portalUrl: string) {
   const url = new URL(`/study-status/${encodeURIComponent(input.id)}`, portalUrl).href;
   const due = input.targetSeconds === null ? null : new Date(Date.parse(input.startedAt) + input.targetSeconds * 1000);
   const ist = (date: Date) => date.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false }) + ' IST';
   return { text: [
-    'Marengo | Study sent for processing', `Reference: ${input.id}`, `Modality: ${input.modality} | Priority: ${input.priority}`,
+    'Marengo | Study sent for processing', `Center: ${telegramCenter(input)}`, `Reference: ${input.id}`, `Modality: ${input.modality} | Priority: ${input.priority}`,
     ...(input.tatCategory === 'SPECIAL_XRAY' ? ['TAT category: Special X-ray'] : []),
     `Status: ${input.status}`, `Submitted: ${ist(new Date(input.startedAt))}`,
     due ? `TAT target: ${input.targetSeconds! / 60} min | Due: ${ist(due)}` : 'TAT target: awaiting configuration',
