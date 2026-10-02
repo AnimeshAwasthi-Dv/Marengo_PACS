@@ -7,6 +7,7 @@ import { registerReportRoutes } from './routers/reports.router'
 import { activeCallBookingStatuses, reportClientSelect, reportListOmit, reportRadiologistSelect } from './queries/reports.queries'
 import { withReportSummaries } from './services/reports.service'
 import { formatBridgeStudyForAdmin, formatBridgeStudyForClient } from './lib/bridgeStudyFormat'
+import { ChunkedUploadError, createChunkedUploadStore, type ChunkedUploadStatus } from './bridgeChunkedUpload'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { ensureMarengoServices } from './marengoServices'
@@ -2620,74 +2621,180 @@ app.post(['/api/v1/bridge/studies/upload', '/api/v1/study-bridge/studies/upload'
   if (!auth) return
   try {
     const upload = await saveDirectBridgeStudyUpload(req)
-    const client = await findBridgeClient(upload.clientCode)
-    if (!client) {
-      await fs.rm(upload.folder, { recursive: true, force: true }).catch(() => undefined)
-      return res.status(403).json({ error: { code: 'CLIENT_NOT_ENABLED', message: 'Client is not active or center_code is invalid' } })
-    }
-    const agentId = upload.agentId || upload.localAeTitle || client.code
-    const study = await prisma.availableBridgeStudy.upsert({
-      where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } },
-      update: {
-        ...directBridgeStudyData(upload.metadata, upload, 'Available', 'Available'),
-        archiveName: upload.uploadName,
-        archivePath: upload.filePath,
-        totalSizeBytes: BigInt(upload.sizeBytes),
-        readyAt: new Date(),
-      },
-      create: {
-        publicStudyId: `BS-${crypto.randomBytes(6).toString('hex').toUpperCase()}`,
-        clientId: client.id,
-        agentId,
-        studyInstanceUid: upload.metadata.study_instance_uid,
-        ...directBridgeStudyData(upload.metadata, upload, 'Available', 'Available'),
-        archiveName: upload.uploadName,
-        archivePath: upload.filePath,
-        totalSizeBytes: BigInt(upload.sizeBytes),
-        readyAt: new Date(),
-      },
-      include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
-    })
-    const autoQueuedJob = await autoQueueAvailableStudyForRenewist({
-      clientId: client.id,
-      clientCode: client.code,
-      studyId: study.id,
-      requestedServiceType: inferBridgeServiceType({
-        modalities: upload.metadata.modalities,
-        studyDescription: upload.metadata.study_description ?? undefined,
-      }),
-      auditAction: 'BRIDGE_STUDY_AUTO_SUBMITTED_TO_RENEWIST',
-    })
-    await enqueueStudyStatusNotification(prisma, {
-      eventType: autoQueuedJob ? 'STUDY_SUBMITTED_TO_RENEWIST' : 'BRIDGE_STUDY_AVAILABLE',
-      clientId: client.id,
-      status: autoQueuedJob ? 'QUEUED' : 'AVAILABLE',
-      patientName: study.patientName,
-      patientId: study.patientId,
-      accession: study.accessionNumber,
-      modality: study.modalities.join('/'),
-      serviceName: autoQueuedJob ? serviceNameForType(autoQueuedJob.serviceType) : 'Study Sync',
-      idempotencyKey: `study-status:bridge-available:${study.id}:${study.updatedAt.getTime()}`,
-    })
-    const acknowledgement = {
-      study_id: study.id,
-      public_study_id: study.publicStudyId,
-      status: autoQueuedJob ? 'QueuedForRenewist' : study.availabilityStatus,
-      upload_name: study.archiveName,
-      size_bytes: String(study.totalSizeBytes),
-      auto_queued: Boolean(autoQueuedJob),
-      processing_job_id: autoQueuedJob?.id,
-      study: formatBridgeStudyForClient(await prisma.availableBridgeStudy.findUniqueOrThrow({
-          where: { id: study.id },
-          include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
-        })),
-    }
-    if (autoQueuedJob) await recordStudyAcknowledgement(autoQueuedJob.id, 'BRIDGE_EXCHANGE', acknowledgement)
-    res.status(201).json(acknowledgement)
+    const result = await registerDirectBridgeStudyUpload(upload)
+    res.status(result.status).json(result.body)
   } catch (error) {
     res.status(400).json({ error: { code: 'BRIDGE_UPLOAD_FAILED', message: error instanceof Error ? error.message : 'Unable to upload bridge study' } })
   }
 })
+
+const bridgeChunkedUploadPaths = (suffix: string) => [`/api/v1/bridge/studies/uploads${suffix}`, `/api/v1/study-bridge/studies/uploads${suffix}`]
+
+// Part-by-part upload: Bridge sends the study ZIP as small parts so a slow or filtered link that resets
+// long requests only costs one part, not the whole study. Completing the upload registers one study,
+// exactly like the single-request upload above.
+app.post(bridgeChunkedUploadPaths(''), async (req, res) => {
+  if (!await requireBridgeToken(req, res)) return
+  try {
+    const body = z.object({
+      file_name: z.string().min(1).max(255),
+      total_size: z.number().int().positive(),
+      part_size: z.number().int().positive(),
+      sha256: z.string(),
+      fields: z.record(z.string(), z.string()).refine(fields => Object.keys(fields).length <= 80, 'Too many fields').default({}),
+    }).parse(req.body)
+    const status = await bridgeChunkedUploads.init({
+      fileName: safeBridgeFileName(body.file_name),
+      totalSize: body.total_size,
+      partSize: body.part_size,
+      sha256: body.sha256,
+      fields: body.fields,
+    })
+    res.status(201).json(formatChunkedUploadStatus(status))
+  } catch (error) {
+    sendChunkedUploadError(res, error)
+  }
+})
+
+app.get(bridgeChunkedUploadPaths('/:uploadId'), async (req, res) => {
+  if (!await requireBridgeToken(req, res)) return
+  try {
+    res.json(formatChunkedUploadStatus(await bridgeChunkedUploads.status(String(req.params.uploadId))))
+  } catch (error) {
+    sendChunkedUploadError(res, error)
+  }
+})
+
+app.put(bridgeChunkedUploadPaths('/:uploadId/parts/:index'), async (req, res) => {
+  if (!await requireBridgeToken(req, res)) return
+  try {
+    const partSha256 = typeof req.headers['x-part-sha256'] === 'string' ? req.headers['x-part-sha256'] : undefined
+    const part = await bridgeChunkedUploads.writePart(String(req.params.uploadId), Number(req.params.index), req, partSha256)
+    res.json({ index: part.index, size: part.size })
+  } catch (error) {
+    sendChunkedUploadError(res, error)
+  }
+})
+
+app.post(bridgeChunkedUploadPaths('/:uploadId/complete'), async (req, res) => {
+  if (!await requireBridgeToken(req, res)) return
+  const uploadId = String(req.params.uploadId)
+  let folder: string | null = null
+  let registering = false
+  try {
+    // A retried complete (its first response was lost) gets the original acknowledgement back.
+    const previous = await bridgeChunkedUploads.completedResult(uploadId)
+    if (previous) return res.status(201).json(previous)
+    if (completingBridgeChunkedUploads.has(uploadId)) {
+      return res.status(409).json({ error: { code: 'UPLOAD_COMPLETING', message: 'Upload is already being completed; retry shortly' } })
+    }
+    completingBridgeChunkedUploads.add(uploadId)
+    const session = await bridgeChunkedUploads.status(uploadId)
+    folder = path.join(uploadsPath, 'bridge-studies', crypto.randomUUID())
+    const filePath = path.join(folder, session.fileName)
+    const assembled = await bridgeChunkedUploads.assemble(uploadId, filePath)
+    const upload = await buildDirectBridgeStudyUpload(assembled.session.fields, { filePath, uploadName: session.fileName, folder, sizeBytes: assembled.sizeBytes })
+    registering = true
+    const result = await registerDirectBridgeStudyUpload(upload)
+    if (result.status === 201) await bridgeChunkedUploads.markCompleted(uploadId, result.body)
+    res.status(result.status).json(result.body)
+  } catch (error) {
+    if (folder && !registering) await fs.rm(folder, { recursive: true, force: true }).catch(() => undefined)
+    sendChunkedUploadError(res, error)
+  } finally {
+    completingBridgeChunkedUploads.delete(uploadId)
+  }
+})
+
+function formatChunkedUploadStatus(status: ChunkedUploadStatus) {
+  return {
+    upload_id: status.uploadId,
+    part_size: status.partSize,
+    part_count: status.partCount,
+    total_size: status.totalSize,
+    received_parts: status.receivedParts,
+    completed: status.completed,
+  }
+}
+
+function sendChunkedUploadError(res: Response, error: unknown) {
+  if (res.headersSent) return
+  if (error instanceof ChunkedUploadError) return res.status(error.status).json({ error: { code: error.code, message: error.message } })
+  if (error instanceof z.ZodError) return res.status(400).json({ error: { code: 'INVALID_REQUEST', message: error.issues.map(issue => issue.message).join('; ') } })
+  console.error('Bridge chunked upload failed', error)
+  res.status(400).json({ error: { code: 'BRIDGE_UPLOAD_FAILED', message: error instanceof Error ? error.message : 'Unable to upload bridge study' } })
+}
+
+/**
+ * Records a fully received Bridge study ZIP and queues it for reporting. Shared by the single-request
+ * upload and the part-by-part upload so both produce the same study and acknowledgement.
+ */
+async function registerDirectBridgeStudyUpload(upload: DirectBridgeStudyUpload): Promise<{ status: number; body: unknown }> {
+  const client = await findBridgeClient(upload.clientCode)
+  if (!client) {
+    await fs.rm(upload.folder, { recursive: true, force: true }).catch(() => undefined)
+    return { status: 403, body: { error: { code: 'CLIENT_NOT_ENABLED', message: 'Client is not active or center_code is invalid' } } }
+  }
+  const agentId = upload.agentId || upload.localAeTitle || client.code
+  const study = await prisma.availableBridgeStudy.upsert({
+    where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } },
+    update: {
+      ...directBridgeStudyData(upload.metadata, upload, 'Available', 'Available'),
+      archiveName: upload.uploadName,
+      archivePath: upload.filePath,
+      totalSizeBytes: BigInt(upload.sizeBytes),
+      readyAt: new Date(),
+    },
+    create: {
+      publicStudyId: `BS-${crypto.randomBytes(6).toString('hex').toUpperCase()}`,
+      clientId: client.id,
+      agentId,
+      studyInstanceUid: upload.metadata.study_instance_uid,
+      ...directBridgeStudyData(upload.metadata, upload, 'Available', 'Available'),
+      archiveName: upload.uploadName,
+      archivePath: upload.filePath,
+      totalSizeBytes: BigInt(upload.sizeBytes),
+      readyAt: new Date(),
+    },
+    include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
+  })
+  const autoQueuedJob = await autoQueueAvailableStudyForRenewist({
+    clientId: client.id,
+    clientCode: client.code,
+    studyId: study.id,
+    requestedServiceType: inferBridgeServiceType({
+      modalities: upload.metadata.modalities,
+      studyDescription: upload.metadata.study_description ?? undefined,
+    }),
+    auditAction: 'BRIDGE_STUDY_AUTO_SUBMITTED_TO_RENEWIST',
+  })
+  await enqueueStudyStatusNotification(prisma, {
+    eventType: autoQueuedJob ? 'STUDY_SUBMITTED_TO_RENEWIST' : 'BRIDGE_STUDY_AVAILABLE',
+    clientId: client.id,
+    status: autoQueuedJob ? 'QUEUED' : 'AVAILABLE',
+    patientName: study.patientName,
+    patientId: study.patientId,
+    accession: study.accessionNumber,
+    modality: study.modalities.join('/'),
+    serviceName: autoQueuedJob ? serviceNameForType(autoQueuedJob.serviceType) : 'Study Sync',
+    idempotencyKey: `study-status:bridge-available:${study.id}:${study.updatedAt.getTime()}`,
+  })
+  const acknowledgement = {
+    study_id: study.id,
+    public_study_id: study.publicStudyId,
+    status: autoQueuedJob ? 'QueuedForRenewist' : study.availabilityStatus,
+    upload_name: study.archiveName,
+    size_bytes: String(study.totalSizeBytes),
+    auto_queued: Boolean(autoQueuedJob),
+    processing_job_id: autoQueuedJob?.id,
+    study: formatBridgeStudyForClient(await prisma.availableBridgeStudy.findUniqueOrThrow({
+        where: { id: study.id },
+        include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
+      })),
+  }
+  if (autoQueuedJob) await recordStudyAcknowledgement(autoQueuedJob.id, 'BRIDGE_EXCHANGE', acknowledgement)
+  return { status: 201, body: acknowledgement }
+}
 
 app.post(['/api/v1/study-bridge/register', '/api/v1/study-agents/register'], async (req, res) => {
   const expectedTokens = getBridgeExpectedTokens()
@@ -4337,6 +4444,11 @@ const httpServer = app.listen(port, host, () => {
   if (features.billing) setInterval(() => void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error)), 24 * 60 * 60 * 1000).unref()
   startViewerPreimport()
   startStudyArchiveMaintenance()
+  const sweepChunkedUploads = () => void bridgeChunkedUploads.sweep(24 * 60 * 60 * 1000)
+    .then(removed => { if (removed) console.log(`Removed ${removed} abandoned Bridge part upload(s)`) })
+    .catch(error => console.error('Bridge part upload cleanup failed', error))
+  setTimeout(sweepChunkedUploads, 60_000).unref()
+  setInterval(sweepChunkedUploads, 60 * 60 * 1000).unref()
 })
 // Node's default requestTimeout (5 min) resets slow bridge study ZIP uploads mid-transfer.
 httpServer.requestTimeout = 45 * 60 * 1000
@@ -7251,6 +7363,8 @@ function humanBytes(bytes: number) {
 }
 
 const bridgeMaxStudyBytes = positiveIntegerEnv('BRIDGE_MAX_STUDY_BYTES', 4 * 1024 * 1024 * 1024)
+const bridgeChunkedUploads = createChunkedUploadStore({ root: path.join(uploadsPath, 'bridge-chunked-uploads'), maxTotalBytes: bridgeMaxStudyBytes })
+const completingBridgeChunkedUploads = new Set<string>()
 const bridgeReceivingSchema = z.object({
   center_code: z.string().min(1).optional(),
   client_code: z.string().min(1).optional(),
@@ -7610,22 +7724,44 @@ async function saveManualAvailableStudyUpload(req: Request) {
   })
 }
 
+type DirectBridgeStudyUpload = {
+  clientCode: string
+  agentId?: string
+  agentName?: string
+  localIp?: string
+  localPort?: number
+  localAeTitle?: string
+  metadata: DirectBridgeStudyMetadata
+  filePath: string
+  uploadName: string
+  folder: string
+  sizeBytes: number
+}
+
+/** Reads the study identity from the Bridge form fields, falling back to the DICOM headers inside the ZIP. */
+async function buildDirectBridgeStudyUpload(fields: Record<string, string>, file: { filePath: string; uploadName: string; folder: string; sizeBytes: number }): Promise<DirectBridgeStudyUpload> {
+  const clientCode = bridgeCenterCode(fields)
+  if (!clientCode) throw new Error('center_code is required')
+  const submittedMetadata = normalizeDirectBridgeStudyMetadata(fields, { requireStudyInstanceUid: false })
+  const fileMetadata = await extractDicomStudyMetadata(file.filePath).catch(() => ({}))
+  const metadata = mergeDirectBridgeDicomMetadata(submittedMetadata, fileMetadata)
+  if (!metadata.study_instance_uid) throw new Error('study_instance_uid is required in Bridge fields or DICOM metadata')
+  return {
+    clientCode,
+    agentId: stringValue(fields.agent_id),
+    agentName: stringValue(fields.agent_name),
+    localIp: stringValue(fields.local_ip),
+    localPort: numberValue(fields.local_port),
+    localAeTitle: stringValue(fields.local_ae_title),
+    metadata,
+    ...file,
+  }
+}
+
 async function saveDirectBridgeStudyUpload(req: Request) {
   const folder = path.join(uploadsPath, 'bridge-studies', crypto.randomUUID())
   await fs.mkdir(folder, { recursive: true })
-  return new Promise<{
-    clientCode: string
-    agentId?: string
-    agentName?: string
-    localIp?: string
-    localPort?: number
-    localAeTitle?: string
-    metadata: DirectBridgeStudyMetadata
-    filePath: string
-    uploadName: string
-    folder: string
-    sizeBytes: number
-  }>((resolve, reject) => {
+  return new Promise<DirectBridgeStudyUpload>((resolve, reject) => {
     const fields: Record<string, string> = {}
     const writes: Promise<void>[] = []
     let uploadName = ''
@@ -7661,25 +7797,7 @@ async function saveDirectBridgeStudyUpload(req: Request) {
         await Promise.all(writes)
         if (failed) return
         if (!filePath) throw new Error('file is required')
-        const clientCode = bridgeCenterCode(fields)
-        if (!clientCode) throw new Error('center_code is required')
-        const submittedMetadata = normalizeDirectBridgeStudyMetadata(fields, { requireStudyInstanceUid: false })
-        const fileMetadata = await extractDicomStudyMetadata(filePath).catch(() => ({}))
-        const metadata = mergeDirectBridgeDicomMetadata(submittedMetadata, fileMetadata)
-        if (!metadata.study_instance_uid) throw new Error('study_instance_uid is required in Bridge fields or DICOM metadata')
-        resolve({
-          clientCode,
-          agentId: stringValue(fields.agent_id),
-          agentName: stringValue(fields.agent_name),
-          localIp: stringValue(fields.local_ip),
-          localPort: numberValue(fields.local_port),
-          localAeTitle: stringValue(fields.local_ae_title),
-          metadata,
-          filePath,
-          uploadName,
-          folder,
-          sizeBytes,
-        })
+        resolve(await buildDirectBridgeStudyUpload(fields, { filePath, uploadName, folder, sizeBytes }))
       } catch (error) {
         fail(error instanceof Error ? error : new Error('Unable to save bridge study upload'))
       }
