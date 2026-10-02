@@ -4338,6 +4338,8 @@ const httpServer = app.listen(port, host, () => {
   startViewerPreimport()
   startStudyArchiveMaintenance()
 })
+// Node's default requestTimeout (5 min) resets slow bridge study ZIP uploads mid-transfer.
+httpServer.requestTimeout = 45 * 60 * 1000
 
 /**
  * Pre-imports new CT/MR/PET/NM studies into the external viewer so opening one never waits on indexing.
