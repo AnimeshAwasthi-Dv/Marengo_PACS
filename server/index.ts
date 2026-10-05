@@ -8,6 +8,7 @@ import { activeCallBookingStatuses, reportClientSelect, reportListOmit, reportRa
 import { withReportSummaries } from './services/reports.service'
 import { formatBridgeStudyForAdmin, formatBridgeStudyForClient } from './lib/bridgeStudyFormat'
 import { ChunkedUploadError, createChunkedUploadStore, type ChunkedUploadStatus } from './bridgeChunkedUpload'
+import { createBridgeInstanceUploadRouter, createInstanceUploadStore } from './bridgeInstanceUpload'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { ensureMarengoServices } from './marengoServices'
@@ -2725,6 +2726,23 @@ function sendChunkedUploadError(res: Response, error: unknown) {
   res.status(400).json({ error: { code: 'BRIDGE_UPLOAD_FAILED', message: error instanceof Error ? error.message : 'Unable to upload bridge study' } })
 }
 
+// Per-image upload: Bridge sends each DICOM image while the study is still arriving, then commits the image list;
+// the portal builds the study ZIP and registers it like the uploads above. The size limit is read here directly
+// because bridgeMaxStudyBytes is declared further down and is not initialised yet when this runs.
+const bridgeInstanceUploads = createInstanceUploadStore({
+  root: path.join(uploadsPath, 'bridge-instance-uploads'),
+  maxBatchBytes: 64 * 1024 * 1024,
+  // The batch's image list travels in a header; 128 entries stay well under Node's 16 KB header limit.
+  maxBatchInstances: 128,
+  maxStudyBytes: positiveIntegerEnv('BRIDGE_MAX_STUDY_BYTES', 4 * 1024 * 1024 * 1024),
+})
+app.use(['/api/v1/bridge', '/api/v1/study-bridge'], createBridgeInstanceUploadRouter({
+  store: bridgeInstanceUploads,
+  authorize: requireBridgeToken,
+  studiesRoot: path.join(uploadsPath, 'bridge-studies'),
+  commit: async ({ fields, ...file }) => registerDirectBridgeStudyUpload(await buildDirectBridgeStudyUpload(fields, file)),
+}))
+
 /**
  * Records a fully received Bridge study ZIP and queues it for reporting. Shared by the single-request
  * upload and the part-by-part upload so both produce the same study and acknowledgement.
@@ -4449,6 +4467,12 @@ const httpServer = app.listen(port, host, () => {
     .catch(error => console.error('Bridge part upload cleanup failed', error))
   setTimeout(sweepChunkedUploads, 60_000).unref()
   setInterval(sweepChunkedUploads, 60 * 60 * 1000).unref()
+  // Images stay a week after a study's last change, so a late re-commit sends only the images that are new.
+  const sweepInstanceUploads = () => void bridgeInstanceUploads.sweep(7 * 24 * 60 * 60 * 1000)
+    .then(removed => { if (removed) console.log(`Removed ${removed} idle Bridge per-image upload(s)`) })
+    .catch(error => console.error('Bridge per-image upload cleanup failed', error))
+  setTimeout(sweepInstanceUploads, 90_000).unref()
+  setInterval(sweepInstanceUploads, 60 * 60 * 1000).unref()
 })
 // Node's default requestTimeout (5 min) resets slow bridge study ZIP uploads mid-transfer.
 httpServer.requestTimeout = 45 * 60 * 1000
