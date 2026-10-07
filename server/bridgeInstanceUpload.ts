@@ -26,6 +26,8 @@ export type InstanceRef = { sha256: string; size: number }
 export type CommitInstance = InstanceRef & { sopInstanceUid: string }
 
 const sha256Pattern = /^[0-9a-f]{64}$/
+// Kept next to a study's images: the key and acknowledgement of its last successful commit.
+const commitFile = 'commit.json'
 // One path segment each: letters, digits, dots, dashes and underscores, never "." or "..".
 const segmentPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 
@@ -163,6 +165,22 @@ export function createInstanceUploadStore(options: { root: string; maxBatchBytes
       return { sizeBytes: (await fs.stat(destinationPath)).size, instanceCount: instances.length }
     },
 
+    /** The acknowledgement of this study's last successful commit, if it was for exactly `key`. */
+    async committedResult(clientCode: string, studyUid: string, key: string): Promise<unknown | null> {
+      const raw = await fs.readFile(path.join(studyDir(clientCode, studyUid), commitFile), 'utf8').catch(() => null)
+      if (!raw) return null
+      try {
+        const saved = JSON.parse(raw)
+        return saved?.key === key ? saved.result ?? null : null
+      } catch {
+        return null
+      }
+    },
+
+    async markCommitted(clientCode: string, studyUid: string, key: string, result: unknown) {
+      await fs.writeFile(path.join(studyDir(clientCode, studyUid), commitFile), JSON.stringify({ key, result }))
+    },
+
     /** Removes studies whose images have not changed for `maxAgeMs`. */
     async sweep(maxAgeMs: number, now = Date.now()) {
       let removed = 0
@@ -259,12 +277,18 @@ export function createBridgeInstanceUploadRouter(options: {
     try {
       const fields = Object.fromEntries(Object.entries(body.fields ?? {}).map(([name, value]) => [name, String(value)]))
       const uploadName = safeZipName(String(body.file_name ?? `${studyUid}.zip`))
+      // A retried commit (its first answer was lost) gets the original acknowledgement back instead of
+      // registering the study a second time; a commit with other images or fields registers again.
+      const commitKey = crypto.createHash('sha256').update(JSON.stringify({ uploadName, fields: Object.entries(fields).sort(), instances: body.instances })).digest('hex')
+      const previous = await options.store.committedResult(clientCode, studyUid, commitKey)
+      if (previous) return res.status(201).json(previous)
       folder = path.join(options.studiesRoot, crypto.randomUUID())
       const filePath = path.join(folder, uploadName)
       const extras = fields.patient_meta ? [{ name: 'patient_meta.json', content: Buffer.from(fields.patient_meta) }] : []
       const zip = await options.store.buildZip(clientCode, studyUid, body.instances, filePath, extras)
       registering = true
       const result = await options.commit({ fields, filePath, uploadName, folder, sizeBytes: zip.sizeBytes })
+      if (result.status === 201) await options.store.markCommitted(clientCode, studyUid, commitKey, result.body)
       res.status(result.status).json(result.body)
     } catch (error) {
       if (folder && !registering) await fs.rm(folder, { recursive: true, force: true }).catch(() => undefined)
