@@ -9,6 +9,7 @@ import { withReportSummaries } from './services/reports.service'
 import { formatBridgeStudyForAdmin, formatBridgeStudyForClient } from './lib/bridgeStudyFormat'
 import { ChunkedUploadError, createChunkedUploadStore, type ChunkedUploadStatus } from './bridgeChunkedUpload'
 import { createBridgeInstanceUploadRouter, createInstanceUploadStore } from './bridgeInstanceUpload'
+import { removeReplacedBridgeArchive } from './lib/bridgeArchiveCleanup'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { ensureMarengoServices } from './marengoServices'
@@ -2754,8 +2755,10 @@ async function registerDirectBridgeStudyUpload(upload: DirectBridgeStudyUpload):
     return { status: 403, body: { error: { code: 'CLIENT_NOT_ENABLED', message: 'Client is not active or center_code is invalid' } } }
   }
   const agentId = upload.agentId || upload.localAeTitle || client.code
+  const studyKey = { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } }
+  const previous = await prisma.availableBridgeStudy.findUnique({ where: studyKey, select: { archivePath: true, processingJobId: true } })
   const study = await prisma.availableBridgeStudy.upsert({
-    where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } },
+    where: studyKey,
     update: {
       ...directBridgeStudyData(upload.metadata, upload, 'Available', 'Available'),
       archiveName: upload.uploadName,
@@ -2776,6 +2779,10 @@ async function registerDirectBridgeStudyUpload(upload: DirectBridgeStudyUpload):
     },
     include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
   })
+  // A re-sent study replaces its ZIP; the old one is referenced by nothing once no processing job uses it.
+  if (previous?.archivePath && previous.archivePath !== upload.filePath && !previous.processingJobId) {
+    await removeReplacedBridgeArchive(path.join(uploadsPath, 'bridge-studies'), previous.archivePath, upload.folder)
+  }
   const autoQueuedJob = await autoQueueAvailableStudyForRenewist({
     clientId: client.id,
     clientCode: client.code,
@@ -4467,8 +4474,9 @@ const httpServer = app.listen(port, host, () => {
     .catch(error => console.error('Bridge part upload cleanup failed', error))
   setTimeout(sweepChunkedUploads, 60_000).unref()
   setInterval(sweepChunkedUploads, 60 * 60 * 1000).unref()
-  // Images stay a week after a study's last change, so a late re-commit sends only the images that are new.
-  const sweepInstanceUploads = () => void bridgeInstanceUploads.sweep(7 * 24 * 60 * 60 * 1000)
+  // Images stay a week after a study's last change, so a late re-commit sends only the images that are new; two days
+  // once the study is committed (its ZIP holds them, and Bridge re-commits only on a retry).
+  const sweepInstanceUploads = () => void bridgeInstanceUploads.sweep({ idleMs: 7 * 24 * 60 * 60 * 1000, committedIdleMs: 2 * 24 * 60 * 60 * 1000 })
     .then(removed => { if (removed) console.log(`Removed ${removed} idle Bridge per-image upload(s)`) })
     .catch(error => console.error('Bridge per-image upload cleanup failed', error))
   setTimeout(sweepInstanceUploads, 90_000).unref()

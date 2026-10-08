@@ -181,8 +181,11 @@ export function createInstanceUploadStore(options: { root: string; maxBatchBytes
       await fs.writeFile(path.join(studyDir(clientCode, studyUid), commitFile), JSON.stringify({ key, result }))
     },
 
-    /** Removes studies whose images have not changed for `maxAgeMs`. */
-    async sweep(maxAgeMs: number, now = Date.now()) {
+    /**
+     * Removes studies whose images have not changed for `idleMs`, or for `committedIdleMs` once committed (the study
+     * ZIP holds the images then, and they are only needed again if Bridge retries the commit).
+     */
+    async sweep(retention: { idleMs: number; committedIdleMs: number }, now = Date.now()) {
       let removed = 0
       for (const client of await fs.readdir(options.root, { withFileTypes: true }).catch(() => [])) {
         if (!client.isDirectory()) continue
@@ -191,10 +194,11 @@ export function createInstanceUploadStore(options: { root: string; maxBatchBytes
           if (!study.isDirectory()) continue
           const dir = path.join(clientDir, study.name)
           let lastTouched = (await fs.stat(dir).catch(() => null))?.mtimeMs ?? 0
-          for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
+          const names = await fs.readdir(dir).catch(() => [] as string[])
+          for (const name of names) {
             lastTouched = Math.max(lastTouched, (await fs.stat(path.join(dir, name)).catch(() => null))?.mtimeMs ?? 0)
           }
-          if (now - lastTouched < maxAgeMs) continue
+          if (now - lastTouched < (names.includes(commitFile) ? retention.committedIdleMs : retention.idleMs)) continue
           await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined)
           removed += 1
         }
