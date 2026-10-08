@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './db';
+import { collectOperationalFailures } from './operationalAlerts';
 import { requireAuth, requireSuperAdmin } from './auth';
 import { collectServiceHealth } from './serviceHealth';
 import { acknowledgmentReply, HEALTH_INTERVAL_MS, REMINDER_INTERVAL_MS, notedKeyboard, technicalAlertExcluded, technicalAlertText, technicalFailure, type HealthObservation, type TelegramUpdate } from './technicalAlertPolicy';
@@ -75,6 +76,7 @@ export async function tickTechnicalMonitor() {
       const [state] = await db.$queryRaw<MonitorState[]>`SELECT * FROM technical_monitor_state WHERE id='primary'`;
       if (!state) throw new Error('Technical monitor migration is missing');
       let lastError: string | null = null;
+      await collectOperationalFailures(db);
       if (settings.token && settings.chatId) {
         try {
           const updates = await telegram<TelegramUpdate[]>('getUpdates', { offset: Number(state.updateOffset), timeout: 0, allowed_updates: ['message', 'my_chat_member', 'callback_query'] });

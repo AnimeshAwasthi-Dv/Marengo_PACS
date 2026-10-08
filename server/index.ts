@@ -10,6 +10,9 @@ import { formatBridgeStudyForAdmin, formatBridgeStudyForClient } from './lib/bri
 import { ChunkedUploadError, createChunkedUploadStore, type ChunkedUploadStatus } from './bridgeChunkedUpload'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
+import { recordOperationalFailure } from './operationalAlerts'
+import { submissionRetryDue } from './submissionRetryPolicy'
+import { assertProcessingActive, assertStudyNotDeleted, beginProcessing } from './processingControl'
 import { ensureMarengoServices } from './marengoServices'
 import { resolveArchivePath } from './viewer/archivePaths'
 import QRCode from 'qrcode'
@@ -18,7 +21,7 @@ import { externalViewerOrigin } from './viewer/externalViewer';
 import { classifyBreastXrayModalities } from '../src/mammography';
 import { autoReportingDelayMs, autoReportingEnabled } from '../src/autoReporting';
 import { modalityCodes } from '../src/modalities';
-import { nonOverlapping } from './runtime/tasks';
+import { createLimiter, nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
 import { registerExternalViewerRoutes } from './viewer/routes';
 import { createViewerPreimporter } from './viewer/preimport';
@@ -70,7 +73,7 @@ import type { ProviderStudySubmission } from './providerAdapters'
 import { ProviderSubmissionError } from './providerAdapters'
 import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
-import { findStoredStudyObject, readStoredObject, storeObject, type StorageKind } from './reportStorage'
+import { downloadStoredObjectToFile, findStoredStudyObject, readStoredObject, storeObject, type StorageKind } from './reportStorage'
 import { bridgeStudyS3KeyCandidates, studyViewerStorageKind } from './lib/studyStorage'
 import { startStudyArchiveMaintenance, storeOriginalStudy } from './services/studyArchive.service'
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
@@ -102,6 +105,7 @@ const reportPublicShareTtlMs = 5 * 24 * 60 * 60 * 1000
 let pacsReturnRecoveryRunning = false
 let outboundSubmissionRecoveryRunning = false
 let renewistSubmissionTail: Promise<unknown> = Promise.resolve()
+const limitRenewistSubmissions = createLimiter(3)
 const queuedRenewistJobIds = new Set<string>()
 const portalUserSelect = { id: true, userId: true, email: true, name: true, role: true, portalRole: true, clientId: true, providerCode: true, active: true, createdAt: true, updatedAt: true } as const
 const clientPortalRoleSchema = z.enum(['FRONT_DESK', 'TECHNICIAN', 'MANAGER', 'IT_TEAM'])
@@ -2327,6 +2331,7 @@ app.post('/api/client/study-sync/available-studies/:studyId/submit', requireAuth
         data: {
           clinicalIndication: submission.noClinicalIndication ? null : submission.clinicalIndication || null,
           workflowStatus: 'QueuedForRenewist',
+          submittedInstanceCount: current.instanceCount,
           autoSubmitAt: null,
           priority: selectedPriority,
           selectedAt: new Date(),
@@ -2549,6 +2554,7 @@ app.post(['/api/v1/bridge/studies/receiving', '/api/v1/study-bridge/studies/rece
   } catch (error) {
     return res.status(400).json({ error: { code: 'INVALID_BRIDGE_STUDY', message: error instanceof Error ? error.message : 'Invalid bridge study payload' } })
   }
+  await assertStudyNotDeleted(client.id, metadata.study_instance_uid)
   const study = await prisma.availableBridgeStudy.upsert({
     where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: metadata.study_instance_uid } },
     update: directBridgeStudyData(metadata, body, 'Receiving', 'Receiving'),
@@ -2586,6 +2592,7 @@ app.post(['/api/v1/bridge/studies/park', '/api/v1/study-bridge/studies/park'], a
     if (!client) return res.status(403).json({ error: { code: 'CLIENT_NOT_ENABLED', message: 'Client is not active or center_code is invalid' } })
     const agentId = body.agent_id || body.local_ae_title || client.code
     const metadata = normalizeDirectBridgeStudyMetadata(body)
+    await assertStudyNotDeleted(client.id, metadata.study_instance_uid)
     const study = await prisma.availableBridgeStudy.upsert({
       where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: metadata.study_instance_uid } },
       update: { ...directBridgeStudyData(metadata, body, 'Available', 'Available'), readyAt: new Date() },
@@ -2735,11 +2742,14 @@ async function registerDirectBridgeStudyUpload(upload: DirectBridgeStudyUpload):
     await fs.rm(upload.folder, { recursive: true, force: true }).catch(() => undefined)
     return { status: 403, body: { error: { code: 'CLIENT_NOT_ENABLED', message: 'Client is not active or center_code is invalid' } } }
   }
+  await assertStudyNotDeleted(client.id, upload.metadata.study_instance_uid)
   const agentId = upload.agentId || upload.localAeTitle || client.code
+  const previousStudy = await prisma.availableBridgeStudy.findUnique({ where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } } })
   const study = await prisma.availableBridgeStudy.upsert({
     where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } },
     update: {
       ...directBridgeStudyData(upload.metadata, upload, 'Available', 'Available'),
+      ...(previousStudy?.processingJobId ? { workflowStatus: previousStudy.workflowStatus } : {}),
       archiveName: upload.uploadName,
       archivePath: upload.filePath,
       totalSizeBytes: BigInt(upload.sizeBytes),
@@ -2758,6 +2768,7 @@ async function registerDirectBridgeStudyUpload(upload: DirectBridgeStudyUpload):
     },
     include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
   })
+  await processLateStudyImages(study.id, previousStudy?.instanceCount ?? study.instanceCount)
   const autoQueuedJob = await autoQueueAvailableStudyForRenewist({
     clientId: client.id,
     clientCode: client.code,
@@ -2905,6 +2916,7 @@ app.post(['/api/v1/study-bridge/studies/sync', '/api/v1/study-bridge/:agentId/st
       })
       const availabilityStatus = normalizeBridgeAvailability(study.availability_status)
       const workflowStatus = existing?.workflowStatus && !['Available', 'Selected'].includes(existing.workflowStatus) ? existing.workflowStatus : availabilityStatus === 'Available' ? existing?.workflowStatus ?? 'Available' : 'StudyUnavailable'
+      await assertStudyNotDeleted(client.id, study.study_instance_uid)
       const saved = await prisma.availableBridgeStudy.upsert({
         where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: study.study_instance_uid } },
         update: bridgeStudyData(study, { agent_id: agentId, agent_name: body.agent_name }, availabilityStatus, workflowStatus),
@@ -3027,6 +3039,7 @@ app.post(['/api/v1/study-bridge/:agentId/commands/:commandId/result', '/api/v1/s
         })
         const availabilityStatus = normalizeBridgeAvailability(study.availability_status)
         const workflowStatus = existing?.workflowStatus && !['Available', 'Selected'].includes(existing.workflowStatus) ? existing.workflowStatus : availabilityStatus === 'Available' ? existing?.workflowStatus ?? 'Available' : 'StudyUnavailable'
+        await assertStudyNotDeleted(client.id, study.study_instance_uid)
         const saved = await prisma.availableBridgeStudy.upsert({
           where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId: String(req.params.agentId), studyInstanceUid: study.study_instance_uid } },
           update: bridgeStudyData(study, { agent_id: String(req.params.agentId), agent_name: body.agent_name }, availabilityStatus, workflowStatus),
@@ -4336,6 +4349,7 @@ app.post('/api/admin/processing-jobs/:jobId/retry-teleradiology', requireAuth, r
 app.post('/api/admin/processing-jobs/:jobId/retry-renewist', requireAuth, requireSuperAdmin, async (req, res) => {
   const jobId = String(req.params.jobId)
   const job = await prisma.processingJob.findUniqueOrThrow({ where: { id: jobId } })
+  if (!['failed', 'outbound_submission_failed'].includes(job.status)) return res.status(409).json({ message: 'Only failed submissions can be retried. Terminated jobs must be submitted as a new study job.' })
   if (job.providerJobId) return res.status(409).json({ message: 'Renewist already accepted this study', providerJobId: job.providerJobId })
   const acceptedRequest = await prisma.providerApiRequest.findFirst({
     where: { idempotencyKey: jobId, direction: 'OUTBOUND', status: 'ACCEPTED' },
@@ -4346,7 +4360,7 @@ app.post('/api/admin/processing-jobs/:jobId/retry-renewist', requireAuth, requir
 
   await prisma.$transaction([
     prisma.processingJob.update({
-      where: { id: jobId },
+      where: { id: jobId, status: job.status },
       data: {
         status: 'queued',
         workflowType: 'TELERADIOLOGY_ONLY',
@@ -4400,6 +4414,7 @@ app.use((error: unknown, _req: Request, res: Response, next: express.NextFunctio
     return res.status(400).json({ message: `${field}${issue?.message ?? 'Invalid request data'}` })
   }
   console.error(error)
+  void recordOperationalFailure('Portal API', `${_req.method}:${_req.route?.path ?? _req.path}`, 'Unhandled API operation failed. Inspect server logs for details.').catch(alertError => console.error('API failure alert persistence failed', alertError))
   return res.status(500).json({ message: 'Unable to complete this action. Please try again.' })
 })
 
@@ -4421,14 +4436,14 @@ const httpServer = app.listen(port, host, () => {
   const features = getDeploymentFeatures()
   startTelegramWorker()
   console.log(`Deployment profile: ${features.profile}`)
-  void startAllDicomReceivers()
+  void startAllDicomReceivers().catch(error => console.error('DICOM receiver startup failed', error))
   void (async () => {
     await recoverInterruptedProcessingJobs()
     await resumeQueuedProcessingJobs()
     await repairDuplicateProcessingFailures()
   })().catch((error) => console.error('Processing job recovery failed', error))
-  void recoverStaleOutboundSubmissions()
-  void processPendingPacsReturnJobs()
+  void recoverStaleOutboundSubmissions().catch(error => console.error('Outbound recovery failed', error))
+  void processPendingPacsReturnJobs().catch(error => console.error('PACS return worker failed', error))
   if (features.whatsapp) startWhatsappOutboxWorker()
   else console.log('WhatsApp outbox worker disabled by deployment profile')
   if (features.billing) void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error))
@@ -4439,8 +4454,13 @@ const httpServer = app.listen(port, host, () => {
   const scan = nonOverlapping(scanInboundDicomStudies);
   setTimeout(scan, 3000).unref()
   setInterval(scan, 10000).unref()
-  setInterval(() => void processPendingPacsReturnJobs(), 5 * 60 * 1000).unref()
-  setInterval(() => void recoverStaleOutboundSubmissions(), 10 * 60 * 1000).unref()
+  setInterval(() => void processPendingPacsReturnJobs().catch(error => console.error('PACS return worker failed', error)), 5 * 60 * 1000).unref()
+  const retrySubmissions = () => void processSubmissionRetries().catch(error => console.error('Submission retry worker failed', error))
+  retrySubmissions()
+  setInterval(retrySubmissions, 10000).unref()
+  setInterval(() => void recoverStaleOutboundSubmissions().catch(error => console.error('Outbound recovery failed', error)), 10 * 60 * 1000).unref()
+  setInterval(() => void recoverInterruptedProcessingJobs().then(resumeQueuedProcessingJobs).catch(error => console.error('Processing recovery failed', error)), 60_000).unref()
+  setInterval(() => void startAllDicomReceivers().catch(error => console.error('DICOM receiver recovery failed', error)), 60_000).unref()
   if (features.billing) setInterval(() => void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error)), 24 * 60 * 60 * 1000).unref()
   startViewerPreimport()
   startStudyArchiveMaintenance()
@@ -4489,13 +4509,40 @@ async function resumeQueuedProcessingJobs() {
 function queueRenewistSubmission(jobId: string, source: string) {
   if (queuedRenewistJobIds.has(jobId)) return renewistSubmissionTail
   queuedRenewistJobIds.add(jobId)
-  const submission = renewistSubmissionTail
-    .catch(() => undefined)
-    .then(() => processApplicationJob(jobId))
-    .catch((error) => console.error(`${source} Renewist job ${jobId} failed`, error))
+  const submission = limitRenewistSubmissions(() => processApplicationJob(jobId))
+    .catch(async (error) => {
+      console.error(`${source} Renewist job ${jobId} failed`, error)
+      await prisma.processingJob.updateMany({ where: { id: jobId, status: { in: ['queued', 'submitting_to_renewist'] } }, data: { status: 'failed', clinicalStatus: 'FAILED', error: error instanceof Error ? error.message : 'Submission failed' } })
+    })
+    .then(() => scheduleSubmissionRetry(jobId))
+    .catch(error => console.error('Submission failure persistence failed', error))
     .finally(() => queuedRenewistJobIds.delete(jobId))
-  renewistSubmissionTail = submission
+  renewistSubmissionTail = Promise.all([renewistSubmissionTail.catch(() => undefined), submission])
   return submission
+}
+
+async function scheduleSubmissionRetry(jobId: string) {
+  const job = await prisma.processingJob.findUnique({ where: { id: jobId } })
+  if (!job || !['failed', 'outbound_submission_failed'].includes(job.status)) return
+  await recordOperationalFailure('Renewist study submission', `${job.id}:attempt-${job.submissionRetryCount}`, `Submission failed. ${job.submissionRetryCount ? 'Automatic retry exhausted.' : 'One fallback retry is due after three minutes.'}`, job.clientId)
+  if (job.submissionRetryAt) return
+  const due = submissionRetryDue(job.submissionRetryCount, job.updatedAt)
+  if (due) await prisma.processingJob.updateMany({ where: { id: job.id, status: job.status, submissionRetryAt: null, submissionRetryCount: 0 }, data: { submissionRetryAt: due } })
+}
+
+let submissionRetryRunning = false
+async function processSubmissionRetries() {
+  if (submissionRetryRunning) return
+  submissionRetryRunning = true
+  try {
+    const unscheduled = await prisma.processingJob.findMany({ where: { status: { in: ['failed', 'outbound_submission_failed'] }, submissionRetryAt: null, submissionRetryCount: 0 }, take: 100, orderBy: { updatedAt: 'asc' } })
+    for (const job of unscheduled) await scheduleSubmissionRetry(job.id)
+    const due = await prisma.processingJob.findMany({ where: { status: { in: ['failed', 'outbound_submission_failed'] }, submissionRetryAt: { lte: new Date() }, submissionRetryCount: 0 }, take: 100, orderBy: { submissionRetryAt: 'asc' } })
+    for (const job of due) {
+      const claimed = await prisma.processingJob.updateMany({ where: { id: job.id, status: job.status, submissionRetryCount: 0, submissionRetryAt: { lte: new Date() } }, data: { status: 'queued', clinicalStatus: 'QUEUED', submissionRetryAt: null, submissionRetryCount: { increment: 1 }, completedAt: null } })
+      if (claimed.count) queueRenewistSubmission(job.id, 'Three-minute fallback retry')
+    }
+  } finally { submissionRetryRunning = false }
 }
 
 async function recoverStaleOutboundSubmissions() {
@@ -4520,6 +4567,11 @@ async function recoverStaleOutboundSubmissions() {
           where: { id: request.id },
           data: { status: 'FAILED', responseCode: 504, metadata: { ...metadata, error: 'Renewist outbound submission became stale before a response was recorded' } },
         })
+        continue
+      }
+      const currentJob = await prisma.processingJob.findUnique({ where: { id: dectrocelJobId }, select: { status: true } })
+      if (!currentJob || ['cancelled', 'completed', 'sent_to_pacs'].includes(currentJob.status)) {
+        await prisma.providerApiRequest.update({ where: { id: request.id }, data: { status: 'SUPERSEDED' } })
         continue
       }
       const acceptedAfter = await prisma.providerApiRequest.findFirst({
@@ -4553,7 +4605,7 @@ async function recoverStaleOutboundSubmissions() {
           },
         }),
         prisma.processingJob.updateMany({
-          where: { id: dectrocelJobId, providerJobId: null },
+          where: { id: dectrocelJobId, providerJobId: null, status: { not: 'cancelled' } },
           data: {
             status: 'outbound_submission_failed',
             clinicalStatus: 'FAILED',
@@ -4571,7 +4623,7 @@ async function recoverStaleOutboundSubmissions() {
 }
 
 async function recoverInterruptedProcessingJobs() {
-  const staleMinutes = Math.max(5, Number(process.env.PROCESSING_JOB_RECOVERY_MINUTES ?? 15))
+  const staleMinutes = Math.max(45, Number(process.env.PROCESSING_JOB_RECOVERY_MINUTES ?? 45), Number(process.env.RENEWIST_OUTBOUND_TIMEOUT_MS ?? 1800000) / 60000 + 5)
   const staleBefore = new Date(Date.now() - staleMinutes * 60 * 1000)
   const jobs = await prisma.processingJob.findMany({
     where: {
@@ -4590,12 +4642,13 @@ async function recoverInterruptedProcessingJobs() {
       ?? (previousStatus.previousStatus && typeof previousStatus.previousStatus === 'object' && !Array.isArray(previousStatus.previousStatus)
         ? (previousStatus.previousStatus as Record<string, unknown>).dicomMetadata
         : undefined)
+    if (queuedRenewistJobIds.has(job.id)) continue
     await prisma.processingJob.update({
-      where: { id: job.id },
+      where: { id: job.id, status: 'submitting_to_renewist' },
       data: {
-        status: 'queued',
-        clinicalStatus: 'QUEUED',
-        error: null,
+        status: 'failed',
+        clinicalStatus: 'FAILED',
+        error: 'Submission interrupted before acceptance was recorded',
         completedAt: null,
         upstreamStatus: toPrismaJsonObject({
           state: 'recovered-after-interrupted-processing',
@@ -4608,8 +4661,9 @@ async function recoverInterruptedProcessingJobs() {
     })
     await prisma.availableBridgeStudy.updateMany({
       where: { processingJobId: job.id },
-      data: { workflowStatus: 'QueuedForRenewist' },
+      data: { workflowStatus: 'ProcessingFailed' },
     })
+    await scheduleSubmissionRetry(job.id)
   }
   if (jobs.length) console.log(`Recovered ${jobs.length} interrupted Renewist submission job(s) back to queued`)
 }
@@ -4656,13 +4710,23 @@ async function processPendingPacsReturnJobs() {
     take: 25,
   })
   for (const returnJob of pendingReturns) {
-    if (returnJob.attempts >= returnJob.maxAttempts) continue
+    try {
+    if (returnJob.attempts >= returnJob.maxAttempts) {
+      await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: 'FAILED' } })
+      await recordOperationalFailure('PACS return exhausted', returnJob.id, 'PACS delivery exhausted its retry limit. Review and resend from the portal.')
+      continue
+    }
     const report = await prisma.reportReview.findUnique({ where: { id: returnJob.reportReviewId } })
     if (!report) {
       await prisma.pacsReturnJob.update({
         where: { id: returnJob.id },
         data: { status: 'FAILED', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: 'Report review was not found' },
       })
+      continue
+    }
+    const cancelledMapping = await prisma.providerJobMapping.findFirst({ where: { reportReviewId: report.id, status: 'CANCELLED' }, select: { id: true } })
+    if (cancelledMapping) {
+      await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: 'CANCELLED' } })
       continue
     }
     if (report.status === 'PUSHED') {
@@ -4717,11 +4781,11 @@ async function processPendingPacsReturnJobs() {
           },
         }),
         ...(processingJobId ? [prisma.processingJob.updateMany({
-          where: { id: processingJobId, clientId: report.clientId },
+          where: { id: processingJobId, clientId: report.clientId, status: { not: 'cancelled' } },
           data: { status: 'sent_to_pacs', clinicalStatus: 'PUSHED', error: null, completedAt: new Date() },
         })] : []),
         prisma.pacsReturnJob.update({
-          where: { id: returnJob.id },
+          where: { id: returnJob.id, status: 'PENDING' },
           data: {
             status: 'SUCCESS',
             attempts: { increment: 1 },
@@ -4750,6 +4814,12 @@ async function processPendingPacsReturnJobs() {
           data: { reportId: report.id, action: 'PENDING_PACS_RETURN_FAILED', metadata: { error: message, returnJobId: returnJob.id } },
         }),
       ])
+    }
+  }
+    catch (error) {
+      console.error(`PACS return ${returnJob.id} failed`, error)
+      await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: 'PACS return preparation failed; inspect server logs' } }).catch(updateError => console.error('PACS failure persistence failed', updateError))
+      await recordOperationalFailure('PACS report preparation', returnJob.id, 'PACS report preparation failed. Other pending reports continue.').catch(alertError => console.error('PACS failure alert persistence failed', alertError))
     }
   }
   if (pendingReturns.length) console.log(`Processed ${pendingReturns.length} pending PACS return job(s)`)
@@ -4879,8 +4949,10 @@ async function startDicomReceiver(config: { receivingPort: number; aeTitle: stri
   child.on('error', error => { receiverProcesses.delete(config.receivingPort); console.error('DICOM receiver failed', error); });
   receiverProcesses.set(config.receivingPort, child)
   child.on('exit', (code) => {
+    if (receiverProcesses.get(config.receivingPort) !== child) return
     receiverProcesses.delete(config.receivingPort)
     console.error(`DICOM receiver on port ${config.receivingPort} exited with code ${code}`)
+    void recordOperationalFailure('DICOM receiver exited', String(config.receivingPort), `Receiver exited with code ${code}. The receiver supervisor retries startup every minute.`, config.clientCode).catch(error => console.error('Receiver alert persistence failed', error))
   })
   console.log(`DICOM receiver listening on ${config.receivingPort} as ${aeTitle}`)
   return { receivingPort: config.receivingPort, aeTitle, firewallRule, listener: 'started' }
@@ -4906,6 +4978,7 @@ async function scanInboundDicomStudies() {
       const entries = await fs.readdir(folder, { withFileTypes: true }).catch(() => [])
       for (const entry of entries) {
         if (!entry.isDirectory() || !entry.name.startsWith('study_')) continue
+        try {
         const demoStatus = await getDemoUploadStatus(config.clientId)
         if (!demoStatus.allowed) continue
         await queueInboundStudyIfReady({
@@ -4923,6 +4996,10 @@ async function scanInboundDicomStudies() {
           studyDir: path.join(folder, entry.name),
           studyUid: entry.name.replace(/^study_/, ''),
         })
+        } catch (error) {
+          console.error('DICOM study intake failed', error)
+          await recordOperationalFailure('DICOM intake', `${config.clientId}:${entry.name}`, 'Study intake failed. Other studies continue processing.', config.clientId).catch(alertError => console.error('Intake alert persistence failed', alertError))
+        }
       }
     }
   }
@@ -4943,6 +5020,8 @@ async function queueInboundStudyIfReady(input: {
   studyDir: string
   studyUid: string
 }) {
+  const deleted = await prisma.deletedPortalStudy.findUnique({ where: { clientId_studyInstanceUid: { clientId: input.clientId, studyInstanceUid: input.studyUid } } })
+  if (deleted) return
   const marker = path.join(input.studyDir, '.decxpert-available')
 
   const files = await listStudyFiles(input.studyDir)
@@ -4971,6 +5050,7 @@ async function queueInboundStudyIfReady(input: {
     defaultModalityForServiceType(input.serviceType),
   ].filter((value): value is string => Boolean(value)).map((value) => value.toUpperCase()))), dicomMetadata.bodyPartExamined)
 
+  const previousStudy = await prisma.availableBridgeStudy.findUnique({ where: { clientId_agentId_studyInstanceUid: { clientId: input.clientId, agentId: `DIRECT-PACS-${input.receivingPort}`, studyInstanceUid } } })
   const study = await prisma.$transaction(async (tx) => {
     const savedStudy = await tx.availableBridgeStudy.upsert({
       where: {
@@ -4998,7 +5078,7 @@ async function queueInboundStudyIfReady(input: {
         localPort: input.receivingPort,
         localAeTitle: input.aeTitle,
         availabilityStatus: 'Available',
-        workflowStatus: 'Available',
+        workflowStatus: previousStudy?.processingJobId ? previousStudy.workflowStatus : 'Available',
         readyAt: new Date(),
         lastSyncedAt: new Date(),
       },
@@ -5043,6 +5123,7 @@ async function queueInboundStudyIfReady(input: {
     })
     return savedStudy
   })
+  await processLateStudyImages(study.id, previousStudy?.instanceCount ?? study.instanceCount)
   await autoQueueAvailableStudyForRenewist({
     clientId: input.clientId,
     clientCode: input.clientCode,
@@ -5071,6 +5152,34 @@ async function dispatchDueAutomaticStudies() {
       } catch (error) { console.error('Automatic reporting failed for ' + study.id, error) }
     }))
   }
+}
+
+async function processLateStudyImages(studyId: string, previousCount: number) {
+  const result = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM available_bridge_studies WHERE id=${studyId} FOR UPDATE`
+    const study = await tx.availableBridgeStudy.findUnique({ where: { id: studyId }, include: { processingJob: true } })
+    const previous = study?.processingJob
+    if (!study || !previous || study.autoSubmitBlocked || !study.archivePath || study.instanceCount <= (study.submittedInstanceCount || previousCount)) return null
+    const details = `Additional images received (${previousCount} to ${study.instanceCount}). The complete expanded study is queued automatically; prior job ${previous.id} and reports are retained.`
+    const updated = await tx.processingJob.updateMany({ where: { id: previous.id, status: 'queued' }, data: { uploadPath: study.archivePath, uploadName: study.archiveName ?? previous.uploadName } })
+    let nextJobId = previous.id
+    if (!updated.count) {
+      if (previous.status === 'cancelled') return null
+      const nextJob = await tx.processingJob.create({ data: {
+        clientId: previous.clientId, serviceType: previous.serviceType, workflowType: previous.workflowType,
+        clinicalStatus: 'QUEUED', priority: study.priority, patientId: previous.patientId,
+        uploadName: study.archiveName ?? previous.uploadName, uploadPath: study.archivePath, demoMode: previous.demoMode,
+        upstreamStatus: { state: 'late_images_queued', previousProcessingJobId: previous.id, clinicalIndication: study.clinicalIndication, dicomMetadata: bridgeStudyDicomMetadata(study) },
+      } })
+      nextJobId = nextJob.id
+      await tx.processingJob.updateMany({ where: { id: previous.id, status: { in: ['failed', 'outbound_submission_failed'] } }, data: { status: 'cancelled', clinicalStatus: 'CANCELLED', submissionRetryAt: null, error: 'Superseded by expanded study submission' } })
+    }
+    await tx.availableBridgeStudy.update({ where: { id: study.id }, data: { processingJobId: nextJobId, submittedInstanceCount: study.instanceCount, workflowStatus: 'QueuedForRenewist', submittedAt: new Date(), autoSubmitAt: null } })
+    await tx.auditLog.create({ data: { clientId: study.clientId, action: 'LATE_IMAGES_AUTO_REPUSH_QUEUED', metadata: { studyId, previousProcessingJobId: previous.id, processingJobId: nextJobId, previousCount, instanceCount: study.instanceCount } } })
+    await recordOperationalFailure('Late study images auto-repush', `${study.id}:${study.instanceCount}`, details, study.clientId, tx)
+    return nextJobId
+  })
+  if (result) queueRenewistSubmission(result, 'Additional study images')
 }
 
 async function cancelDueAutomaticStudy(clientId: string, studyId: string, reason: 'DEMO_LIMIT_REACHED' | 'NO_ACTIVE_REPORTING_SERVICE') {
@@ -5115,7 +5224,7 @@ async function autoQueueAvailableStudyForRenewist(input: {
       const client = await tx.client.findUniqueOrThrow({ where: { id: input.clientId } })
       if (client.status !== 'ACTIVE' || !autoReportingEnabled(client.autoReportingModalities, serviceStudy)) return
       await tx.availableBridgeStudy.updateMany({
-        where: { id: study.id, processingJobId: null, autoSubmitAt: null, availabilityStatus: 'Available' },
+        where: { id: study.id, processingJobId: null, autoSubmitAt: null, autoSubmitBlocked: false, availabilityStatus: 'Available' },
         data: { autoSubmitAt: new Date(Date.now() + autoReportingDelayMs(serviceStudy)), modalities: serviceStudy.modalities, studyDescription: serviceStudy.studyDescription },
       })
     })
@@ -5139,7 +5248,7 @@ async function autoQueueAvailableStudyForRenewist(input: {
     await tx.$queryRaw`SELECT id FROM available_bridge_studies WHERE id = ${study.id} FOR UPDATE`
     const client = await tx.client.findUniqueOrThrow({ where: { id: input.clientId } })
     const current = await tx.availableBridgeStudy.findUnique({ where: { id: study.id }, include: { attachments: true } })
-    if (!current || current.processingJobId || !current.autoSubmitAt || current.autoSubmitAt.getTime() > Date.now() || current.availabilityStatus !== 'Available') return null
+    if (!current || current.autoSubmitBlocked || current.processingJobId || !current.autoSubmitAt || current.autoSubmitAt.getTime() > Date.now() || current.availabilityStatus !== 'Available') return null
     if (client.status !== 'ACTIVE' || !autoReportingEnabled(client.autoReportingModalities, current)) {
       await tx.availableBridgeStudy.update({ where: { id: study.id }, data: { autoSubmitAt: null } })
       return null
@@ -5168,7 +5277,7 @@ async function autoQueueAvailableStudyForRenewist(input: {
     })
     await tx.availableBridgeStudy.update({
       where: { id: study.id },
-      data: { workflowStatus: 'QueuedForRenewist', autoSubmitAt: null, priority: selectedPriority, selectedAt: new Date(), submittedAt: new Date(), processingJobId: processingJob.id },
+      data: { workflowStatus: 'QueuedForRenewist', submittedInstanceCount: current.instanceCount, autoSubmitAt: null, priority: selectedPriority, selectedAt: new Date(), submittedAt: new Date(), processingJobId: processingJob.id },
     })
     await tx.auditLog.create({
       data: { clientId: input.clientId, action: input.auditAction, metadata: { studyId: study.id, publicStudyId: study.publicStudyId, processingJobId: processingJob.id, serviceType: serviceSelection.serviceType, noClinicalIndication: !current.clinicalIndication } },
@@ -5181,6 +5290,9 @@ async function autoQueueAvailableStudyForRenewist(input: {
 }
 
 async function processApplicationJob(jobId: string) {
+  const claimed = await prisma.processingJob.updateMany({ where: { id: jobId, status: 'queued' }, data: { status: 'submitting_to_renewist' } })
+  if (!claimed.count) return
+  await assertProcessingActive(jobId)
   const job = await prisma.processingJob.findUniqueOrThrow({ where: { id: jobId } })
   const serviceType = parseServiceType(job.serviceType)
   if (!serviceType) throw new Error(`Unknown service type ${job.serviceType}`)
@@ -5246,7 +5358,7 @@ async function processApplicationJob(jobId: string) {
   const directRenewistWorkflowType = 'TELERADIOLOGY_ONLY'
 
   await prisma.processingJob.update({
-    where: { id: job.id },
+    where: { id: job.id, status: { notIn: ['cancelled', 'completed', 'sent_to_pacs'] } },
     data: {
       status: 'submitting_to_renewist',
       workflowType: directRenewistWorkflowType,
@@ -5309,6 +5421,7 @@ async function processApplicationJob(jobId: string) {
     return
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Processing failed'
+    await assertProcessingActive(job.id)
     await prisma.$transaction([
       prisma.usageLog.create({
         data: {
@@ -5330,11 +5443,11 @@ async function processApplicationJob(jobId: string) {
         },
       }),
       prisma.processingJob.update({
-        where: { id: job.id },
+        where: { id: job.id, status: { notIn: ['cancelled', 'completed', 'sent_to_pacs'] } },
         data: {
           status: 'failed',
           clinicalStatus: 'FAILED',
-          upstreamStatus: { state: 'failed' },
+          upstreamStatus: { ...queuedState, state: 'failed' },
           error: message,
           completedAt: new Date(),
         },
@@ -5384,6 +5497,7 @@ async function queueTeleradiologyOnlyJob(input: {
   reason: string
   upstreamResults?: Array<{ name: string; sourceName?: string; uploadName?: string; ok: boolean; status?: number; latencyMs?: number; error?: string }>
 }) {
+  await assertProcessingActive(input.job.id)
   const providerCode = input.clientService.pacsConfig?.teleradiologyProviderCode ?? process.env.TELERADIOLOGY_DEFAULT_PROVIDER ?? 'RENEWIST'
   const provider = await prisma.teleradiologyProvider.findUnique({ where: { code: providerCode } })
   if (!provider) throw new Error(`Teleradiology provider ${providerCode} is not configured`)
@@ -5444,6 +5558,7 @@ async function queueTeleradiologyOnlyJob(input: {
   })
 
   await prisma.$transaction(async (tx) => {
+    await tx.processingJob.update({ where: { id: input.job.id, status: { notIn: ['cancelled', 'completed', 'sent_to_pacs'] } }, data: { status: 'submitting_to_renewist' } })
     const reviewData = {
         clientId: input.job.clientId,
         studyId: study.id,
@@ -5567,7 +5682,7 @@ async function queueTeleradiologyOnlyJob(input: {
     await tx.processingJob.update({
       where: { id: input.job.id },
       data: {
-        status: outsourceTeleradiology ? 'submitted_to_outsourced_teleradiology' : activeRadiologistCount ? 'sent_to_radiologist' : 'awaiting_radiologist',
+        status: outsourceTeleradiology ? 'submitting_to_renewist' : activeRadiologistCount ? 'sent_to_radiologist' : 'awaiting_radiologist',
         clinicalStatus: outsourceTeleradiology || activeRadiologistCount ? 'PENDING' : 'FAILED',
         providerJobId: null,
         imageCount: billableUnits,
@@ -5968,9 +6083,9 @@ async function retryOutsourcedTeleradiologySubmission(processingJobId: string, a
   }))
   const aiReportHtml = getReportHtml(report)
   await prisma.processingJob.update({
-    where: { id: job.id },
+    where: { id: job.id, status: 'outbound_submission_failed' },
     data: {
-      status: 'submitted_to_outsourced_teleradiology',
+      status: 'submitting_to_renewist',
       clinicalStatus: 'PENDING',
       error: null,
       providerJobId: null,
@@ -6050,6 +6165,7 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
   processingJobId: string
   reportReviewId: string
 }) {
+  await assertProcessingActive(input.processingJobId)
   const provider = await prisma.teleradiologyProvider.findUnique({ where: { code: input.providerCode } })
   if (!provider) throw new Error(`Teleradiology provider ${input.providerCode} is not configured`)
   const requestId = crypto.randomUUID()
@@ -6137,8 +6253,12 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
       },
     },
   })
+  let providerAccepted = false
   try {
-    const result = await adapter.submitStudy(submissionInput)
+    await assertProcessingActive(input.processingJobId)
+    const control = beginProcessing(input.processingJobId)
+    const result = await adapter.submitStudy({ ...submissionInput, signal: control.signal }).finally(control.finish)
+    await assertProcessingActive(input.processingJobId)
     await prisma.$transaction([
       prisma.providerApiRequest.update({
         where: { requestId },
@@ -6201,7 +6321,7 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
         },
       }),
       prisma.processingJob.update({
-        where: { id: input.processingJobId },
+        where: { id: input.processingJobId, status: { notIn: ['cancelled', 'completed', 'sent_to_pacs'] } },
         data: {
           providerJobId: result.providerJobId,
           status: 'submitted_to_outsourced_teleradiology',
@@ -6222,6 +6342,7 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
         data: { workflowStatus: 'SubmittedToRenewist' },
       }),
     ])
+    providerAccepted = true
     // The original ZIP is kept for retries and QuickView; studyArchive.service removes it once S3 has held it for the retention window.
     if (normalizedStudy?.zipPath && normalizedStudy.zipPath !== input.studyZipPath) await deleteLocalUploadFile(normalizedStudy.zipPath)
     const acceptedJob = await prisma.processingJob.findUnique({ where: { id: input.processingJobId }, select: { clientId: true } })
@@ -6240,6 +6361,11 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Renewist outbound submit failed'
+    if (providerAccepted) {
+      await recordOperationalFailure('Renewist post-submission processing', input.processingJobId, 'Provider accepted the study, but local cleanup or notification failed. Submission must not be repeated automatically.')
+      return
+    }
+    await assertProcessingActive(input.processingJobId)
     await prisma.$transaction([
       prisma.providerApiRequest.update({
         where: { requestId },
@@ -6260,13 +6386,15 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
         },
       }),
       prisma.processingJob.update({
-        where: { id: input.processingJobId },
+        where: { id: input.processingJobId, status: { notIn: ['cancelled', 'completed', 'sent_to_pacs'] } },
         data: {
           status: 'outbound_submission_failed',
           clinicalStatus: 'FAILED',
           error: message,
           upstreamStatus: {
             state: 'outbound_submission_failed',
+            dicomMetadata: toPrismaJsonObject(dicomMetadata),
+            clinicalIndication: typeof metadata.clinicalIndication === 'string' ? metadata.clinicalIndication : undefined,
             providerCode: input.providerCode,
             reportReviewId: input.reportReviewId,
             error: message,
@@ -6302,6 +6430,7 @@ async function submitOutsourcedTeleradiologyStudy(input: ProviderStudySubmission
       })
     }
     console.error(`Outsourced teleradiology submission failed for job ${input.dectrocelJobId}`, error)
+    await scheduleSubmissionRetry(input.processingJobId)
   }
 }
 
@@ -6877,6 +7006,11 @@ async function getExactSignedReportFilePath(
 ) {
   const fromReportJson = getReportFilePath(report, format, variant)
   if (fromReportJson && !shouldSkipSignedReportCandidate(fromReportJson, format)) return fromReportJson
+  const remote = await getExactSignedReportStorage(report, format, variant)
+  if (remote) {
+    const restoredPath = path.join(uploadsPath, 'renewist-reports', `${crypto.createHash('sha256').update(`${remote.bucket}/${remote.key}`).digest('hex')}.${format}`)
+    if (await downloadStoredObjectToFile(remote, restoredPath, Math.max(25, Number(process.env.RENEWIST_MAX_FILE_SIZE_MB ?? 25)) * 1024 * 1024)) return restoredPath
+  }
 
   const versions = await prisma.reportVersion.findMany({
     where: { reportReviewId: report.id, source: 'RENEWIST' },

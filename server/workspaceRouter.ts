@@ -11,6 +11,7 @@ import { requireWorkspaceCapability, workspaceAccess } from './workspaceAccess';
 import { modalityStatisticsExports, reportingActivity, csvDocument, durationSeconds, istTimestamp, statisticsRange, summarizeStudies, type StatisticsRow } from './workspaceStatistics';
 import { recordBillingEvent, repriceUninvoicedZeroBillingTransactions } from './billing';
 import { serviceNameForType } from './uploadPipeline';
+import { abortProcessing } from './processingControl';
 
 export const workspaceRouter = Router();
 workspaceRouter.use(requireAuth);
@@ -43,59 +44,78 @@ workspaceRouter.post(['/studies/:studyId/mark-urgent', '/studies/:studyId/priori
   }
 });
 
-workspaceRouter.post('/studies/:studyId/terminate-processing', async (req, res, next) => {
+workspaceRouter.route(['/studies/:studyId/terminate-processing', '/studies/:studyId']).all(async (req, res, next) => {
+  if (!((req.method === 'POST' && req.path.endsWith('/terminate-processing')) || (req.method === 'DELETE' && !req.path.endsWith('/terminate-processing')))) return next();
   try {
     if (req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ message: 'Only super administrators can terminate processing.' });
-    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Super admin terminated processing for repush';
+    const remove = req.method === 'DELETE';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason || reason.length > 2000) return res.status(400).json({ message: 'Enter a reason between 1 and 2000 characters.' });
     const result = await prisma.$transaction(async tx => {
       const study = await tx.availableBridgeStudy.findUnique({ where: { id: String(req.params.studyId) }, include: { processingJob: true } });
       if (!study) throw Object.assign(new Error('Study not found.'), { status: 404 });
-      if (!study.processingJobId || !study.processingJob) throw Object.assign(new Error('This study is not currently linked to a processing job.'), { status: 409 });
+      if (remove) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`study-delete:${study.clientId}:${study.studyInstanceUid}`}))`;
       const finalReport = await tx.reportReview.findFirst({ where: { clientId: study.clientId, studyUid: study.studyInstanceUid, status: { in: ['APPROVED', 'PUSHED'] } }, select: { id: true, status: true } });
-      if (finalReport || /reportgenerated|reported|completed/i.test(study.workflowStatus)) throw Object.assign(new Error('Reported studies cannot be terminated for repush.'), { status: 409 });
-      const previous = { workflowStatus: study.workflowStatus, submittedAt: study.submittedAt, processingJobId: study.processingJobId, jobStatus: study.processingJob.status, jobClinicalStatus: study.processingJob.clinicalStatus };
-      await tx.processingJob.update({
+      const nextStatus = finalReport ? study.workflowStatus : 'Available';
+      const previous = { workflowStatus: study.workflowStatus, submittedAt: study.submittedAt, processingJobId: study.processingJobId, jobStatus: study.processingJob?.status, jobClinicalStatus: study.processingJob?.clinicalStatus };
+      if (study.processingJobId) await tx.processingJob.update({
         where: { id: study.processingJobId },
         data: {
           status: 'cancelled',
           clinicalStatus: 'CANCELLED',
           error: reason,
           completedAt: new Date(),
+          submissionRetryAt: null,
         },
       });
       await tx.availableBridgeStudy.update({
         where: { id: study.id },
         data: {
           processingJobId: null,
-          workflowStatus: 'Available',
+          workflowStatus: nextStatus,
+          autoSubmitAt: null,
+          autoSubmitBlocked: true,
           selectedAt: null,
           submittedAt: null,
         },
       });
+      await tx.bridgeDispatchRequest.updateMany({ where: { availableStudyId: study.id, status: { in: ['Pending', 'Acknowledged', 'Sending'] } }, data: { status: 'Cancelled' } });
+      if (study.processingJobId) {
       await tx.providerJobMapping.updateMany({ where: { processingJobId: study.processingJobId }, data: { status: 'CANCELLED' } });
+      const mappings = await tx.providerJobMapping.findMany({ where: { processingJobId: study.processingJobId }, select: { reportReviewId: true } });
+      const reportIds = mappings.flatMap(m => m.reportReviewId ? [m.reportReviewId] : []);
+      await tx.notificationOutbox.updateMany({ where: { aggregateId: { in: [study.processingJobId, ...reportIds] }, status: { in: ['PENDING', 'FAILED', 'SENDING'] } }, data: { status: 'CANCELLED' } });
+      await tx.pacsReturnJob.updateMany({ where: { reportReviewId: { in: reportIds }, status: 'PENDING' }, data: { status: 'CANCELLED', errorMessage: reason } });
       await tx.jobStatusHistory.create({
         data: {
           processingJobId: study.processingJobId,
           actorUserId: req.user!.sub,
           sourceSystem: 'SUPER_ADMIN',
-          previousStatus: study.processingJob.status,
+          previousStatus: study.processingJob?.status,
           newStatus: 'cancelled',
           reason,
-          technicalDetails: { studyId: study.id, previous, next: { workflowStatus: 'Available', processingJobId: null }, repushAllowed: true },
+          technicalDetails: { studyId: study.id, previous, next: { workflowStatus: nextStatus, processingJobId: null }, repushAllowed: !finalReport && !remove },
         },
       });
+      }
       await tx.auditLog.create({
         data: {
           clientId: study.clientId,
           actorUserId: req.user!.sub,
-          action: 'SUPER_ADMIN_PROCESSING_TERMINATED_FOR_REPUSH',
+          action: remove ? 'SUPER_ADMIN_STUDY_DELETED' : 'SUPER_ADMIN_PROCESSING_TERMINATED',
           metadata: { studyId: study.id, publicStudyId: study.publicStudyId, processingJobId: study.processingJobId, previous, reason },
         },
       });
-      return { studyId: study.id, previousProcessingJobId: study.processingJobId };
+      if (remove) {
+        await tx.deletedPortalStudy.upsert({ where: { clientId_studyInstanceUid: { clientId: study.clientId, studyInstanceUid: study.studyInstanceUid } }, create: { clientId: study.clientId, studyInstanceUid: study.studyInstanceUid }, update: { deletedAt: new Date() } });
+        await tx.availableBridgeStudy.delete({ where: { id: study.id } });
+      }
+      return { studyId: study.id, previousProcessingJobId: study.processingJobId, status: remove ? 'Deleted' : nextStatus };
     }, { isolationLevel: 'Serializable' });
-    res.json({ ...result, status: 'Available', message: 'Processing terminated. The study can now be sent for reporting again.' });
+    if (result.previousProcessingJobId) abortProcessing(result.previousProcessingJobId);
+    res.json({ ...result, message: remove ? 'Study removed from the worklist and portal processing stopped. Reports and audit history retained.' : 'Portal processing and pending retries stopped. Any work already accepted by Renewist requires cancellation with Renewist.' });
   } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2034') return res.status(409).json({ message: 'Study changed during this action. Refresh and try again.' });
     if (error && typeof error === 'object' && 'status' in error) return res.status(Number(error.status)).json({ message: (error as Error).message });
     next(error);
   }

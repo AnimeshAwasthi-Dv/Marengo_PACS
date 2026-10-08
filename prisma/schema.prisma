@@ -794,7 +794,7 @@ model Payment {
   client            Client   @relation(fields: [clientId], references: [id])
   invoice           Invoice  @relation(fields: [invoiceId], references: [id])
 
-  @@index([provider, providerPaymentId])
+  @@unique([provider, providerPaymentId])
   @@index([invoiceId, status])
   @@index([clientId, createdAt])
   @@map("payments")
@@ -1047,8 +1047,11 @@ model ProcessingJob {
   archiveUploadAttempts Int       @default(0)
   archiveNextAttemptAt  DateTime?
   archiveError          String?
+  submissionRetryAt     DateTime?
+  submissionRetryCount  Int       @default(0)
 
   @@index([archiveState, archiveStoredAt])
+  @@index([status, submissionRetryAt])
   @@index([clientId, patientId])
   @@index([clientId])
   @@index([status])
@@ -1056,6 +1059,14 @@ model ProcessingJob {
   @@index([clientId, createdAt])
   @@index([updatedAt])
   @@map("processing_jobs")
+}
+
+model DeletedPortalStudy {
+  clientId String
+  studyInstanceUid String
+  deletedAt DateTime @default(now())
+  @@id([clientId, studyInstanceUid])
+  @@map("deleted_portal_studies")
 }
 
 model AvailableBridgeStudy {
@@ -1088,6 +1099,8 @@ model AvailableBridgeStudy {
   clinicalIndication String?
   submittedAt        DateTime?
   autoSubmitAt       DateTime?
+  autoSubmitBlocked  Boolean                 @default(false)
+  submittedInstanceCount Int                 @default(0)
   priority           String                  @default("REGULAR")
   processingJobId    String?                 @unique
   availabilityStatus String                  @default("Available")

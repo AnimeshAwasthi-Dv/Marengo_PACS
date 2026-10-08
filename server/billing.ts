@@ -676,22 +676,23 @@ async function generateInvoices(periodStart: Date, periodEnd: Date, clientId?: s
   })
   const invoices = []
   for (const group of grouped) {
-    const transactions = await prisma.studyBillingTransaction.findMany({
+    const invoice = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`invoice:${group.clientId}`}))`
+    const transactions = await tx.studyBillingTransaction.findMany({
       where: { clientId: group.clientId, status: 'UNINVOICED', createdAt: { gte: periodStart, lte: periodEnd } },
     })
-    if (!transactions.length) continue
-    const client = await prisma.client.findUniqueOrThrow({ where: { id: group.clientId }, select: { billingDiscountPercent: true } })
+    if (!transactions.length) return null
+    const client = await tx.client.findUniqueOrThrow({ where: { id: group.clientId }, select: { billingDiscountPercent: true } })
     const grossMinor = transactions.reduce((sum, item) => sum + item.amountMinor, 0)
     const discountPercent = Math.min(100, Math.max(0, client.billingDiscountPercent))
     const discountMinor = Math.round(grossMinor * discountPercent / 100)
     const subtotalMinor = Math.max(0, grossMinor - discountMinor)
     const tax = calculateGstTax(subtotalMinor)
     const totalMinor = subtotalMinor + tax.totalTaxMinor
-    const invoice = await prisma.$transaction(async (tx) => {
       const created = await tx.invoice.create({
         data: {
           clientId: group.clientId,
-          invoiceNumber: await nextInvoiceNumber(group.clientId),
+          invoiceNumber: await nextInvoiceNumber(group.clientId, tx),
           periodStart,
           periodEnd,
           subtotalMinor,
@@ -725,12 +726,12 @@ async function generateInvoices(periodStart: Date, periodEnd: Date, clientId?: s
       }
       await tx.invoiceLineItem.createMany({ data: lineItems })
       await tx.studyBillingTransaction.updateMany({
-        where: { id: { in: transactions.map((item) => item.id) } },
+        where: { id: { in: transactions.map((item) => item.id) }, status: 'UNINVOICED' },
         data: { invoiceId: created.id, status: 'INVOICED' },
       })
       return tx.invoice.findUniqueOrThrow({ where: { id: created.id }, include: invoiceInclude })
     })
-    invoices.push(invoice)
+    if (invoice) invoices.push(invoice)
   }
   return invoices
 }
@@ -1268,12 +1269,12 @@ function toPrismaJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue
 }
 
-async function nextInvoiceNumber(clientId: string) {
-  const client = await prisma.client.findUnique({ where: { id: clientId }, select: { code: true } })
+async function nextInvoiceNumber(clientId: string, db: Prisma.TransactionClient = prisma) {
+  const client = await db.client.findUnique({ where: { id: clientId }, select: { code: true } })
   const now = new Date()
   const period = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`
-  const count = await prisma.invoice.count({ where: { invoiceNumber: { startsWith: `INV-${client?.code ?? 'CLIENT'}-${period}` } } })
-  return `INV-${client?.code ?? 'CLIENT'}-${period}-${String(count + 1).padStart(4, '0')}`
+  const [{ value }] = await db.$queryRaw<Array<{ value: bigint }>>`SELECT nextval('invoice_number_sequence') AS value`
+  return `INV-${client?.code ?? 'CLIENT'}-${period}-${String(value).padStart(4, '0')}`
 }
 
 function buildBillingSnapshot(input: {

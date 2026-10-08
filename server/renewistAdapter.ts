@@ -69,6 +69,7 @@ export class RenewistAdapter implements TeleradiologyProviderAdapter {
       'X-API-KEY': apiKey,
       'x-renewist-api-key': apiKey,
       'x-renewist-request-id': requestId,
+      'X-Idempotency-Key': input.dectrocelJobId,
       'x-renewist-timestamp': timestamp,
     }
     if (hmacSecret) {
@@ -76,7 +77,7 @@ export class RenewistAdapter implements TeleradiologyProviderAdapter {
     }
     const timeoutMs = Number(process.env.RENEWIST_OUTBOUND_TIMEOUT_MS ?? this.config.timeoutMs ?? 1800000)
     try {
-      const response = await postMultipartStream(url, form, headers, timeoutMs)
+      const response = await postMultipartStream(url, form, headers, timeoutMs, input.signal)
       const responseBody = parseResponseBody(response.body)
       if (response.statusCode < 200 || response.statusCode >= 300) throw new ProviderSubmissionError(response.statusCode, responseBody)
       return {
@@ -156,8 +157,18 @@ export class RenewistAdapter implements TeleradiologyProviderAdapter {
   }
 }
 
-function postMultipartStream(url: string, form: FormData, headers: Record<string, string>, timeoutMs: number) {
+export function postMultipartStream(url: string, form: FormData, headers: Record<string, string>, timeoutMs: number, signal?: AbortSignal) {
   return new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+    let deadline: ReturnType<typeof setTimeout>;
+    let settled = false;
+    const finish = (error?: Error, result?: { statusCode: number; body: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      form.destroy();
+      if (error) { request.destroy(); reject(error); }
+      else resolve(result!);
+    };
     const target = new URL(url)
     const transport = target.protocol === 'https:' ? https : http
     const request = transport.request({
@@ -168,14 +179,24 @@ function postMultipartStream(url: string, form: FormData, headers: Record<string
       path: `${target.pathname}${target.search}`,
       headers,
       timeout: timeoutMs,
+      signal,
     }, (response) => {
       const chunks: Buffer[] = []
-      response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
-      response.on('end', () => resolve({ statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }))
+      let size = 0;
+      response.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > 4 * 1024 * 1024) { response.destroy(); finish(new Error('Renewist response exceeded 4 MB')); }
+        else chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      response.on('error', error => finish(error));
+      response.on('aborted', () => finish(new Error('Renewist response was interrupted')));
+      response.on('end', () => finish(undefined, { statusCode: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
     })
-    request.on('timeout', () => request.destroy(new Error(`Renewist outbound submit timed out after ${timeoutMs}ms`)))
-    request.on('error', reject)
-    form.on('error', reject)
+    deadline = setTimeout(() => finish(new Error(`Renewist outbound submit timed out after ${timeoutMs}ms`)), timeoutMs);
+    deadline.unref();
+    request.on('timeout', () => finish(new Error(`Renewist outbound submit timed out after ${timeoutMs}ms`)))
+    request.on('error', error => finish(error))
+    form.on('error', error => finish(error))
     form.pipe(request)
   })
 }
