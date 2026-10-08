@@ -34,6 +34,10 @@ Implemented from the user's request and reviewed against PROCESS-GAPS.docx.
 
 ## Deployment and verification
 
+### Follow-up: buttons failing on the configured staging database
+
+The October 8 migrations were absent from the staging database containing the reported study. Both `20261008090000_submission_fallback_retry` and `20261008091000_billing_idempotency` have now been applied after checking for duplicate provider payment IDs. The actual terminate and delete route handlers were verified against the affected study in transactions that deliberately rolled back. Both returned success, and the original study and processing-job link were verified unchanged. This validates the database actions; it does not claim cancellation at Renewist or test live PACS/Telegram delivery.
+
 Apply both new Prisma migrations before starting the new application, and regenerate the Prisma client during deployment. The billing uniqueness migration deliberately fails if existing duplicate payment IDs need reconciliation; it does not delete historical payments. Configure the existing `TECH_ALERT_ENABLED`, `TECH_ALERT_BOT_TOKEN` and `TECH_ALERT_CHAT_ID` values, and keep clinical workers enabled for automatic retries.
 
 Local checks include the production build and regression tests for upload deadlines, interrupted responses, cancellation, retry timing, callback identity, PACS identity, admin authorization, jobless termination, and deletion retention. The full test suite also contains two unrelated failing local tests: `studyStorage.test.ts` imports the missing `prepareViewerStudyObject` export; `worklistPriority.test.ts` lacks the Telegram database mock needed with the local Telegram configuration.
