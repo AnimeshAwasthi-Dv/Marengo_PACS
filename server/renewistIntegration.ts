@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 import yauzl from 'yauzl'
 import { z } from 'zod'
 import { prisma } from './db'
-import { renderHtmlReportPdf, sendApprovedReportToPacs } from './pacsSender'
+import { renderHtmlReportPdf } from './pacsSender'
 import { storeObject, type StoredObject } from './reportStorage'
 import { getDeploymentFeatures } from './deploymentProfile'
 import { RenewistAdapter } from './renewistAdapter'
@@ -480,84 +480,12 @@ async function handleReportSubmissionLocked(req: Request, res: Response, rawInpu
     idempotencyKey: `study-status:renewist:${report.id}:${input.report_version}:${input.report_status}`,
   })
 
-  let pacsDelivery: unknown = null
-  if (isFinalReport) {
-    const signedPdfPath = input.signedFiles?.pdf?.path ?? (input.report_format === 'PDF' ? input.reportFilePath : null)
-    try {
-      if (!signedPdfPath) {
-        throw new Error('Exact Renewist signed PDF is not available; refusing to push generated fallback report')
-      }
-      pacsDelivery = await sendApprovedReportToPacs({
-        report: { ...report, editedReportJson: { htmlReport }, outputFormat: report.outputFormat },
-        htmlReport,
-        sourcePdfPath: signedPdfPath,
-      })
-      await prisma.$transaction([
-        prisma.reportReview.update({
-          where: { id: report.id },
-          data: {
-            status: 'APPROVED',
-            pushedAt: new Date(),
-            editedReportJson: toPrismaJsonObject({
-              ...(report.editedReportJson as Record<string, unknown>),
-              htmlReport,
-              renewist: metadata,
-              reportFilePath: input.reportFilePath,
-              reportChecksum: input.reportChecksum ?? input.report_checksum,
-              signedReportFiles: signedReportFilesForJson(input.signedFiles),
-              pacsDelivery,
-            }),
-          },
-        }),
-        ...(processingJob ? [prisma.processingJob.update({
-          where: { id: processingJob.id, status: { not: 'cancelled' } },
-          data: {
-            status: 'completed',
-            clinicalStatus: 'APPROVED',
-            providerJobId: input.renewist_job_id,
-            error: null,
-          },
-        })] : []),
-        prisma.pacsReturnJob.updateMany({
-          where: { reportReviewId: report.id, status: 'PENDING' },
-          data: { status: 'SUCCESS', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: null, deliveryResult: toPrismaJsonValue(pacsDelivery) },
-        }),
-        prisma.reportAuditLog.create({
-          data: { reportId: report.id, action: 'RENEWIST_REPORT_SENT_TO_CLIENT_PACS', metadata: toPrismaJsonObject({ ...metadata, pacsDelivery }) },
-        }),
-      ])
-      await enqueueStudyStatusNotification(prisma, {
-        eventType: 'RENEWIST_REPORT_SENT_TO_CLIENT_PACS',
-        clientId: report.clientId,
-        reportId: report.id,
-        processingJobId: processingJob?.id ?? null,
-        status: 'APPROVED',
-        patientName: report.patientName,
-        patientId: input.patient_id ?? report.patientId,
-        accession: input.accession_number ?? report.accession,
-        modality: report.modality,
-        serviceName: report.serviceName,
-        radiologistName: input.radiologist_name,
-        idempotencyKey: `study-status:renewist-pushed:${report.id}:${input.report_version}`,
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to send Renewist report to client PACS'
-      await prisma.$transaction([
-        prisma.pacsReturnJob.updateMany({
-          where: { reportReviewId: report.id, status: 'PENDING' },
-          data: { status: 'PENDING', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: message },
-        }),
-        prisma.reportAuditLog.create({
-          data: { reportId: report.id, action: 'RENEWIST_REPORT_PACS_SEND_FAILED', metadata: toPrismaJsonObject({ ...metadata, error: message }) },
-        }),
-      ])
-    }
-  }
-  if (!isFinalReport || pacsDelivery) {
-    await cleanupRenewistLocalFiles(input).catch((error) => {
-      console.warn(`Unable to clean local Renewist report files for ${report.id}:`, error instanceof Error ? error.message : error)
-    })
-  }
+  // PACS delivery runs in the worker (processPendingPacsReturnJobs) from the PacsReturnJob created above,
+  // so this callback only stores the report. Local files with an S3 copy are removed now; the worker
+  // restores them from S3 when it sends. Files without an S3 copy are kept for the worker.
+  await cleanupRenewistLocalFiles(input).catch((error) => {
+    console.warn(`Unable to clean local Renewist report files for ${report.id}:`, error instanceof Error ? error.message : error)
+  })
 
   const acknowledgement = {
     accepted: true,
@@ -565,7 +493,7 @@ async function handleReportSubmissionLocked(req: Request, res: Response, rawInpu
     dectrocel_job_id: input.dectrocel_job_id,
     report_id: report.id,
     submission_id: submission.id,
-    pacs_return_status: isFinalReport ? (pacsDelivery ? 'SUCCESS' : 'PENDING') : 'NOT_REQUIRED',
+    pacs_return_status: isFinalReport ? 'PENDING' : 'NOT_REQUIRED',
   }
   if (processingJob) await recordStudyAcknowledgement(processingJob.id, 'RENEWIST_EXCHANGE', acknowledgement)
   res.status(202).json(acknowledgement)

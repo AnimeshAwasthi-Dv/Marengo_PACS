@@ -1,4 +1,11 @@
 {$PORTAL_DOMAIN} {
   encode zstd gzip
-  reverse_proxy app:4000
+  # Bridge agent traffic (every alias, any case) goes to the ingest service; everything else to the API.
+  @bridge path_regexp bridge (?i)^/api/v1/(bridge|study-bridge|study-agents)(/|$)
+  handle @bridge {
+    reverse_proxy ingest:4000
+  }
+  handle {
+    reverse_proxy api:4000
+  }
 }

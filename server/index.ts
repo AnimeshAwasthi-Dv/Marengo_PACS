@@ -14,6 +14,8 @@ import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { recordOperationalFailure } from './operationalAlerts'
 import { submissionRetryDue, submissionRetrySweepSince } from './submissionRetryPolicy'
+import { PACS_RETURN_POLL_MS, pacsReturnRetryAt } from './pacsReturnPolicy'
+import { processRole, processRoleGuard, roleRunsIngest, roleRunsWorkers } from './processRole'
 import { assertProcessingActive, assertStudyNotDeleted, beginProcessing } from './processingControl'
 import { ensureMarengoServices } from './marengoServices'
 import { resolveArchivePath } from './viewer/archivePaths'
@@ -99,7 +101,10 @@ const distPath = path.resolve(__dirname, '..', 'dist')
 const uploadsPath = path.resolve(__dirname, '..', 'uploads')
 const appUploadPath = path.join(uploadsPath, 'application-jobs')
 const dicomInboundPath = path.join(uploadsPath, 'dicom-inbound')
+const role = processRole()
 const receiverProcesses = new Map<number, ReturnType<typeof spawn>>()
+// What each running receiver was started with (`AE|clientCode`), so the reconciler can restart a changed one.
+const receiverSpecs = new Map<number, string>()
 const externalViewerImports = new Map<string, { archivePath: string; importId: string; status: string; viewerUrl?: string; expiresAt: number }>()
 
 
@@ -236,8 +241,8 @@ function toPrismaJsonObject(value: Record<string, unknown>): Prisma.InputJsonObj
 type ReceiverStartResult = {
   receivingPort: number
   aeTitle: string
-  firewallRule: 'created' | 'existing'
-  listener: 'started' | 'already-running' | 'already-listening'
+  firewallRule: 'created' | 'existing' | 'managed-by-ingest'
+  listener: 'started' | 'already-running' | 'already-listening' | 'managed-by-ingest'
 }
 
 function requireDeploymentFeature(feature: 'billing' | 'calling' | 'notifications' | 'support' | 'whatsapp') {
@@ -247,6 +252,8 @@ function requireDeploymentFeature(feature: 'billing' | 'calling' | 'notification
   }
 }
 
+// Each role serves only its own paths (Caddy routes the same way); see server/processRole.ts.
+app.use(processRoleGuard(role))
 app.use('/api/v1/whatsapp/wati/webhook', captureWatiWebhookSecret)
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') ?? true }))
 app.use(compression({ threshold: 1024 }))
@@ -4450,17 +4457,50 @@ app.get(/^(?!\/api).*/, (_req, res) => {
 })
 
 const httpServer = app.listen(port, host, () => {
+  console.log(`DecXpert API listening on http://${host}:${port} (role: ${role})`)
   // Technical monitoring has its own explicit enable flag, independent of clinical workers.
-  startTechnicalMonitor()
-  console.log(`DecXpert API listening on http://${host}:${port}`)
+  if (roleRunsWorkers(role)) startTechnicalMonitor()
   if (process.env.DISABLE_STARTUP_WORKERS === 'true' || process.env.DATABASE_READ_ONLY === 'true') {
     console.log('Startup workers disabled by DISABLE_STARTUP_WORKERS=true')
     return
   }
+  if (roleRunsIngest(role)) startIngestProcesses()
+  if (roleRunsWorkers(role)) startWorkerProcesses()
+})
+
+/**
+ * Ingest: DICOM receivers, the inbound scan and Bridge upload sweeps. In-process timers and child processes:
+ * one ingest copy only (fixed ports; see Harness/memory/constraint-single-replica.md).
+ */
+function startIngestProcesses() {
+  const reconcileReceivers = nonOverlapping(reconcileDicomReceivers)
+  void reconcileReceivers()
+  setInterval(reconcileReceivers, 30_000).unref()
+  const scan = nonOverlapping(scanInboundDicomStudies);
+  setTimeout(scan, 3000).unref()
+  setInterval(scan, 10000).unref()
+  const sweepChunkedUploads = () => void bridgeChunkedUploads.sweep(24 * 60 * 60 * 1000)
+    .then(removed => { if (removed) console.log(`Removed ${removed} abandoned Bridge part upload(s)`) })
+    .catch(error => console.error('Bridge part upload cleanup failed', error))
+  setTimeout(sweepChunkedUploads, 60_000).unref()
+  setInterval(sweepChunkedUploads, 60 * 60 * 1000).unref()
+  // Images stay a week after a study's last change, so a late re-commit sends only the images that are new; two days
+  // once the study is committed (its ZIP holds them, and Bridge re-commits only on a retry).
+  const sweepInstanceUploads = () => void bridgeInstanceUploads.sweep({ idleMs: 7 * 24 * 60 * 60 * 1000, committedIdleMs: 2 * 24 * 60 * 60 * 1000 })
+    .then(removed => { if (removed) console.log(`Removed ${removed} idle Bridge per-image upload(s)`) })
+    .catch(error => console.error('Bridge per-image upload cleanup failed', error))
+  setTimeout(sweepInstanceUploads, 90_000).unref()
+  setInterval(sweepInstanceUploads, 60 * 60 * 1000).unref()
+}
+
+/**
+ * Worker: study submission, auto-submit dispatch, PACS return, recovery and retries, messaging, invoices, viewer
+ * pre-import and archive maintenance. In-process timers and the submission limiter: one worker copy only.
+ */
+function startWorkerProcesses() {
   const features = getDeploymentFeatures()
   startTelegramWorker()
   console.log(`Deployment profile: ${features.profile}`)
-  void startAllDicomReceivers().catch(error => console.error('DICOM receiver startup failed', error))
   void (async () => {
     await recoverInterruptedProcessingJobs()
     await resumeQueuedProcessingJobs()
@@ -4475,32 +4515,19 @@ const httpServer = app.listen(port, host, () => {
   const autoReportingScan = nonOverlapping(dispatchDueAutomaticStudies)
   setTimeout(autoReportingScan, 3000).unref()
   setInterval(autoReportingScan, 5000).unref()
-  const scan = nonOverlapping(scanInboundDicomStudies);
-  setTimeout(scan, 3000).unref()
-  setInterval(scan, 10000).unref()
-  setInterval(() => void processPendingPacsReturnJobs().catch(error => console.error('PACS return worker failed', error)), 5 * 60 * 1000).unref()
+  // Jobs queued by the api and ingest processes (uploads, manual submits, retries, late images) start here.
+  const submitQueued = nonOverlapping(resumeQueuedProcessingJobs)
+  setInterval(submitQueued, 5000).unref()
+  setInterval(() => void processPendingPacsReturnJobs().catch(error => console.error('PACS return worker failed', error)), PACS_RETURN_POLL_MS).unref()
   const retrySubmissions = () => void processSubmissionRetries().catch(error => console.error('Submission retry worker failed', error))
   retrySubmissions()
   setInterval(retrySubmissions, 10000).unref()
   setInterval(() => void recoverStaleOutboundSubmissions().catch(error => console.error('Outbound recovery failed', error)), 10 * 60 * 1000).unref()
-  setInterval(() => void recoverInterruptedProcessingJobs().then(resumeQueuedProcessingJobs).catch(error => console.error('Processing recovery failed', error)), 60_000).unref()
-  setInterval(() => void startAllDicomReceivers().catch(error => console.error('DICOM receiver recovery failed', error)), 60_000).unref()
+  setInterval(() => void recoverInterruptedProcessingJobs().catch(error => console.error('Processing recovery failed', error)), 60_000).unref()
   if (features.billing) setInterval(() => void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error)), 24 * 60 * 60 * 1000).unref()
   startViewerPreimport()
   startStudyArchiveMaintenance()
-  const sweepChunkedUploads = () => void bridgeChunkedUploads.sweep(24 * 60 * 60 * 1000)
-    .then(removed => { if (removed) console.log(`Removed ${removed} abandoned Bridge part upload(s)`) })
-    .catch(error => console.error('Bridge part upload cleanup failed', error))
-  setTimeout(sweepChunkedUploads, 60_000).unref()
-  setInterval(sweepChunkedUploads, 60 * 60 * 1000).unref()
-  // Images stay a week after a study's last change, so a late re-commit sends only the images that are new; two days
-  // once the study is committed (its ZIP holds them, and Bridge re-commits only on a retry).
-  const sweepInstanceUploads = () => void bridgeInstanceUploads.sweep({ idleMs: 7 * 24 * 60 * 60 * 1000, committedIdleMs: 2 * 24 * 60 * 60 * 1000 })
-    .then(removed => { if (removed) console.log(`Removed ${removed} idle Bridge per-image upload(s)`) })
-    .catch(error => console.error('Bridge per-image upload cleanup failed', error))
-  setTimeout(sweepInstanceUploads, 90_000).unref()
-  setInterval(sweepInstanceUploads, 60 * 60 * 1000).unref()
-})
+}
 // Node's default requestTimeout (5 min) resets slow bridge study ZIP uploads mid-transfer.
 httpServer.requestTimeout = 45 * 60 * 1000
 
@@ -4530,7 +4557,8 @@ async function resumeQueuedProcessingJobs() {
   const jobs = await prisma.processingJob.findMany({
     where: { status: 'queued' },
     select: { id: true },
-    orderBy: { id: 'asc' },
+    orderBy: { createdAt: 'asc' },
+    take: 200,
   })
   for (const job of jobs) {
     queueRenewistSubmission(job.id, 'Startup recovery')
@@ -4538,6 +4566,9 @@ async function resumeQueuedProcessingJobs() {
 }
 
 function queueRenewistSubmission(jobId: string, source: string) {
+  // Callers persist the job as 'queued' first. Outside the worker it stays in the database and the
+  // worker's queued-job sweep submits it within a few seconds.
+  if (!roleRunsWorkers(role)) return Promise.resolve()
   if (queuedRenewistJobIds.has(jobId)) return renewistSubmissionTail
   queuedRenewistJobIds.add(jobId)
   const submission = limitRenewistSubmissions(() => processApplicationJob(jobId))
@@ -4736,7 +4767,8 @@ async function processPendingPacsReturnJobs() {
   pacsReturnRecoveryRunning = true
   try {
   const pendingReturns = await prisma.pacsReturnJob.findMany({
-    where: { status: 'PENDING' },
+    // nextAttemptAt spaces retries out; it is null until the first failure.
+    where: { status: 'PENDING', OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }] },
     orderBy: { createdAt: 'asc' },
     take: 25,
   })
@@ -4751,7 +4783,7 @@ async function processPendingPacsReturnJobs() {
     if (!report) {
       await prisma.pacsReturnJob.update({
         where: { id: returnJob.id },
-        data: { status: 'FAILED', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: 'Report review was not found' },
+        data: { status: 'FAILED', attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1), lastAttemptAt: new Date(), errorMessage: 'Report review was not found' },
       })
       continue
     }
@@ -4763,7 +4795,7 @@ async function processPendingPacsReturnJobs() {
     if (report.status === 'PUSHED') {
       await prisma.pacsReturnJob.update({
         where: { id: returnJob.id },
-        data: { status: 'SUCCESS', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: null },
+        data: { status: 'SUCCESS', attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1), lastAttemptAt: new Date(), errorMessage: null },
       })
       continue
     }
@@ -4776,7 +4808,7 @@ async function processPendingPacsReturnJobs() {
         where: { id: returnJob.id },
         data: {
           status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING',
-          attempts: { increment: 1 },
+          attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1),
           lastAttemptAt: new Date(),
           errorMessage: 'Exact Renewist signed PDF is not available; refusing to push generated fallback report',
         },
@@ -4788,7 +4820,7 @@ async function processPendingPacsReturnJobs() {
         where: { id: returnJob.id },
         data: {
           status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING',
-          attempts: { increment: 1 },
+          attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1),
           lastAttemptAt: new Date(),
           errorMessage: 'Signed report content is not available',
         },
@@ -4819,7 +4851,7 @@ async function processPendingPacsReturnJobs() {
           where: { id: returnJob.id, status: 'PENDING' },
           data: {
             status: 'SUCCESS',
-            attempts: { increment: 1 },
+            attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1),
             lastAttemptAt: new Date(),
             errorMessage: null,
             deliveryResult: pacsDelivery,
@@ -4829,6 +4861,19 @@ async function processPendingPacsReturnJobs() {
           data: { reportId: report.id, action: 'PENDING_PACS_RETURN_RECOVERED', metadata: { pacsDelivery, returnJobId: returnJob.id } },
         }),
       ])
+      await enqueueStudyStatusNotification(prisma, {
+        eventType: 'RENEWIST_REPORT_SENT_TO_CLIENT_PACS',
+        clientId: report.clientId,
+        reportId: report.id,
+        processingJobId,
+        status: 'PUSHED',
+        patientName: report.patientName,
+        patientId: report.patientId,
+        accession: report.accession,
+        modality: report.modality,
+        serviceName: report.serviceName,
+        idempotencyKey: `study-status:pacs-pushed:${returnJob.id}`,
+      }).catch(error => console.error(`PACS delivery notification for ${report.id} failed`, error))
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to send pending report to client PACS'
       await prisma.$transaction([
@@ -4836,7 +4881,7 @@ async function processPendingPacsReturnJobs() {
           where: { id: returnJob.id },
           data: {
             status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING',
-            attempts: { increment: 1 },
+            attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1),
             lastAttemptAt: new Date(),
             errorMessage: message,
           },
@@ -4849,7 +4894,7 @@ async function processPendingPacsReturnJobs() {
   }
     catch (error) {
       console.error(`PACS return ${returnJob.id} failed`, error)
-      await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: 'PACS return preparation failed; inspect server logs' } }).catch(updateError => console.error('PACS failure persistence failed', updateError))
+      await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING', attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1), lastAttemptAt: new Date(), errorMessage: 'PACS return preparation failed; inspect server logs' } }).catch(updateError => console.error('PACS failure persistence failed', updateError))
       await recordOperationalFailure('PACS report preparation', returnJob.id, 'PACS report preparation failed. Other pending reports continue.').catch(alertError => console.error('PACS failure alert persistence failed', alertError))
     }
   }
@@ -4893,21 +4938,6 @@ async function getDemoUploadStatus(clientId: string) {
   return { demoMode: true, allowed: true, used, limit }
 }
 
-async function startAllDicomReceivers() {
-  const configs = await prisma.pacsConfig.findMany({
-    where: {
-      client: { status: 'ACTIVE' },
-      clientService: { status: 'ACTIVE', workflowType: { in: ['TELERADIOLOGY_ONLY', 'AI_TELERADIOLOGY'] } },
-    },
-    include: { client: true, clientService: true },
-    orderBy: { receivingPort: 'asc' },
-  })
-  await Promise.all(configs.flatMap((config) => receiverSpecsForConfig(config).map((receiver) =>
-    startDicomReceiver({ ...receiver, clientCode: config.client.code })
-      .catch((error) => console.error(`DICOM receiver ${receiver.receivingPort} failed to start`, error))
-  )))
-}
-
 function receiverSpecsForConfig(config: { receivingPort: number; aeTitle: string; urgentReceivingPort?: number | null; urgentAeTitle?: string | null; extraEndpoints?: unknown }) {
   const specs = [
     { receivingPort: config.receivingPort, aeTitle: config.aeTitle, priority: 'REGULAR' as const },
@@ -4942,13 +4972,51 @@ function readPacsExtraEndpoints(value: unknown): Array<{ id: string; receivingPo
 }
 
 function stopDicomReceiver(port: number) {
+  // Outside ingest the receivers live in another process; its reconciler applies the config change.
+  if (!roleRunsIngest(role)) return
   const receiver = receiverProcesses.get(port)
   receiver?.kill()
   receiverProcesses.delete(port)
+  receiverSpecs.delete(port)
+}
+
+/**
+ * Makes the running storescp receivers match the active PACS configs: starts missing ones, restarts ones whose
+ * AE title or client changed, and stops ones no longer configured. Runs in ingest on startup and every 30 s, so
+ * admin changes made through the API process take effect here, and a receiver that exited is started again.
+ */
+async function reconcileDicomReceivers() {
+  const configs = await prisma.pacsConfig.findMany({
+    where: {
+      client: { status: 'ACTIVE' },
+      clientService: { status: 'ACTIVE', workflowType: { in: ['TELERADIOLOGY_ONLY', 'AI_TELERADIOLOGY'] } },
+    },
+    include: { client: true, clientService: true },
+    orderBy: { receivingPort: 'asc' },
+  })
+  const desired = new Map<number, { receivingPort: number; aeTitle: string; clientCode: string }>()
+  for (const config of configs) for (const receiver of receiverSpecsForConfig(config)) {
+    if (!desired.has(receiver.receivingPort)) desired.set(receiver.receivingPort, { receivingPort: receiver.receivingPort, aeTitle: receiver.aeTitle, clientCode: config.client.code })
+  }
+  for (const port of [...receiverProcesses.keys()]) {
+    const want = desired.get(port)
+    if (!want || receiverSpecs.get(port) !== receiverSpecKey(want)) {
+      console.log(`Stopping DICOM receiver on ${port}: ${want ? 'configuration changed' : 'no longer configured'}`)
+      stopDicomReceiver(port)
+    }
+  }
+  await Promise.all([...desired.values()].map((spec) => startDicomReceiver(spec)
+    .catch((error) => console.error(`DICOM receiver ${spec.receivingPort} failed to start`, error))))
+}
+
+function receiverSpecKey(spec: { aeTitle: string; clientCode: string }) {
+  return `${normalizeAeTitle(spec.aeTitle)}|${spec.clientCode}`
 }
 
 async function startDicomReceiver(config: { receivingPort: number; aeTitle: string; clientCode: string }): Promise<ReceiverStartResult> {
   const aeTitle = normalizeAeTitle(config.aeTitle)
+  // Outside ingest the receivers live in another process; its reconciler starts this one within 30 s.
+  if (!roleRunsIngest(role)) return { receivingPort: config.receivingPort, aeTitle, firewallRule: 'managed-by-ingest', listener: 'managed-by-ingest' }
   const firewallRule = await ensureFirewallRule(config.receivingPort)
   const trackedReceiver = receiverProcesses.get(config.receivingPort)
   if (trackedReceiver && await isPortListening(config.receivingPort)) {
@@ -4979,9 +5047,11 @@ async function startDicomReceiver(config: { receivingPort: number; aeTitle: stri
   fsSync.closeSync(stderr);
   child.on('error', error => { receiverProcesses.delete(config.receivingPort); console.error('DICOM receiver failed', error); });
   receiverProcesses.set(config.receivingPort, child)
+  receiverSpecs.set(config.receivingPort, receiverSpecKey(config))
   child.on('exit', (code) => {
     if (receiverProcesses.get(config.receivingPort) !== child) return
     receiverProcesses.delete(config.receivingPort)
+    receiverSpecs.delete(config.receivingPort)
     console.error(`DICOM receiver on port ${config.receivingPort} exited with code ${code}`)
     void recordOperationalFailure('DICOM receiver exited', String(config.receivingPort), `Receiver exited with code ${code}. The receiver supervisor retries startup every minute.`, config.clientCode).catch(error => console.error('Receiver alert persistence failed', error))
   })
