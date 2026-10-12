@@ -86,6 +86,8 @@ The app runs as three services from one image, chosen by `PROCESS_ROLE` (`server
 - **ingest**: DICOM receivers (kept in step with the PACS configs every 30 s), the inbound scan and every Bridge endpoint. Caddy sends `/api/v1/bridge`, `/api/v1/study-bridge` and `/api/v1/study-agents` here. Run **one** copy.
 - **worker**: study submission, auto-submit, PACS return, recovery and retries, messaging, invoices, viewer pre-import and archive maintenance. Run **one** copy.
 
+They exchange work as messages through Redis (BullMQ, `server/queue/index.ts`, the `queue-redis` service): study intake, DICOM metadata extraction and auto-submit scheduling, Renewist submission, PACS delivery, cancellation and receiver changes. The database stays the record: every handler re-checks its row, failures are retried with backoff, and each service re-sends messages for pending work every 60 s, so a lost message or a Redis restart delays work but never loses it. `QUEUE_REDIS_URL` is required for ingest and worker; Redis must use `maxmemory-policy noeviction`.
+
 All three mount the same `uploads` volume, so they must run on the same host. Each process has its own database pool, so the database sees up to three pools. Leaving `PROCESS_ROLE` unset runs everything in one process, as before. Measure `docker stats`, response times, upload sizes and queue latency under your actual workload before increasing concurrency. These settings are a conservative starting point, not a throughput guarantee.
 
 Chromium runs as the non-root app user; its internal sandbox is disabled inside this container for compatibility. Docker isolation remains in place. Only report generation uses Chromium; there is no local DICOM image renderer.

@@ -16,6 +16,8 @@ x-app: &app
     NODE_OPTIONS: --max-old-space-size=4096
     UV_THREADPOOL_SIZE: '4'
     CHROMIUM_NO_SANDBOX: 'true'
+    # Messages between api, ingest and worker. Point at managed Redis by setting QUEUE_REDIS_URL in .env.
+    QUEUE_REDIS_URL: ${QUEUE_REDIS_URL:-redis://queue-redis:6379}
   init: true
   logging: *logging
 
@@ -25,6 +27,20 @@ services:
     command: [node, scripts/migrate-deploy.cjs]
     restart: 'no'
     mem_limit: 1g
+  # Message queues (BullMQ). Append-only file so messages survive a restart; noeviction so Redis never drops one.
+  queue-redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes', --appendfsync, everysec, --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    volumes: [queue-redis:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.25
+    logging: *logging
   # One image, three roles (server/processRole.ts). All three share the uploads volume, so they must run on
   # the same host: study ZIPs and report files are handed between them on that disk.
   api:
@@ -35,6 +51,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=1536
     depends_on:
       migrate: {condition: service_completed_successfully}
+      queue-redis: {condition: service_healthy}
     volumes: [uploads:/app/uploads]
     ports: ['127.0.0.1:4000:4000']
     healthcheck: &healthcheck
@@ -57,6 +74,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=1024
     depends_on:
       migrate: {condition: service_completed_successfully}
+      queue-redis: {condition: service_healthy}
     volumes: [uploads:/app/uploads]
     healthcheck: *healthcheck
     restart: unless-stopped
@@ -72,6 +90,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=2048
     depends_on:
       migrate: {condition: service_completed_successfully}
+      queue-redis: {condition: service_healthy}
     volumes: [uploads:/app/uploads]
     healthcheck: *healthcheck
     restart: unless-stopped
@@ -97,5 +116,6 @@ services:
     logging: *logging
 volumes:
   uploads:
+  queue-redis:
   caddy-data:
   caddy-config:

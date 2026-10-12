@@ -21,6 +21,7 @@ import { evidenceHash } from './adminEvidence'
 import { recordOperationalFailure } from './operationalAlerts'
 import { renewistCallbackIdentity } from './renewistCallbackIdentity'
 import { LeaseBusyError, withLease } from './workLease'
+import { jobId as messageId, sendMessage } from './queue'
 
 const uploadsPath = path.resolve(process.cwd(), 'uploads')
 const renewistReportPath = path.join(uploadsPath, 'renewist-reports')
@@ -486,6 +487,10 @@ async function handleReportSubmissionLocked(req: Request, res: Response, rawInpu
   await cleanupRenewistLocalFiles(input).catch((error) => {
     console.warn(`Unable to clean local Renewist report files for ${report.id}:`, error instanceof Error ? error.message : error)
   })
+  // Tell the worker to deliver now; its 60 s sweep sends this again if the message is lost.
+  for (const returnJob of await prisma.pacsReturnJob.findMany({ where: { reportReviewId: report.id, status: 'PENDING' }, select: { id: true, attempts: true } })) {
+    await sendMessage('pacs-deliver', messageId('pacs-deliver', returnJob.id, returnJob.attempts), { returnJobId: returnJob.id })
+  }
 
   const acknowledgement = {
     accepted: true,
