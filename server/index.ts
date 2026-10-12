@@ -16,7 +16,7 @@ import { recordOperationalFailure } from './operationalAlerts'
 import { submissionRetryDue, submissionRetrySweepSince } from './submissionRetryPolicy'
 import { PACS_RETURN_POLL_MS, pacsReturnRetryAt } from './pacsReturnPolicy'
 import { processRole, processRoleGuard, roleRunsIngest, roleRunsWorkers } from './processRole'
-import { assertProcessingActive, assertStudyNotDeleted, beginProcessing } from './processingControl'
+import { abortCancelledProcessing, assertProcessingActive, assertStudyNotDeleted, beginProcessing } from './processingControl'
 import { ensureMarengoServices } from './marengoServices'
 import { resolveArchivePath } from './viewer/archivePaths'
 import QRCode from 'qrcode'
@@ -4518,6 +4518,8 @@ function startWorkerProcesses() {
   // Jobs queued by the api and ingest processes (uploads, manual submits, retries, late images) start here.
   const submitQueued = nonOverlapping(resumeQueuedProcessingJobs)
   setInterval(submitQueued, 5000).unref()
+  // An administrator terminates a study through the api; stop its upload here if it is in flight.
+  setInterval(nonOverlapping(abortCancelledProcessing), 5000).unref()
   setInterval(() => void processPendingPacsReturnJobs().catch(error => console.error('PACS return worker failed', error)), PACS_RETURN_POLL_MS).unref()
   const retrySubmissions = () => void processSubmissionRetries().catch(error => console.error('Submission retry worker failed', error))
   retrySubmissions()
