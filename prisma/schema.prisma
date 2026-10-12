@@ -1061,6 +1061,15 @@ model ProcessingJob {
   @@map("processing_jobs")
 }
 
+/// Named leases (server/workLease.ts): serialize work across processes without holding a connection.
+model WorkLease {
+  key         String   @id
+  owner       String
+  lockedUntil DateTime
+
+  @@map("work_leases")
+}
+
 model DeletedPortalStudy {
   clientId String
   studyInstanceUid String

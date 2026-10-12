@@ -11,7 +11,7 @@ import { ChunkedUploadError, createChunkedUploadStore, type ChunkedUploadStatus 
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { recordOperationalFailure } from './operationalAlerts'
-import { submissionRetryDue } from './submissionRetryPolicy'
+import { submissionRetryDue, submissionRetrySweepSince } from './submissionRetryPolicy'
 import { assertProcessingActive, assertStudyNotDeleted, beginProcessing } from './processingControl'
 import { ensureMarengoServices } from './marengoServices'
 import { resolveArchivePath } from './viewer/archivePaths'
@@ -4535,7 +4535,7 @@ async function processSubmissionRetries() {
   if (submissionRetryRunning) return
   submissionRetryRunning = true
   try {
-    const unscheduled = await prisma.processingJob.findMany({ where: { status: { in: ['failed', 'outbound_submission_failed'] }, submissionRetryAt: null, submissionRetryCount: 0 }, take: 100, orderBy: { updatedAt: 'asc' } })
+    const unscheduled = await prisma.processingJob.findMany({ where: { status: { in: ['failed', 'outbound_submission_failed'] }, submissionRetryAt: null, submissionRetryCount: 0, updatedAt: { gte: submissionRetrySweepSince() } }, take: 100, orderBy: { updatedAt: 'asc' } })
     for (const job of unscheduled) await scheduleSubmissionRetry(job.id)
     const due = await prisma.processingJob.findMany({ where: { status: { in: ['failed', 'outbound_submission_failed'] }, submissionRetryAt: { lte: new Date() }, submissionRetryCount: 0 }, take: 100, orderBy: { submissionRetryAt: 'asc' } })
     for (const job of due) {
@@ -8734,6 +8734,19 @@ async function extractDocxParagraphs(filePath: string) {
   return xml.split(/<\/w:p>/i).map((paragraph) => decode(paragraph.replace(/<w:tab\s*\/>/gi, '\t').replace(/<w:br\s*\/>/gi, '\n').replace(/<[^>]+>/g, '')).trim()).filter(Boolean)
 }
 
+
+// Last-resort safety net: a stray rejection is logged and alerted instead of killing receivers and workers.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection', reason)
+  void recordOperationalFailure('Unhandled rejection', 'process', `Unhandled promise rejection: ${reason instanceof Error ? reason.message : String(reason)}`.slice(0, 500)).catch(() => undefined)
+})
+// An uncaught exception leaves the process in an unknown state: alert, then exit so the container restarts.
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception', error)
+  const exit = setTimeout(() => process.exit(1), 5000)
+  exit.unref()
+  void recordOperationalFailure('Uncaught exception', 'process', `Process restarting after an uncaught exception: ${error.message}`.slice(0, 500)).catch(() => undefined).finally(() => process.exit(1))
+})
 
 let shuttingDown = false;
 for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => {

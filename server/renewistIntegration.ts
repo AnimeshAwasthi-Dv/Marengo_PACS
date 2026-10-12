@@ -20,6 +20,7 @@ import { redactExchange } from './telegramPolicy'
 import { evidenceHash } from './adminEvidence'
 import { recordOperationalFailure } from './operationalAlerts'
 import { renewistCallbackIdentity } from './renewistCallbackIdentity'
+import { LeaseBusyError, withLease } from './workLease'
 
 const uploadsPath = path.resolve(process.cwd(), 'uploads')
 const renewistReportPath = path.join(uploadsPath, 'renewist-reports')
@@ -215,11 +216,16 @@ renewistIntegrationRouter.post('/status', async (req, res) => {
 })
 
 async function handleReportSubmission(req: Request, res: Response, rawInput: ParsedReportRequest) {
-  // Serialize repeated callbacks across replicas, including their PACS side effects.
-  return prisma.$transaction(async tx => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`renewist-callback:${rawInput.dectrocel_job_id}`}))`
-    return handleReportSubmissionLocked(req, res, rawInput)
-  }, { maxWait: 10000, timeout: 600000 })
+  // Serialize repeated callbacks for one job across processes. A lease row, not a held transaction,
+  // so a burst of callbacks cannot exhaust the connection pool.
+  try {
+    return await withLease(`renewist-callback:${rawInput.dectrocel_job_id}`, { ttlMs: 15 * 60_000, waitMs: 30_000 }, () => handleReportSubmissionLocked(req, res, rawInput))
+  } catch (error) {
+    if (!(error instanceof LeaseBusyError)) throw error
+    await cleanupRenewistLocalFiles(rawInput, { discard: true })
+    res.set('Retry-After', '60')
+    return sendError(res, 503, 'CALLBACK_IN_PROGRESS', 'A callback for this job is still being processed; retry later', true, rawInput.dectrocel_job_id)
+  }
 }
 
 async function handleReportSubmissionLocked(req: Request, res: Response, rawInput: ParsedReportRequest) {
@@ -229,7 +235,7 @@ async function handleReportSubmissionLocked(req: Request, res: Response, rawInpu
 
   const existingRequest = await prisma.providerApiRequest.findUnique({ where: { requestId: validation.requestId } })
   if (existingRequest?.status === 'ACCEPTED') {
-    await cleanupRenewistLocalFiles(input)
+    await cleanupRenewistLocalFiles(input, { discard: true })
     return res.json({ accepted: true, duplicate: true, request_id: validation.requestId, dectrocel_job_id: input.dectrocel_job_id })
   }
 
@@ -240,7 +246,7 @@ async function handleReportSubmissionLocked(req: Request, res: Response, rawInpu
   }
   const processingJob = await findProcessingJobForRenewistReport(input, report.id)
   if (processingJob?.status === 'cancelled') {
-    await cleanupRenewistLocalFiles(input)
+    await cleanupRenewistLocalFiles(input, { discard: true })
     return sendError(res, 409, 'STUDY_CANCELLED', 'Portal processing was terminated for this study', false, input.dectrocel_job_id)
   }
   if (input.renewist_job_id === input.dectrocel_job_id && processingJob?.providerJobId && processingJob.providerJobId !== input.dectrocel_job_id) {
@@ -957,10 +963,11 @@ async function storeRenewistSignedReports(input: ParsedReportRequest, reportId: 
   }
 }
 
-async function cleanupRenewistLocalFiles(input: ParsedReportRequest) {
-  // Keep the exact signed source until a durable remote copy exists.
+async function cleanupRenewistLocalFiles(input: ParsedReportRequest, options: { discard?: boolean } = {}) {
+  // Keep the exact signed source until a durable remote copy exists. `discard` is for callbacks
+  // that were not applied (duplicate, cancelled, busy): their files are never used.
   const files = [...(input.signedFiles?.all ?? []), input.signedFiles?.pdf, input.signedFiles?.docx, input.signedFiles?.withoutLetterheadPdf, input.signedFiles?.withoutLetterheadDocx].filter((file): file is SavedReportFile => Boolean(file))
-  const retained = new Set(files.filter(file => !file.storage?.bucket || !file.storage?.key).map(file => file.path))
+  const retained = new Set(options.discard ? [] : files.filter(file => !file.storage?.bucket || !file.storage?.key).map(file => file.path))
   const candidates = new Set<string>()
   if (input.reportFilePath) candidates.add(input.reportFilePath)
   for (const file of input.signedFiles?.all ?? []) if (file.path) candidates.add(file.path)
