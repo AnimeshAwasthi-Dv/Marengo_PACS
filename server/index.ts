@@ -8,11 +8,17 @@ import { activeCallBookingStatuses, reportClientSelect, reportListOmit, reportRa
 import { withReportSummaries } from './services/reports.service'
 import { formatBridgeStudyForAdmin, formatBridgeStudyForClient } from './lib/bridgeStudyFormat'
 import { ChunkedUploadError, createChunkedUploadStore, type ChunkedUploadStatus } from './bridgeChunkedUpload'
+import { createBridgeInstanceUploadRouter, createInstanceUploadStore } from './bridgeInstanceUpload'
+import { removeReplacedBridgeArchive } from './lib/bridgeArchiveCleanup'
 import { followUpStatusFilter } from './followUps'
 import { technicalAlertsRouter, startTechnicalMonitor } from './technicalAlerts'
 import { recordOperationalFailure } from './operationalAlerts'
-import { submissionRetryDue } from './submissionRetryPolicy'
-import { assertProcessingActive, assertStudyNotDeleted, beginProcessing } from './processingControl'
+import { SUBMISSION_RETRY_LIMIT, submissionRetryDue, submissionRetrySweepSince } from './submissionRetryPolicy'
+import { pacsReturnRetryAt } from './pacsReturnPolicy'
+import { processRole, processRoleGuard, roleRunsIngest, roleRunsWorkers } from './processRole'
+import { checkQueueRedis, closeQueues, consume, jobId as messageId, messagePending, queuesConfigured, sendMessage } from './queue'
+import type { Job as QueueJob } from 'bullmq'
+import { abortCancelledProcessing, abortProcessing, assertProcessingActive, assertStudyNotDeleted, beginProcessing } from './processingControl'
 import { ensureMarengoServices } from './marengoServices'
 import { resolveArchivePath } from './viewer/archivePaths'
 import QRCode from 'qrcode'
@@ -21,7 +27,7 @@ import { externalViewerOrigin } from './viewer/externalViewer';
 import { classifyBreastXrayModalities } from '../src/mammography';
 import { autoReportingDelayMs, autoReportingEnabled } from '../src/autoReporting';
 import { modalityCodes } from '../src/modalities';
-import { createLimiter, nonOverlapping } from './runtime/tasks';
+import { nonOverlapping } from './runtime/tasks';
 import { findExecutable } from './platform/tools';
 import { registerExternalViewerRoutes } from './viewer/routes';
 import { createViewerPreimporter } from './viewer/preimport';
@@ -68,7 +74,6 @@ import { createDomainNotification } from './notificationService'
 import { managementRouter } from './management'
 import { RenewistAdapter } from './renewistAdapter'
 import { enqueueTelegramStudy, startTelegramWorker } from './telegram'
-import { recordStudyAcknowledgement } from './studyTracking'
 import type { ProviderStudySubmission } from './providerAdapters'
 import { ProviderSubmissionError } from './providerAdapters'
 import { redactExchange } from './telegramPolicy'
@@ -79,7 +84,7 @@ import { startStudyArchiveMaintenance, storeOriginalStudy } from './services/stu
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
-import { aiServiceTypeForServiceType, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
+import { aiServiceTypeForServiceType, cleanDicomText, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
 
 dotenv.config({
   path: process.env.LOAD_STORAGE_ENV === 'true' ? ['.env', '.env.storage'] : ['.env'],
@@ -97,16 +102,16 @@ const distPath = path.resolve(__dirname, '..', 'dist')
 const uploadsPath = path.resolve(__dirname, '..', 'uploads')
 const appUploadPath = path.join(uploadsPath, 'application-jobs')
 const dicomInboundPath = path.join(uploadsPath, 'dicom-inbound')
+const role = processRole()
 const receiverProcesses = new Map<number, ReturnType<typeof spawn>>()
+// What each running receiver was started with (`AE|clientCode`), so the reconciler can restart a changed one.
+const receiverSpecs = new Map<number, string>()
 const externalViewerImports = new Map<string, { archivePath: string; importId: string; status: string; viewerUrl?: string; expiresAt: number }>()
 
 
 const reportPublicShareTtlMs = 5 * 24 * 60 * 60 * 1000
 let pacsReturnRecoveryRunning = false
 let outboundSubmissionRecoveryRunning = false
-let renewistSubmissionTail: Promise<unknown> = Promise.resolve()
-const limitRenewistSubmissions = createLimiter(3)
-const queuedRenewistJobIds = new Set<string>()
 const portalUserSelect = { id: true, userId: true, email: true, name: true, role: true, portalRole: true, clientId: true, providerCode: true, active: true, createdAt: true, updatedAt: true } as const
 const clientPortalRoleSchema = z.enum(['FRONT_DESK', 'TECHNICIAN', 'MANAGER', 'IT_TEAM'])
 type ViewerImportStatus = { id: string; status: string; statusUrl?: string; expiresAt?: number }
@@ -234,8 +239,8 @@ function toPrismaJsonObject(value: Record<string, unknown>): Prisma.InputJsonObj
 type ReceiverStartResult = {
   receivingPort: number
   aeTitle: string
-  firewallRule: 'created' | 'existing'
-  listener: 'started' | 'already-running' | 'already-listening'
+  firewallRule: 'created' | 'existing' | 'managed-by-ingest'
+  listener: 'started' | 'already-running' | 'already-listening' | 'managed-by-ingest'
 }
 
 function requireDeploymentFeature(feature: 'billing' | 'calling' | 'notifications' | 'support' | 'whatsapp') {
@@ -245,6 +250,8 @@ function requireDeploymentFeature(feature: 'billing' | 'calling' | 'notification
   }
 }
 
+// Each role serves only its own paths (Caddy routes the same way); see server/processRole.ts.
+app.use(processRoleGuard(role))
 app.use('/api/v1/whatsapp/wati/webhook', captureWatiWebhookSecret)
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') ?? true }))
 app.use(compression({ threshold: 1024 }))
@@ -2234,7 +2241,12 @@ app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireC
       },
       include: { dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 }, attachments: true, processingJob: true },
     }).catch(async (error: unknown) => {
-      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002' || !extracted.studyInstanceUid) throw error
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002' || !extracted.studyInstanceUid) {
+        await fs.unlink(upload.filePath).then(() => fs.rmdir(path.dirname(upload.filePath))).catch((cleanupError: unknown) => {
+          console.error('Unable to remove failed manual study upload', cleanupError)
+        })
+        throw error
+      }
       const existing = await prisma.availableBridgeStudy.findUnique({
         where: { clientId_agentId_studyInstanceUid: {
           clientId, agentId: `PORTAL-MANUAL-${req.user!.sub}`, studyInstanceUid: extracted.studyInstanceUid,
@@ -2262,19 +2274,12 @@ app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireC
         metadata: { studyId: study.id, publicStudyId: study.publicStudyId, modality, uploadName: upload.uploadName },
       },
     })
-    const client = await prisma.client.findUniqueOrThrow({ where: { id: clientId }, select: { code: true } })
-    const renewistJob = await autoQueueAvailableStudyForRenewist({
-      clientId,
-      clientCode: client.code,
-      studyId: study.id,
-      requestedServiceType: inferBridgeServiceType({ modalities: study.modalities, studyDescription: study.studyDescription ?? undefined }),
-      auditAction: 'MANUAL_STUDY_AUTO_SUBMITTED_TO_RENEWIST',
-    })
+    await sendStudyPreparation(clientId, study.id)
     const updated = await prisma.availableBridgeStudy.findUniqueOrThrow({
         where: { id: study.id },
         include: { dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 }, attachments: true, processingJob: true },
       })
-    res.status(201).json({ study: formatBridgeStudyForClient(updated), renewist_job_queued: Boolean(renewistJob) })
+    res.status(201).json({ study: formatBridgeStudyForClient(updated), renewist_job_queued: false })
   } catch (error) {
     res.status(400).json({ message: error instanceof Error ? error.message : 'Unable to park manual study upload' })
   }
@@ -2732,6 +2737,23 @@ function sendChunkedUploadError(res: Response, error: unknown) {
   res.status(400).json({ error: { code: 'BRIDGE_UPLOAD_FAILED', message: error instanceof Error ? error.message : 'Unable to upload bridge study' } })
 }
 
+// Per-image upload: Bridge sends each DICOM image while the study is still arriving, then commits the image list;
+// the portal builds the study ZIP and registers it like the uploads above. The size limit is read here directly
+// because bridgeMaxStudyBytes is declared further down and is not initialised yet when this runs.
+const bridgeInstanceUploads = createInstanceUploadStore({
+  root: path.join(uploadsPath, 'bridge-instance-uploads'),
+  maxBatchBytes: 64 * 1024 * 1024,
+  // The batch's image list travels in a header; 128 entries stay well under Node's 16 KB header limit.
+  maxBatchInstances: 128,
+  maxStudyBytes: positiveIntegerEnv('BRIDGE_MAX_STUDY_BYTES', 4 * 1024 * 1024 * 1024),
+})
+app.use(['/api/v1/bridge', '/api/v1/study-bridge'], createBridgeInstanceUploadRouter({
+  store: bridgeInstanceUploads,
+  authorize: requireBridgeToken,
+  studiesRoot: path.join(uploadsPath, 'bridge-studies'),
+  commit: async ({ fields, ...file }) => registerDirectBridgeStudyUpload(await buildDirectBridgeStudyUpload(fields, file)),
+}))
+
 /**
  * Records a fully received Bridge study ZIP and queues it for reporting. Shared by the single-request
  * upload and the part-by-part upload so both produce the same study and acknowledgement.
@@ -2744,9 +2766,10 @@ async function registerDirectBridgeStudyUpload(upload: DirectBridgeStudyUpload):
   }
   await assertStudyNotDeleted(client.id, upload.metadata.study_instance_uid)
   const agentId = upload.agentId || upload.localAeTitle || client.code
-  const previousStudy = await prisma.availableBridgeStudy.findUnique({ where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } } })
+  const studyKey = { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } }
+  const previousStudy = await prisma.availableBridgeStudy.findUnique({ where: studyKey })
   const study = await prisma.availableBridgeStudy.upsert({
-    where: { clientId_agentId_studyInstanceUid: { clientId: client.id, agentId, studyInstanceUid: upload.metadata.study_instance_uid } },
+    where: studyKey,
     update: {
       ...directBridgeStudyData(upload.metadata, upload, 'Available', 'Available'),
       ...(previousStudy?.processingJobId ? { workflowStatus: previousStudy.workflowStatus } : {}),
@@ -2769,41 +2792,38 @@ async function registerDirectBridgeStudyUpload(upload: DirectBridgeStudyUpload):
     include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
   })
   await processLateStudyImages(study.id, previousStudy?.instanceCount ?? study.instanceCount)
-  const autoQueuedJob = await autoQueueAvailableStudyForRenewist({
-    clientId: client.id,
-    clientCode: client.code,
-    studyId: study.id,
-    requestedServiceType: inferBridgeServiceType({
-      modalities: upload.metadata.modalities,
-      studyDescription: upload.metadata.study_description ?? undefined,
-    }),
-    auditAction: 'BRIDGE_STUDY_AUTO_SUBMITTED_TO_RENEWIST',
-  })
+  // A re-sent study replaces its ZIP; the old one is referenced by nothing once no processing job uses it.
+  if (previousStudy?.archivePath && previousStudy.archivePath !== upload.filePath && !previousStudy.processingJobId) {
+    await removeReplacedBridgeArchive(path.join(uploadsPath, 'bridge-studies'), previousStudy.archivePath, upload.folder)
+  }
+  await processLateStudyImages(study.id, previousStudy?.instanceCount ?? study.instanceCount)
+  // Reading the DICOM tags and starting the auto-submit countdown run in the worker (study-prepare), so Bridge
+  // gets its acknowledgement as soon as the upload is recorded. Scheduling never created a job here before either.
+  await sendStudyPreparation(client.id, study.id)
   await enqueueStudyStatusNotification(prisma, {
-    eventType: autoQueuedJob ? 'STUDY_SUBMITTED_TO_RENEWIST' : 'BRIDGE_STUDY_AVAILABLE',
+    eventType: 'BRIDGE_STUDY_AVAILABLE',
     clientId: client.id,
-    status: autoQueuedJob ? 'QUEUED' : 'AVAILABLE',
+    status: 'AVAILABLE',
     patientName: study.patientName,
     patientId: study.patientId,
     accession: study.accessionNumber,
     modality: study.modalities.join('/'),
-    serviceName: autoQueuedJob ? serviceNameForType(autoQueuedJob.serviceType) : 'Study Sync',
+    serviceName: 'Study Sync',
     idempotencyKey: `study-status:bridge-available:${study.id}:${study.updatedAt.getTime()}`,
   })
   const acknowledgement = {
     study_id: study.id,
     public_study_id: study.publicStudyId,
-    status: autoQueuedJob ? 'QueuedForRenewist' : study.availabilityStatus,
+    status: study.availabilityStatus,
     upload_name: study.archiveName,
     size_bytes: String(study.totalSizeBytes),
-    auto_queued: Boolean(autoQueuedJob),
-    processing_job_id: autoQueuedJob?.id,
+    auto_queued: false,
+    processing_job_id: undefined,
     study: formatBridgeStudyForClient(await prisma.availableBridgeStudy.findUniqueOrThrow({
         where: { id: study.id },
         include: { attachments: true, processingJob: true, dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 } },
       })),
   }
-  if (autoQueuedJob) await recordStudyAcknowledgement(autoQueuedJob.id, 'BRIDGE_EXCHANGE', acknowledgement)
   return { status: 201, body: acknowledgement }
 }
 
@@ -4426,50 +4446,85 @@ app.get(/^(?!\/api).*/, (_req, res) => {
 })
 
 const httpServer = app.listen(port, host, () => {
+  console.log(`DecXpert API listening on http://${host}:${port} (role: ${role})`)
+  if (!queuesConfigured()) console.error('QUEUE_REDIS_URL is not set: messages between services cannot be sent. Set it before starting ingest or worker.')
   // Technical monitoring has its own explicit enable flag, independent of clinical workers.
-  startTechnicalMonitor()
-  console.log(`DecXpert API listening on http://${host}:${port}`)
+  if (roleRunsWorkers(role)) startTechnicalMonitor()
   if (process.env.DISABLE_STARTUP_WORKERS === 'true' || process.env.DATABASE_READ_ONLY === 'true') {
     console.log('Startup workers disabled by DISABLE_STARTUP_WORKERS=true')
     return
   }
+  if ((roleRunsIngest(role) || roleRunsWorkers(role)) && !queuesConfigured()) {
+    console.error('Not starting ingest or worker processing without QUEUE_REDIS_URL')
+    process.exitCode = 1
+    return void httpServer.close()
+  }
+  if (roleRunsIngest(role) || roleRunsWorkers(role)) void checkQueueRedis()
+  if (roleRunsIngest(role)) startIngestProcesses()
+  if (roleRunsWorkers(role)) startWorkerProcesses()
+})
+
+/** Runs a sweep now and then on an interval, never overlapping itself. */
+function every(intervalMs: number, task: () => Promise<unknown>, label: string) {
+  const run = nonOverlapping(task, error => console.error(`${label} failed`, error))
+  void run()
+  setInterval(run, intervalMs).unref()
+}
+
+/**
+ * Ingest: DICOM receivers, the inbound scan and Bridge upload sweeps; consumes dicom-intake and
+ * receivers-reconcile. In-process timers and child processes: one ingest copy only.
+ */
+function startIngestProcesses() {
+  const reconcileReceivers = nonOverlapping(reconcileDicomReceivers)
+  consume('receivers-reconcile', 1, () => reconcileReceivers())
+  consume('dicom-intake', 2, message => queueInboundStudyIfReady(message.data as InboundStudyInput))
+  every(60_000, reconcileDicomReceivers, 'DICOM receiver reconcile')
+  // storescp writes files without telling anyone, so finding finished folders stays a scan; the work is a message.
+  every(10_000, scanInboundDicomStudies, 'Inbound DICOM scan')
+  const sweepChunkedUploads = () => bridgeChunkedUploads.sweep(24 * 60 * 60 * 1000)
+    .then(removed => { if (removed) console.log(`Removed ${removed} abandoned Bridge part upload(s)`) })
+  setTimeout(() => every(60 * 60 * 1000, sweepChunkedUploads, 'Bridge part upload cleanup'), 60_000).unref()
+  // Images stay a week after a study's last change, so a late re-commit sends only the images that are new; two days
+  // once the study is committed (its ZIP holds them, and Bridge re-commits only on a retry).
+  const sweepInstanceUploads = () => bridgeInstanceUploads.sweep({ idleMs: 7 * 24 * 60 * 60 * 1000, committedIdleMs: 2 * 24 * 60 * 60 * 1000 })
+    .then(removed => { if (removed) console.log(`Removed ${removed} idle Bridge per-image upload(s)`) })
+  setTimeout(() => every(60 * 60 * 1000, sweepInstanceUploads, 'Bridge per-image upload cleanup'), 90_000).unref()
+}
+
+/**
+ * Worker: consumes study-prepare, study-dispatch, study-submit, pacs-deliver and processing-cancel, and runs the
+ * 60 s sweeps that re-send messages for anything the database says is still pending. Also messaging, invoices,
+ * viewer pre-import and archive maintenance. One worker copy only.
+ */
+function startWorkerProcesses() {
   const features = getDeploymentFeatures()
+  consume('study-prepare', 2, handlePrepareMessage)
+  consume('study-dispatch', 5, handleDispatchMessage)
+  consume('study-submit', 3, handleSubmitMessage)
+  consume('pacs-deliver', 2, handlePacsDeliverMessage)
+  consume('processing-cancel', 5, async message => { abortProcessing(String((message.data as { processingJobId: string }).processingJobId)) })
   startTelegramWorker()
   console.log(`Deployment profile: ${features.profile}`)
-  void startAllDicomReceivers().catch(error => console.error('DICOM receiver startup failed', error))
   void (async () => {
     await recoverInterruptedProcessingJobs()
-    await resumeQueuedProcessingJobs()
     await repairDuplicateProcessingFailures()
   })().catch((error) => console.error('Processing job recovery failed', error))
-  void recoverStaleOutboundSubmissions().catch(error => console.error('Outbound recovery failed', error))
-  void processPendingPacsReturnJobs().catch(error => console.error('PACS return worker failed', error))
+  // Safety sweeps: the database is the record; these re-send any message that was lost.
+  every(60_000, resumeQueuedProcessingJobs, 'Queued submission sweep')
+  every(60_000, processSubmissionRetries, 'Submission retry sweep')
+  every(60_000, dispatchDueAutomaticStudies, 'Auto-submit sweep')
+  every(60_000, processPendingPacsReturnJobs, 'PACS return sweep')
+  every(60_000, recoverInterruptedProcessingJobs, 'Interrupted submission recovery')
+  every(30_000, abortCancelledProcessing, 'Cancelled upload check')
+  every(10 * 60 * 1000, recoverStaleOutboundSubmissions, 'Outbound recovery')
   if (features.whatsapp) startWhatsappOutboxWorker()
   else console.log('WhatsApp outbox worker disabled by deployment profile')
-  if (features.billing) void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error))
+  if (features.billing) every(24 * 60 * 60 * 1000, generateDueMonthlyInvoices, 'Monthly invoice generation')
   else console.log('Billing invoice worker disabled by deployment profile')
-  const autoReportingScan = nonOverlapping(dispatchDueAutomaticStudies)
-  setTimeout(autoReportingScan, 3000).unref()
-  setInterval(autoReportingScan, 5000).unref()
-  const scan = nonOverlapping(scanInboundDicomStudies);
-  setTimeout(scan, 3000).unref()
-  setInterval(scan, 10000).unref()
-  setInterval(() => void processPendingPacsReturnJobs().catch(error => console.error('PACS return worker failed', error)), 5 * 60 * 1000).unref()
-  const retrySubmissions = () => void processSubmissionRetries().catch(error => console.error('Submission retry worker failed', error))
-  retrySubmissions()
-  setInterval(retrySubmissions, 10000).unref()
-  setInterval(() => void recoverStaleOutboundSubmissions().catch(error => console.error('Outbound recovery failed', error)), 10 * 60 * 1000).unref()
-  setInterval(() => void recoverInterruptedProcessingJobs().then(resumeQueuedProcessingJobs).catch(error => console.error('Processing recovery failed', error)), 60_000).unref()
-  setInterval(() => void startAllDicomReceivers().catch(error => console.error('DICOM receiver recovery failed', error)), 60_000).unref()
-  if (features.billing) setInterval(() => void generateDueMonthlyInvoices().catch((error) => console.error('Monthly invoice generation failed', error)), 24 * 60 * 60 * 1000).unref()
   startViewerPreimport()
   startStudyArchiveMaintenance()
-  const sweepChunkedUploads = () => void bridgeChunkedUploads.sweep(24 * 60 * 60 * 1000)
-    .then(removed => { if (removed) console.log(`Removed ${removed} abandoned Bridge part upload(s)`) })
-    .catch(error => console.error('Bridge part upload cleanup failed', error))
-  setTimeout(sweepChunkedUploads, 60_000).unref()
-  setInterval(sweepChunkedUploads, 60 * 60 * 1000).unref()
-})
+}
 // Node's default requestTimeout (5 min) resets slow bridge study ZIP uploads mid-transfer.
 httpServer.requestTimeout = 45 * 60 * 1000
 
@@ -4499,49 +4554,76 @@ async function resumeQueuedProcessingJobs() {
   const jobs = await prisma.processingJob.findMany({
     where: { status: 'queued' },
     select: { id: true },
-    orderBy: { id: 'asc' },
+    orderBy: { createdAt: 'asc' },
+    take: 200,
   })
-  for (const job of jobs) {
-    queueRenewistSubmission(job.id, 'Startup recovery')
-  }
+  for (const job of jobs) await queueRenewistSubmission(job.id, 'Queued submission sweep')
 }
 
-function queueRenewistSubmission(jobId: string, source: string) {
-  if (queuedRenewistJobIds.has(jobId)) return renewistSubmissionTail
-  queuedRenewistJobIds.add(jobId)
-  const submission = limitRenewistSubmissions(() => processApplicationJob(jobId))
-    .catch(async (error) => {
-      console.error(`${source} Renewist job ${jobId} failed`, error)
-      await prisma.processingJob.updateMany({ where: { id: jobId, status: { in: ['queued', 'submitting_to_renewist'] } }, data: { status: 'failed', clinicalStatus: 'FAILED', error: error instanceof Error ? error.message : 'Submission failed' } })
+/**
+ * Asks the worker to submit a job the caller has saved as 'queued'. The worker's study-submit consumer runs up to
+ * three at a time, urgent studies first; the 60 s sweep re-sends the message if this one is lost.
+ */
+async function queueRenewistSubmission(jobId: string, source: string) {
+  const job = await prisma.processingJob.findUnique({ where: { id: jobId }, select: { priority: true, submissionRetryCount: true } }).catch((error) => {
+    console.error(`Submission message for ${jobId} not sent; the queued-job sweep will send it`, error)
+    return null
+  })
+  if (!job) return false
+  return sendMessage('study-submit', messageId('study-submit', jobId, job.submissionRetryCount), { processingJobId: jobId, source }, { priority: job.priority === 'URGENT' ? 1 : 5 })
+}
+
+/** study-submit consumer. Records every outcome in the database; a failure schedules the next retry as a delayed message. */
+async function handleSubmitMessage(message: QueueJob) {
+  const { processingJobId, retry, source } = message.data as { processingJobId: string; retry?: number; source?: string }
+  if (typeof retry === 'number') {
+    // A retry claims the failed job back to 'queued'; nothing happens if it was already retried, cancelled or finished.
+    const claimed = await prisma.processingJob.updateMany({
+      where: { id: processingJobId, status: { in: ['failed', 'outbound_submission_failed'] }, submissionRetryCount: retry - 1, submissionRetryAt: { lte: new Date(Date.now() + 1000) } },
+      data: { status: 'queued', clinicalStatus: 'QUEUED', submissionRetryAt: null, submissionRetryCount: retry, completedAt: null },
     })
-    .then(() => scheduleSubmissionRetry(jobId))
-    .catch(error => console.error('Submission failure persistence failed', error))
-    .finally(() => queuedRenewistJobIds.delete(jobId))
-  renewistSubmissionTail = Promise.all([renewistSubmissionTail.catch(() => undefined), submission])
-  return submission
+    if (!claimed.count) return
+  }
+  try {
+    await processApplicationJob(processingJobId)
+  } catch (error) {
+    console.error(`${source ?? 'Queued'} Renewist job ${processingJobId} failed`, error)
+    await prisma.processingJob.updateMany({ where: { id: processingJobId, status: { in: ['queued', 'submitting_to_renewist'] } }, data: { status: 'failed', clinicalStatus: 'FAILED', error: error instanceof Error ? error.message : 'Submission failed' } })
+  }
+  await scheduleSubmissionRetry(processingJobId)
 }
 
 async function scheduleSubmissionRetry(jobId: string) {
   const job = await prisma.processingJob.findUnique({ where: { id: jobId } })
   if (!job || !['failed', 'outbound_submission_failed'].includes(job.status)) return
-  await recordOperationalFailure('Renewist study submission', `${job.id}:attempt-${job.submissionRetryCount}`, `Submission failed. ${job.submissionRetryCount ? 'Automatic retry exhausted.' : 'One fallback retry is due after three minutes.'}`, job.clientId)
-  if (job.submissionRetryAt) return
-  const due = submissionRetryDue(job.submissionRetryCount, job.updatedAt)
-  if (due) await prisma.processingJob.updateMany({ where: { id: job.id, status: job.status, submissionRetryAt: null, submissionRetryCount: 0 }, data: { submissionRetryAt: due } })
+  const exhausted = job.submissionRetryCount >= SUBMISSION_RETRY_LIMIT
+  await recordOperationalFailure('Renewist study submission', `${job.id}:attempt-${job.submissionRetryCount}`, `Submission failed. ${exhausted ? 'Automatic retries exhausted; retry it from the portal.' : `Automatic retry ${job.submissionRetryCount + 1} of ${SUBMISSION_RETRY_LIMIT} is scheduled.`}`, job.clientId)
+  if (exhausted) return
+  let due = job.submissionRetryAt
+  if (!due) {
+    due = submissionRetryDue(job.submissionRetryCount, job.updatedAt)
+    if (!due) return
+    const set = await prisma.processingJob.updateMany({ where: { id: job.id, status: job.status, submissionRetryAt: null, submissionRetryCount: job.submissionRetryCount }, data: { submissionRetryAt: due } })
+    if (!set.count) return
+  }
+  await sendSubmissionRetry(job.id, job.submissionRetryCount + 1, due, job.priority)
+}
+
+function sendSubmissionRetry(processingJobId: string, retry: number, due: Date, priority: string | null) {
+  return sendMessage('study-submit', messageId('study-submit', processingJobId, retry), { processingJobId, retry, source: `Automatic retry ${retry}` }, { delayMs: due.getTime() - Date.now(), priority: priority === 'URGENT' ? 1 : 5 })
 }
 
 let submissionRetryRunning = false
+/** Sweep (60 s): schedules retries for recent failures and re-sends retry messages that were lost. */
 async function processSubmissionRetries() {
   if (submissionRetryRunning) return
   submissionRetryRunning = true
   try {
-    const unscheduled = await prisma.processingJob.findMany({ where: { status: { in: ['failed', 'outbound_submission_failed'] }, submissionRetryAt: null, submissionRetryCount: 0 }, take: 100, orderBy: { updatedAt: 'asc' } })
+    const failed = { in: ['failed', 'outbound_submission_failed'] }
+    const unscheduled = await prisma.processingJob.findMany({ where: { status: failed, submissionRetryAt: null, submissionRetryCount: { lt: SUBMISSION_RETRY_LIMIT }, updatedAt: { gte: submissionRetrySweepSince() } }, select: { id: true }, take: 100, orderBy: { updatedAt: 'asc' } })
     for (const job of unscheduled) await scheduleSubmissionRetry(job.id)
-    const due = await prisma.processingJob.findMany({ where: { status: { in: ['failed', 'outbound_submission_failed'] }, submissionRetryAt: { lte: new Date() }, submissionRetryCount: 0 }, take: 100, orderBy: { submissionRetryAt: 'asc' } })
-    for (const job of due) {
-      const claimed = await prisma.processingJob.updateMany({ where: { id: job.id, status: job.status, submissionRetryCount: 0, submissionRetryAt: { lte: new Date() } }, data: { status: 'queued', clinicalStatus: 'QUEUED', submissionRetryAt: null, submissionRetryCount: { increment: 1 }, completedAt: null } })
-      if (claimed.count) queueRenewistSubmission(job.id, 'Three-minute fallback retry')
-    }
+    const scheduled = await prisma.processingJob.findMany({ where: { status: failed, submissionRetryAt: { not: null }, submissionRetryCount: { lt: SUBMISSION_RETRY_LIMIT } }, select: { id: true, submissionRetryAt: true, submissionRetryCount: true, priority: true }, take: 200, orderBy: { submissionRetryAt: 'asc' } })
+    for (const job of scheduled) await sendSubmissionRetry(job.id, job.submissionRetryCount + 1, job.submissionRetryAt!, job.priority)
   } finally { submissionRetryRunning = false }
 }
 
@@ -4630,7 +4712,7 @@ async function recoverInterruptedProcessingJobs() {
       status: 'submitting_to_renewist',
       updatedAt: { lt: staleBefore },
     },
-    select: { id: true, error: true, upstreamStatus: true },
+    select: { id: true, error: true, upstreamStatus: true, submissionRetryCount: true },
     orderBy: { updatedAt: 'asc' },
     take: 25,
   })
@@ -4642,7 +4724,7 @@ async function recoverInterruptedProcessingJobs() {
       ?? (previousStatus.previousStatus && typeof previousStatus.previousStatus === 'object' && !Array.isArray(previousStatus.previousStatus)
         ? (previousStatus.previousStatus as Record<string, unknown>).dicomMetadata
         : undefined)
-    if (queuedRenewistJobIds.has(job.id)) continue
+    if (await messagePending('study-submit', messageId('study-submit', job.id, job.submissionRetryCount))) continue
     await prisma.processingJob.update({
       where: { id: job.id, status: 'submitting_to_renewist' },
       data: {
@@ -4700,41 +4782,67 @@ async function repairDuplicateProcessingFailures() {
   }
 }
 
+/** Sweep (60 s): re-sends delivery messages for PENDING returns that are due, in case a message was lost. */
 async function processPendingPacsReturnJobs() {
   if (pacsReturnRecoveryRunning) return
   pacsReturnRecoveryRunning = true
   try {
-  const pendingReturns = await prisma.pacsReturnJob.findMany({
-    where: { status: 'PENDING' },
-    orderBy: { createdAt: 'asc' },
-    take: 25,
-  })
-  for (const returnJob of pendingReturns) {
+    const pendingReturns = await prisma.pacsReturnJob.findMany({
+      // nextAttemptAt spaces retries out; it is null until the first failure.
+      where: { status: 'PENDING', OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }] },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+    })
+    for (const returnJob of pendingReturns) await schedulePacsDelivery(returnJob.id)
+  } finally {
+    pacsReturnRecoveryRunning = false
+  }
+}
+
+/** Sends the delivery message for a PENDING return, delayed until its next attempt is due. */
+async function schedulePacsDelivery(returnJobId: string) {
+  const returnJob = await prisma.pacsReturnJob.findUnique({ where: { id: returnJobId }, select: { id: true, status: true, attempts: true, nextAttemptAt: true } })
+  if (!returnJob || returnJob.status !== 'PENDING') return false
+  return sendMessage('pacs-deliver', messageId('pacs-deliver', returnJob.id, returnJob.attempts), { returnJobId: returnJob.id }, { delayMs: returnJob.nextAttemptAt ? returnJob.nextAttemptAt.getTime() - Date.now() : 0 })
+}
+
+/** pacs-deliver consumer: one delivery attempt, then the next attempt is scheduled if the return is still PENDING. */
+async function handlePacsDeliverMessage(message: QueueJob) {
+  const { returnJobId } = message.data as { returnJobId: string }
+  const returnJob = await prisma.pacsReturnJob.findUnique({ where: { id: returnJobId } })
+  if (!returnJob || returnJob.status !== 'PENDING') return
+  if (returnJob.nextAttemptAt && returnJob.nextAttemptAt.getTime() > Date.now() + 1000) return void await schedulePacsDelivery(returnJob.id)
+  await deliverPacsReturnJob(returnJob)
+  await schedulePacsDelivery(returnJob.id)
+}
+
+async function deliverPacsReturnJob(returnJob: NonNullable<Awaited<ReturnType<typeof prisma.pacsReturnJob.findUnique>>>) {
     try {
     if (returnJob.attempts >= returnJob.maxAttempts) {
       await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: 'FAILED' } })
       await recordOperationalFailure('PACS return exhausted', returnJob.id, 'PACS delivery exhausted its retry limit. Review and resend from the portal.')
-      continue
+      return
     }
     const report = await prisma.reportReview.findUnique({ where: { id: returnJob.reportReviewId } })
     if (!report) {
       await prisma.pacsReturnJob.update({
         where: { id: returnJob.id },
-        data: { status: 'FAILED', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: 'Report review was not found' },
+        data: { status: 'FAILED', attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1), lastAttemptAt: new Date(), errorMessage: 'Report review was not found' },
       })
-      continue
+      return
     }
     const cancelledMapping = await prisma.providerJobMapping.findFirst({ where: { reportReviewId: report.id, status: 'CANCELLED' }, select: { id: true } })
     if (cancelledMapping) {
       await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: 'CANCELLED' } })
-      continue
+      return
     }
     if (report.status === 'PUSHED') {
       await prisma.pacsReturnJob.update({
         where: { id: returnJob.id },
-        data: { status: 'SUCCESS', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: null },
+        data: { status: 'SUCCESS', attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1), lastAttemptAt: new Date(), errorMessage: null },
       })
-      continue
+      return
     }
 
     const sourcePdfPath = await getExactSignedReportFilePath(report, 'pdf')
@@ -4745,24 +4853,24 @@ async function processPendingPacsReturnJobs() {
         where: { id: returnJob.id },
         data: {
           status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING',
-          attempts: { increment: 1 },
+          attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1),
           lastAttemptAt: new Date(),
           errorMessage: 'Exact Renewist signed PDF is not available; refusing to push generated fallback report',
         },
       })
-      continue
+      return
     }
     if (!sourcePdfPath && !htmlReport) {
       await prisma.pacsReturnJob.update({
         where: { id: returnJob.id },
         data: {
           status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING',
-          attempts: { increment: 1 },
+          attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1),
           lastAttemptAt: new Date(),
           errorMessage: 'Signed report content is not available',
         },
       })
-      continue
+      return
     }
 
     try {
@@ -4788,7 +4896,7 @@ async function processPendingPacsReturnJobs() {
           where: { id: returnJob.id, status: 'PENDING' },
           data: {
             status: 'SUCCESS',
-            attempts: { increment: 1 },
+            attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1),
             lastAttemptAt: new Date(),
             errorMessage: null,
             deliveryResult: pacsDelivery,
@@ -4798,6 +4906,19 @@ async function processPendingPacsReturnJobs() {
           data: { reportId: report.id, action: 'PENDING_PACS_RETURN_RECOVERED', metadata: { pacsDelivery, returnJobId: returnJob.id } },
         }),
       ])
+      await enqueueStudyStatusNotification(prisma, {
+        eventType: 'RENEWIST_REPORT_SENT_TO_CLIENT_PACS',
+        clientId: report.clientId,
+        reportId: report.id,
+        processingJobId,
+        status: 'PUSHED',
+        patientName: report.patientName,
+        patientId: report.patientId,
+        accession: report.accession,
+        modality: report.modality,
+        serviceName: report.serviceName,
+        idempotencyKey: `study-status:pacs-pushed:${returnJob.id}`,
+      }).catch(error => console.error(`PACS delivery notification for ${report.id} failed`, error))
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to send pending report to client PACS'
       await prisma.$transaction([
@@ -4805,7 +4926,7 @@ async function processPendingPacsReturnJobs() {
           where: { id: returnJob.id },
           data: {
             status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING',
-            attempts: { increment: 1 },
+            attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1),
             lastAttemptAt: new Date(),
             errorMessage: message,
           },
@@ -4818,14 +4939,9 @@ async function processPendingPacsReturnJobs() {
   }
     catch (error) {
       console.error(`PACS return ${returnJob.id} failed`, error)
-      await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: 'PACS return preparation failed; inspect server logs' } }).catch(updateError => console.error('PACS failure persistence failed', updateError))
+      await prisma.pacsReturnJob.updateMany({ where: { id: returnJob.id, status: 'PENDING' }, data: { status: returnJob.attempts + 1 >= returnJob.maxAttempts ? 'FAILED' : 'PENDING', attempts: { increment: 1 }, nextAttemptAt: pacsReturnRetryAt(returnJob.attempts + 1), lastAttemptAt: new Date(), errorMessage: 'PACS return preparation failed; inspect server logs' } }).catch(updateError => console.error('PACS failure persistence failed', updateError))
       await recordOperationalFailure('PACS report preparation', returnJob.id, 'PACS report preparation failed. Other pending reports continue.').catch(alertError => console.error('PACS failure alert persistence failed', alertError))
     }
-  }
-  if (pendingReturns.length) console.log(`Processed ${pendingReturns.length} pending PACS return job(s)`)
-  } finally {
-    pacsReturnRecoveryRunning = false
-  }
 }
 
 function parseServiceType(value: string): ServiceType | null {
@@ -4862,21 +4978,6 @@ async function getDemoUploadStatus(clientId: string) {
   return { demoMode: true, allowed: true, used, limit }
 }
 
-async function startAllDicomReceivers() {
-  const configs = await prisma.pacsConfig.findMany({
-    where: {
-      client: { status: 'ACTIVE' },
-      clientService: { status: 'ACTIVE', workflowType: { in: ['TELERADIOLOGY_ONLY', 'AI_TELERADIOLOGY'] } },
-    },
-    include: { client: true, clientService: true },
-    orderBy: { receivingPort: 'asc' },
-  })
-  await Promise.all(configs.flatMap((config) => receiverSpecsForConfig(config).map((receiver) =>
-    startDicomReceiver({ ...receiver, clientCode: config.client.code })
-      .catch((error) => console.error(`DICOM receiver ${receiver.receivingPort} failed to start`, error))
-  )))
-}
-
 function receiverSpecsForConfig(config: { receivingPort: number; aeTitle: string; urgentReceivingPort?: number | null; urgentAeTitle?: string | null; extraEndpoints?: unknown }) {
   const specs = [
     { receivingPort: config.receivingPort, aeTitle: config.aeTitle, priority: 'REGULAR' as const },
@@ -4911,13 +5012,56 @@ function readPacsExtraEndpoints(value: unknown): Array<{ id: string; receivingPo
 }
 
 function stopDicomReceiver(port: number) {
+  // Outside ingest the receivers live in another process; ask it to apply the config change now.
+  if (!roleRunsIngest(role)) return void requestReceiverReconcile()
   const receiver = receiverProcesses.get(port)
   receiver?.kill()
   receiverProcesses.delete(port)
+  receiverSpecs.delete(port)
+}
+
+/**
+ * Makes the running storescp receivers match the active PACS configs: starts missing ones, restarts ones whose
+ * AE title or client changed, and stops ones no longer configured. Runs in ingest on startup and every 30 s, so
+ * admin changes made through the API process take effect here, and a receiver that exited is started again.
+ */
+async function reconcileDicomReceivers() {
+  const configs = await prisma.pacsConfig.findMany({
+    where: {
+      client: { status: 'ACTIVE' },
+      clientService: { status: 'ACTIVE', workflowType: { in: ['TELERADIOLOGY_ONLY', 'AI_TELERADIOLOGY'] } },
+    },
+    include: { client: true, clientService: true },
+    orderBy: { receivingPort: 'asc' },
+  })
+  const desired = new Map<number, { receivingPort: number; aeTitle: string; clientCode: string }>()
+  for (const config of configs) for (const receiver of receiverSpecsForConfig(config)) {
+    if (!desired.has(receiver.receivingPort)) desired.set(receiver.receivingPort, { receivingPort: receiver.receivingPort, aeTitle: receiver.aeTitle, clientCode: config.client.code })
+  }
+  for (const port of [...receiverProcesses.keys()]) {
+    const want = desired.get(port)
+    if (!want || receiverSpecs.get(port) !== receiverSpecKey(want)) {
+      console.log(`Stopping DICOM receiver on ${port}: ${want ? 'configuration changed' : 'no longer configured'}`)
+      stopDicomReceiver(port)
+    }
+  }
+  await Promise.all([...desired.values()].map((spec) => startDicomReceiver(spec)
+    .catch((error) => console.error(`DICOM receiver ${spec.receivingPort} failed to start`, error))))
+}
+
+/** Coalesced: one reconcile message per 5 s however many config changes an admin action makes. */
+function requestReceiverReconcile() {
+  void sendMessage('receivers-reconcile', messageId('receivers-reconcile', Math.floor(Date.now() / 5000)), {})
+}
+
+function receiverSpecKey(spec: { aeTitle: string; clientCode: string }) {
+  return `${normalizeAeTitle(spec.aeTitle)}|${spec.clientCode}`
 }
 
 async function startDicomReceiver(config: { receivingPort: number; aeTitle: string; clientCode: string }): Promise<ReceiverStartResult> {
   const aeTitle = normalizeAeTitle(config.aeTitle)
+  // Outside ingest the receivers live in another process; ask it to start this one now.
+  if (!roleRunsIngest(role)) return void requestReceiverReconcile(), { receivingPort: config.receivingPort, aeTitle, firewallRule: 'managed-by-ingest', listener: 'managed-by-ingest' }
   const firewallRule = await ensureFirewallRule(config.receivingPort)
   const trackedReceiver = receiverProcesses.get(config.receivingPort)
   if (trackedReceiver && await isPortListening(config.receivingPort)) {
@@ -4948,9 +5092,11 @@ async function startDicomReceiver(config: { receivingPort: number; aeTitle: stri
   fsSync.closeSync(stderr);
   child.on('error', error => { receiverProcesses.delete(config.receivingPort); console.error('DICOM receiver failed', error); });
   receiverProcesses.set(config.receivingPort, child)
+  receiverSpecs.set(config.receivingPort, receiverSpecKey(config))
   child.on('exit', (code) => {
     if (receiverProcesses.get(config.receivingPort) !== child) return
     receiverProcesses.delete(config.receivingPort)
+    receiverSpecs.delete(config.receivingPort)
     console.error(`DICOM receiver on port ${config.receivingPort} exited with code ${code}`)
     void recordOperationalFailure('DICOM receiver exited', String(config.receivingPort), `Receiver exited with code ${code}. The receiver supervisor retries startup every minute.`, config.clientCode).catch(error => console.error('Receiver alert persistence failed', error))
   })
@@ -4981,7 +5127,7 @@ async function scanInboundDicomStudies() {
         try {
         const demoStatus = await getDemoUploadStatus(config.clientId)
         if (!demoStatus.allowed) continue
-        await queueInboundStudyIfReady({
+        await sendInboundStudyMessage({
           clientId: config.clientId,
           clientCode: config.client.code,
           clientName: config.client.name,
@@ -5005,7 +5151,7 @@ async function scanInboundDicomStudies() {
   }
 }
 
-async function queueInboundStudyIfReady(input: {
+type InboundStudyInput = {
   clientId: string
   clientCode: string
   clientName: string
@@ -5019,19 +5165,34 @@ async function queueInboundStudyIfReady(input: {
   demoMode?: boolean
   studyDir: string
   studyUid: string
-}) {
-  const deleted = await prisma.deletedPortalStudy.findUnique({ where: { clientId_studyInstanceUid: { clientId: input.clientId, studyInstanceUid: input.studyUid } } })
-  if (deleted) return
-  const marker = path.join(input.studyDir, '.decxpert-available')
+}
 
+/** A received study folder is ready once nothing was written for 8 s and it changed since it was last taken in. */
+async function inboundStudyReadiness(input: InboundStudyInput) {
+  const marker = path.join(input.studyDir, '.decxpert-available')
   const files = await listStudyFiles(input.studyDir)
   const dicomFiles = files.filter((file) => !path.basename(file).startsWith('.decxpert-') && !file.endsWith('.log'))
-  if (!dicomFiles.length) return
-
+  if (!dicomFiles.length) return null
   const newestWrite = Math.max(...dicomFiles.map((file) => fsSync.statSync(file).mtimeMs))
   const markerWrite = fsSync.existsSync(marker) ? fsSync.statSync(marker).mtimeMs : 0
-  if (markerWrite >= newestWrite) return
-  if (Date.now() - newestWrite < 8000) return
+  if (markerWrite >= newestWrite || Date.now() - newestWrite < 8000) return null
+  return { marker, dicomFiles, newestWrite }
+}
+
+/** Ingest scan: hands a ready folder to the dicom-intake queue. Re-sent each scan until the intake marks it taken in. */
+async function sendInboundStudyMessage(input: InboundStudyInput) {
+  const ready = await inboundStudyReadiness(input)
+  if (!ready) return
+  await sendMessage('dicom-intake', messageId('dicom-intake', input.clientId, input.receivingPort, input.studyUid, Math.floor(ready.newestWrite)), input)
+}
+
+/** dicom-intake consumer: zips the folder, reads its DICOM tags and records the study. Retried with backoff. */
+async function queueInboundStudyIfReady(input: InboundStudyInput) {
+  const deleted = await prisma.deletedPortalStudy.findUnique({ where: { clientId_studyInstanceUid: { clientId: input.clientId, studyInstanceUid: input.studyUid } } })
+  if (deleted) return
+  const ready = await inboundStudyReadiness(input)
+  if (!ready) return
+  const { marker, dicomFiles } = ready
 
   const jobFolder = path.join(appUploadPath, `dicom-${crypto.randomUUID()}`)
   const uploadName = `${input.studyUid}.zip`
@@ -5077,6 +5238,7 @@ async function queueInboundStudyIfReady(input: {
         instanceCount: zipped.fileCount,
         localPort: input.receivingPort,
         localAeTitle: input.aeTitle,
+        priority: input.priority,
         availabilityStatus: 'Available',
         workflowStatus: previousStudy?.processingJobId ? previousStudy.workflowStatus : 'Available',
         readyAt: new Date(),
@@ -5104,6 +5266,7 @@ async function queueInboundStudyIfReady(input: {
         instanceCount: zipped.fileCount,
         localPort: input.receivingPort,
         localAeTitle: input.aeTitle,
+        priority: input.priority,
         availabilityStatus: 'Available',
         workflowStatus: 'Available',
         firstDetectedAt: new Date(),
@@ -5124,34 +5287,45 @@ async function queueInboundStudyIfReady(input: {
     return savedStudy
   })
   await processLateStudyImages(study.id, previousStudy?.instanceCount ?? study.instanceCount)
-  await autoQueueAvailableStudyForRenewist({
-    clientId: input.clientId,
-    clientCode: input.clientCode,
-    studyId: study.id,
-    serviceType: input.serviceType,
-    workflowType: input.workflowType,
-    priority: input.priority,
-    demoMode: input.demoMode,
-    auditAction: 'DIRECT_PACS_STUDY_AUTO_SUBMITTED_TO_RENEWIST',
-  })
+  await sendStudyPreparation(input.clientId, study.id)
   await fs.writeFile(marker, new Date().toISOString())
 }
 
+/** Sweep (60 s): re-sends dispatch messages for due studies and preparation messages lost before they ran. */
 async function dispatchDueAutomaticStudies() {
   const due = await prisma.availableBridgeStudy.findMany({
     where: { processingJobId: null, autoSubmitAt: { lte: new Date() }, availabilityStatus: 'Available' },
-    select: { id: true, clientId: true }, orderBy: { autoSubmitAt: 'asc' }, take: 100,
+    select: { id: true, clientId: true, autoSubmitAt: true }, orderBy: { autoSubmitAt: 'asc' }, take: 200,
   })
-  // Metadata extraction can be slow. A small bounded pool prevents one large expiry burst
-  // from making later studies wait behind every earlier archive.
-  const concurrency = 5
-  for (let start = 0; start < due.length; start += concurrency) {
-    await Promise.all(due.slice(start, start + concurrency).map(async (study) => {
-      try {
-        await autoQueueAvailableStudyForRenewist({ clientId: study.clientId, studyId: study.id, dispatchDue: true, auditAction: 'STUDY_AUTO_SUBMITTED_FOR_REPORTING' })
-      } catch (error) { console.error('Automatic reporting failed for ' + study.id, error) }
-    }))
+  for (const study of due) await sendMessage('study-dispatch', messageId('study-dispatch', study.id, study.autoSubmitAt!.getTime()), { clientId: study.clientId, studyId: study.id })
+  // Completed preparations are kept a day in Redis, so only a lost message gets re-sent here.
+  const unprepared = await prisma.availableBridgeStudy.findMany({
+    where: { processingJobId: null, autoSubmitAt: null, autoSubmitBlocked: false, availabilityStatus: 'Available', archivePath: { not: null }, updatedAt: { gte: new Date(Date.now() - 2 * 60 * 60_000) } },
+    select: { id: true, clientId: true }, orderBy: { updatedAt: 'asc' }, take: 200,
+  })
+  for (const study of unprepared) await sendStudyPreparation(study.clientId, study.id)
+}
+
+/** Asks the worker to read a recorded study's DICOM tags and start its auto-submit countdown. */
+async function sendStudyPreparation(clientId: string, studyId: string) {
+  const study = await prisma.availableBridgeStudy.findUnique({ where: { id: studyId }, select: { archivePath: true } })
+  return sendMessage('study-prepare', messageId('study-prepare', studyId, study?.archivePath ?? 'none'), { clientId, studyId })
+}
+
+/** study-prepare consumer: extracts DICOM metadata, sets the auto-submit time, and schedules the dispatch for it. */
+async function handlePrepareMessage(message: QueueJob) {
+  const { clientId, studyId } = message.data as { clientId: string; studyId: string }
+  await autoQueueAvailableStudyForRenewist({ clientId, studyId, auditAction: 'STUDY_AUTO_SUBMITTED_FOR_REPORTING' })
+  const study = await prisma.availableBridgeStudy.findUnique({ where: { id: studyId }, select: { autoSubmitAt: true, processingJobId: true } })
+  if (study?.autoSubmitAt && !study.processingJobId) {
+    await sendMessage('study-dispatch', messageId('study-dispatch', studyId, study.autoSubmitAt.getTime()), { clientId, studyId }, { delayMs: study.autoSubmitAt.getTime() - Date.now() })
   }
+}
+
+/** study-dispatch consumer: creates the processing job when the countdown ends and sends it for submission. */
+async function handleDispatchMessage(message: QueueJob) {
+  const { clientId, studyId } = message.data as { clientId: string; studyId: string }
+  await autoQueueAvailableStudyForRenewist({ clientId, studyId, dispatchDue: true, auditAction: 'STUDY_AUTO_SUBMITTED_FOR_REPORTING' })
 }
 
 async function processLateStudyImages(studyId: string, previousCount: number) {
@@ -6582,7 +6756,7 @@ function readDicomDumpValue(output: string, tag: string) {
 }
 
 function cleanDicomValue(value: string | undefined) {
-  return value?.replaceAll('^', ' ').replace(/\s+/g, ' ').trim() || undefined
+  return cleanDicomText(value) || undefined
 }
 
 function extractQueuedMetadata(value: unknown): DicomMetadata {
@@ -8735,11 +8909,24 @@ async function extractDocxParagraphs(filePath: string) {
 }
 
 
+// Last-resort safety net: a stray rejection is logged and alerted instead of killing receivers and workers.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection', reason)
+  void recordOperationalFailure('Unhandled rejection', 'process', `Unhandled promise rejection: ${reason instanceof Error ? reason.message : String(reason)}`.slice(0, 500)).catch(() => undefined)
+})
+// An uncaught exception leaves the process in an unknown state: alert, then exit so the container restarts.
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception', error)
+  const exit = setTimeout(() => process.exit(1), 5000)
+  exit.unref()
+  void recordOperationalFailure('Uncaught exception', 'process', `Process restarting after an uncaught exception: ${error.message}`.slice(0, 500)).catch(() => undefined).finally(() => process.exit(1))
+})
+
 let shuttingDown = false;
 for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const child of receiverProcesses.values()) child.kill('SIGTERM');
-  httpServer.close(() => { void renewistSubmissionTail.finally(async () => { await closeRedis(); await prisma.$disconnect(); process.exit(0); }); });
+  httpServer.close(() => { void closeQueues().finally(async () => { await closeRedis(); await prisma.$disconnect(); process.exit(0); }); });
   setTimeout(() => process.exit(1), 55000).unref();
 });

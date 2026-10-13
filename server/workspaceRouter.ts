@@ -12,6 +12,7 @@ import { modalityStatisticsExports, reportingActivity, csvDocument, durationSeco
 import { recordBillingEvent, repriceUninvoicedZeroBillingTransactions } from './billing';
 import { serviceNameForType } from './uploadPipeline';
 import { abortProcessing } from './processingControl';
+import { jobId as messageId, sendMessage } from './queue';
 
 export const workspaceRouter = Router();
 workspaceRouter.use(requireAuth);
@@ -112,7 +113,11 @@ workspaceRouter.route(['/studies/:studyId/terminate-processing', '/studies/:stud
       }
       return { studyId: study.id, previousProcessingJobId: study.processingJobId, status: remove ? 'Deleted' : nextStatus };
     }, { isolationLevel: 'Serializable' });
-    if (result.previousProcessingJobId) abortProcessing(result.previousProcessingJobId);
+    if (result.previousProcessingJobId) {
+      // The upload may be running in this process or in the worker; the worker also re-checks every 30 s.
+      abortProcessing(result.previousProcessingJobId);
+      await sendMessage('processing-cancel', messageId('processing-cancel', result.previousProcessingJobId, Date.now()), { processingJobId: result.previousProcessingJobId });
+    }
     res.json({ ...result, message: remove ? 'Study removed from the worklist and portal processing stopped. Reports and audit history retained.' : 'Portal processing and pending retries stopped. Any work already accepted by Renewist requires cancellation with Renewist.' });
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && error.code === 'P2034') return res.status(409).json({ message: 'Study changed during this action. Refresh and try again.' });

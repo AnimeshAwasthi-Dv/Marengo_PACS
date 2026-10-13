@@ -479,8 +479,11 @@ function readDicomDumpValue(output: string, tag: string) {
   return match?.[1]
 }
 
-function cleanDicomText(value: string | undefined) {
-  return value?.replaceAll('^', ' ').replace(/\s+/g, ' ').trim() || ''
+export function cleanDicomText(value: string | undefined) {
+  // DICOM text values are commonly padded with NUL bytes. PostgreSQL text
+  // columns reject U+0000, so remove it (and other non-printing controls)
+  // before any extracted tag reaches Prisma.
+  return value?.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').replaceAll('^', ' ').replace(/\s+/g, ' ').trim() || ''
 }
 
 function streamWithDicomProbe(source: NodeJS.ReadableStream): Promise<{ isDicom: boolean; stream: PassThrough }> {

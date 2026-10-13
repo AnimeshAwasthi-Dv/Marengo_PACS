@@ -16,6 +16,8 @@ x-app: &app
     NODE_OPTIONS: --max-old-space-size=4096
     UV_THREADPOOL_SIZE: '4'
     CHROMIUM_NO_SANDBOX: 'true'
+    # Messages between api, ingest and worker. Point at managed Redis by setting QUEUE_REDIS_URL in .env.
+    QUEUE_REDIS_URL: ${QUEUE_REDIS_URL:-redis://queue-redis:6379}
   init: true
   logging: *logging
 
@@ -25,13 +27,34 @@ services:
     command: [node, scripts/migrate-deploy.cjs]
     restart: 'no'
     mem_limit: 1g
-  app:
+  # Message queues (BullMQ). Append-only file so messages survive a restart; noeviction so Redis never drops one.
+  queue-redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes', --appendfsync, everysec, --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    volumes: [queue-redis:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.25
+    logging: *logging
+  # One image, three roles (server/processRole.ts). All three share the uploads volume, so they must run on
+  # the same host: study ZIPs and report files are handed between them on that disk.
+  api:
     <<: *app
+    environment:
+      <<: *environment
+      PROCESS_ROLE: api
+      NODE_OPTIONS: --max-old-space-size=1536
     depends_on:
       migrate: {condition: service_completed_successfully}
+      queue-redis: {condition: service_healthy}
     volumes: [uploads:/app/uploads]
     ports: ['127.0.0.1:4000:4000']
-    healthcheck:
+    healthcheck: &healthcheck
       test: [CMD, node, -e, "fetch('http://127.0.0.1:4000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
@@ -39,8 +62,41 @@ services:
       start_period: 60s
     restart: unless-stopped
     stop_grace_period: 60s
-    mem_limit: 6g
-    cpus: 2.5
+    mem_limit: 2g
+    cpus: 1.0
+    shm_size: 256m
+  # DICOM receivers, inbound scan and Bridge endpoints. One copy: fixed DICOM ports and in-memory commit guards.
+  ingest:
+    <<: *app
+    environment:
+      <<: *environment
+      PROCESS_ROLE: ingest
+      NODE_OPTIONS: --max-old-space-size=1024
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      queue-redis: {condition: service_healthy}
+    volumes: [uploads:/app/uploads]
+    healthcheck: *healthcheck
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 1536m
+    cpus: 0.5
+  # Submission, dispatch, PACS return, recovery, messaging, invoices, viewer pre-import. One copy only.
+  worker:
+    <<: *app
+    environment:
+      <<: *environment
+      PROCESS_ROLE: worker
+      NODE_OPTIONS: --max-old-space-size=2048
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      queue-redis: {condition: service_healthy}
+    volumes: [uploads:/app/uploads]
+    healthcheck: *healthcheck
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 2560m
+    cpus: 1.0
     shm_size: 256m
   web:
     image: caddy:2-alpine
@@ -52,12 +108,14 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
-      app: {condition: service_healthy}
+      api: {condition: service_healthy}
+      ingest: {condition: service_healthy}
     restart: unless-stopped
     mem_limit: 512m
     cpus: 0.25
     logging: *logging
 volumes:
   uploads:
+  queue-redis:
   caddy-data:
   caddy-config:

@@ -23,6 +23,7 @@ export async function collectOperationalFailures(db: Prisma.TransactionClient) {
     SELECT f.* FROM (
       SELECT id, 'Study processing' AS service, "clientId" AS center, 'Study processing failed; inspect its job history.' AS detail FROM processing_jobs WHERE status IN ('failed', 'outbound_submission_failed')
       UNION ALL SELECT id, 'Study archive', "clientId", 'Study archive upload failed; local archive must be retained.' FROM processing_jobs WHERE "archiveState"='UPLOAD_FAILED'
+      UNION ALL SELECT id, 'Study archive missing', "clientId", 'Local study ZIP disappeared before S3 stored it; the study must be re-sent from the hospital.' FROM processing_jobs WHERE "archiveState"='LOCAL_MISSING'
       UNION ALL SELECT id, 'PACS report delivery', 'Portal', 'PACS report delivery failed; inspect the return job.' FROM pacs_return_jobs WHERE status='FAILED' OR (status='PENDING' AND attempts>0)
       UNION ALL SELECT id, 'Notification delivery', 'Portal', 'Clinical notification delivery failed; inspect the outbox.' FROM notification_outbox WHERE status IN ('FAILED', 'DEAD') AND COALESCE(payload->>'error','') NOT ILIKE '%suppressed%' AND COALESCE(payload->>'error','') NOT ILIKE '%scope or group configuration changed%'
     ) f WHERE NOT EXISTS (SELECT 1 FROM technical_incidents i WHERE i."probeId"='operation:' || f.service || ':' || f.id)
