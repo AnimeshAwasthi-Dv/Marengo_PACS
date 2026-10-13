@@ -84,7 +84,7 @@ import { startStudyArchiveMaintenance, storeOriginalStudy } from './services/stu
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
 import { enqueueCallBookingNotification, enqueueStudyStatusNotification, startWhatsappOutboxWorker, whatsappRouter } from './whatsapp'
-import { aiServiceTypeForServiceType, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
+import { aiServiceTypeForServiceType, cleanDicomText, extractDicomStudyMetadata, inferBridgeServiceType, prepareRenewistStudyZip, saveIncomingUpload, serviceMatchesBridgeInference, serviceNameForType, serviceNames, serviceTypeForServiceName, zipDirectory, type DicomStudyMetadata, type ServiceType } from './uploadPipeline'
 
 dotenv.config({
   path: process.env.LOAD_STORAGE_ENV === 'true' ? ['.env', '.env.storage'] : ['.env'],
@@ -2241,7 +2241,12 @@ app.post('/api/client/study-sync/manual-upload/:modality', requireAuth, requireC
       },
       include: { dispatchRequests: { orderBy: { createdAt: 'desc' }, take: 1 }, attachments: true, processingJob: true },
     }).catch(async (error: unknown) => {
-      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002' || !extracted.studyInstanceUid) throw error
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002' || !extracted.studyInstanceUid) {
+        await fs.unlink(upload.filePath).then(() => fs.rmdir(path.dirname(upload.filePath))).catch((cleanupError: unknown) => {
+          console.error('Unable to remove failed manual study upload', cleanupError)
+        })
+        throw error
+      }
       const existing = await prisma.availableBridgeStudy.findUnique({
         where: { clientId_agentId_studyInstanceUid: {
           clientId, agentId: `PORTAL-MANUAL-${req.user!.sub}`, studyInstanceUid: extracted.studyInstanceUid,
@@ -6751,7 +6756,7 @@ function readDicomDumpValue(output: string, tag: string) {
 }
 
 function cleanDicomValue(value: string | undefined) {
-  return value?.replaceAll('^', ' ').replace(/\s+/g, ' ').trim() || undefined
+  return cleanDicomText(value) || undefined
 }
 
 function extractQueuedMetadata(value: unknown): DicomMetadata {
