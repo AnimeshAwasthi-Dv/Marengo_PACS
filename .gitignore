@@ -32,3 +32,5 @@ server/testing/
 !server/renewistLocation.test.ts
 !server/autoReporting.test.ts
 !server/submissionReliability.test.ts
+!server/studyAnalysis.test.ts
+!server/worklistPriority.test.ts

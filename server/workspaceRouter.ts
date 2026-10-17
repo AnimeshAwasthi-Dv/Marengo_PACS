@@ -13,10 +13,12 @@ import { recordBillingEvent, repriceUninvoicedZeroBillingTransactions } from './
 import { serviceNameForType } from './uploadPipeline';
 import { abortProcessing } from './processingControl';
 import { jobId as messageId, sendMessage } from './queue';
+import { createStudyAnalysisHandler } from './studyAnalysis';
 
 export const workspaceRouter = Router();
 workspaceRouter.use(requireAuth);
 workspaceRouter.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
+workspaceRouter.get('/analytics/study-analysis.xlsx', requireWorkspaceCapability('analytics'), createStudyAnalysisHandler(prisma));
 const MAX_ROWS = 50000;
 const iso = (date?: Date | null) => date?.toISOString() ?? null;
 const within = (date: string | null, range: ReturnType<typeof statisticsRange>) => date && Date.parse(date) >= +range.start && Date.parse(date) < +range.end;
@@ -285,7 +287,8 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
       result = { rows, ...summarizeStudies(rows, rows.flatMap(row => row.reported ? [{ at: row.reported }] : []), range) };
     }
     const reporting = reportingActivity(result.rows, range);
-    const centers = await prisma.client.findMany({ where: access.clientIds === null ? {} : { id: { in: access.clientIds } }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
+    const centers = await prisma.client.findMany({ where: access.clientIds === null ? {} : { id: { in: access.clientIds } }, select: { id: true, name: true, kind: true }, orderBy: { name: 'asc' } });
+    const studyAnalysisAvailable = req.user?.role === 'CLIENT_USER' && centers.some(center => center.id === req.user?.clientId && center.kind === 'CENTER');
     const processedRows = result.rows.filter(row => within(row.processed, range));
     const transactions = view === 'billing' ? await reconcileMissingBillingRows(ids, processedRows, await billingTransactionsForRows(ids, processedRows)) : [];
     const transactionMap = new Map<string, typeof transactions>();
@@ -314,7 +317,7 @@ for (const view of ['analytics', 'billing'] as const) workspaceRouter.get(`/${vi
     }
     const rows = view === 'billing' ? billingRows : result.rows;
     const page = Math.min(Math.max(1, Math.ceil(rows.length / 50)), Math.max(1, Number.parseInt(String(req.query.page ?? 1), 10) || 1));
-    res.json({ ...result, reporting, tatStudies: reporting.tatStudies, tatByModality: reporting.tatByModality, modalities, tatDaily: result.daily.map(day => { const samples = result.rows.filter(row => row.reported && row.tatSeconds !== null && new Date(Date.parse(row.reported) + 19800000).toISOString().slice(0, 10) === day.day); return { day: day.day, minutes: samples.length ? samples.reduce((sum, row) => sum + row.tatSeconds!, 0) / samples.length / 60 : null, samples: samples.length }; }), rows: rows.slice((page - 1) * 50, page * 50), total: rows.length, page, pageSize: 50, centers, charges, unrecorded: billingRows.filter(r => r.billingStatus === 'NOT_RECORDED').length, from: range.from, to: range.to, updatedAt: new Date().toISOString() });
+    res.json({ ...result, studyAnalysisAvailable, reporting, tatStudies: reporting.tatStudies, tatByModality: reporting.tatByModality, modalities, tatDaily: result.daily.map(day => { const samples = result.rows.filter(row => row.reported && row.tatSeconds !== null && new Date(Date.parse(row.reported) + 19800000).toISOString().slice(0, 10) === day.day); return { day: day.day, minutes: samples.length ? samples.reduce((sum, row) => sum + row.tatSeconds!, 0) / samples.length / 60 : null, samples: samples.length }; }), rows: rows.slice((page - 1) * 50, page * 50), total: rows.length, page, pageSize: 50, centers, charges, unrecorded: billingRows.filter(r => r.billingStatus === 'NOT_RECORDED').length, from: range.from, to: range.to, updatedAt: new Date().toISOString() });
   } catch (error) {
     if (error instanceof Error && 'status' in error && error.status === 422) return res.status(422).json({ message: error.message });
     next(error);

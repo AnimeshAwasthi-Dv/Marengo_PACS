@@ -247,6 +247,8 @@ export type BridgeStudy = {
   processingJob?: {
     id: string;
     status: string;
+    providerJobId?: string | null;
+    submissionRetryCount?: number;
     clinicalStatus?: string | null;
     completedAt?: string | null;
     priority?: string | null;
@@ -286,6 +288,8 @@ export type UsageLog = {
 
 export type ProcessingJob = {
   id: string;
+  providerJobId?: string | null;
+  submissionRetryCount?: number;
   clientId?: string;
   serviceType: string;
   status: string;

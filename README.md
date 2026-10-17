@@ -113,6 +113,14 @@ docker compose logs --tail=100 api ingest worker
 
 Keep backups off-instance and periodically test restoring them to a separate deployment. Do not assume reverting the application also reverses a database migration. For an existing Windows database, plan a separate restore/migration: existing absolute Windows file paths must be remapped to `/app/uploads`. This release does not automatically import current credentials, patients or uploads.
 
+## Center study-analysis export
+
+Center users with Analytics access can use **Analytics → Modality summary → Download summary Excel**. The export uses the From/To dates above the summary, includes both full days in IST, and allows any combination of X-Ray, CT, and MRI. It contains only the **Study Analysis** sheet, with the nine comparison metrics from `ana.py`; patient-detail and separate modality sheets are omitted.
+
+The authenticated center is enforced by the API; other center IDs and group accounts cannot use this export. The reporting window selects received bridge studies, and final report status is evaluated at download time. TAT runs from submission to approval. Duplicate accessions count once, preferring finalized records. SLA follows the supplied script: on-duty receipts are 09:00–18:00 IST, thresholds are 70/120/180 minutes for X-Ray/CT/MRI, and breach eligibility starts on 2026-09-28. Off-duty and missing/invalid TAT cases count as achieved. The script's technical exemption for accession 3275071 applies only to Ahmedabad centers. The sheet includes these calculation notes.
+
+Requests are limited to 366 days and 50,000 candidate studies; larger exports require a shorter period and are never silently truncated. No database migration is needed for this feature.
+
 ## Development and checks
 
 ```bash

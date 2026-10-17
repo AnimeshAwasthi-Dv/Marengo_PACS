@@ -32,6 +32,14 @@
   .pw-tariff-mobile-studies p { margin-top: 8px; line-height: 1.5; }
 }
 .pw-stats-toolbar { flex-wrap: wrap; }
+.pw-analysis-export { margin: 0 22px 14px; padding: 14px; border: 1px solid var(--pw-line); border-radius: 8px; background: var(--pw-panel); flex-shrink: 0; }
+.pacs-workspace .pw-analysis-export h2 { font-size: 14px; margin-bottom: 6px; }
+.pacs-workspace .pw-analysis-export p { color: var(--pw-muted); margin-top: 5px; }
+.pw-analysis-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin-top: 10px; }
+.pw-analysis-controls fieldset { display: flex; flex-wrap: wrap; gap: 16px; margin: 0; padding: 0; border: 0; }
+.pw-analysis-controls legend { color: var(--pw-muted); font-size: 12px; margin-bottom: 6px; }
+.pw-analysis-controls label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.pacs-workspace .pw-analysis-controls input[type="checkbox"] { width: 16px; height: 16px; margin: 0; padding: 0; accent-color: #75a5ef; }
 .pw-stats-toolbar > label { display: flex; align-items: center; gap: 8px; color: var(--pw-muted); }
 .pw-stats-toolbar select { max-width: 240px; }
 .pw-stats-exports { display: flex; gap: 8px; margin-left: auto; }

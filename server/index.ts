@@ -35,6 +35,7 @@ import bcrypt from 'bcryptjs'
 import { scopedShareToken, scopedShareReportId, verifyShareScope } from './shareScope'
 import { workspacePermissions, assignableCenterRoles } from '../src/workspacePermissions'
 import { workspaceRouter } from './workspaceRouter'
+import { markProcessingJobUrgent } from './worklistPriority'
 import { adminConsoleRouter } from './adminConsoleRouter'
 import { requireWorkspaceCapability, workspaceAccess } from './workspaceAccess'
 import cors from 'cors'
@@ -3212,34 +3213,15 @@ app.post(['/api/v1/study-bridge/:agentId/dispatch-requests/:requestId/progress',
 })
 
 app.post('/api/client/processing-jobs/:jobId/mark-urgent', requireAuth, requireClientUser, async (req, res) => {
-  const job = await prisma.processingJob.findUniqueOrThrow({ where: { id: String(req.params.jobId) } })
-  if (job.clientId !== req.user!.clientId) return res.status(403).json({ message: 'Cannot update another client study' })
-  const ageMs = Date.now() - job.createdAt.getTime()
-  if (ageMs > 5 * 60 * 1000) return res.status(409).json({ message: 'Urgent marking is available only for 5 minutes after study submission.' })
-  if (['submitted_to_outsourced_teleradiology', 'sent_to_radiologist', 'completed', 'sent_to_pacs', 'failed'].includes(job.status)) {
-    return res.status(409).json({ message: 'This study has already moved past the urgent update window for outbound submission.' })
+  try {
+    const updated = await markProcessingJobUrgent(String(req.params.jobId), req.user!.clientId!, req.user!.sub)
+    await enqueueTelegramStudy(prisma, updated).catch(() => console.warn('Urgent Telegram notification could not be queued.'))
+    res.json(formatProcessingStatus(updated))
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2034') return res.status(409).json({ message: 'Study changed during this update. Refresh and try again.' })
+    if (error && typeof error === 'object' && 'status' in error) return res.status(Number(error.status)).json({ message: (error as Error).message })
+    throw error
   }
-  const updated = await prisma.processingJob.update({
-    where: { id: job.id },
-    data: {
-      priority: 'URGENT',
-      upstreamStatus: {
-        ...(job.upstreamStatus && typeof job.upstreamStatus === 'object' && !Array.isArray(job.upstreamStatus) ? job.upstreamStatus as Record<string, unknown> : {}),
-        priority: 'URGENT',
-        urgentMarkedAt: new Date().toISOString(),
-      },
-    },
-  })
-  await prisma.auditLog.create({
-    data: {
-      clientId: job.clientId,
-      actorUserId: req.user!.sub,
-      action: 'STUDY_MARKED_URGENT',
-      metadata: { processingJobId: job.id, uploadName: job.uploadName, previousPriority: job.priority ?? 'REGULAR' },
-    },
-  })
-  await enqueueTelegramStudy(prisma, updated).catch(() => console.warn('Urgent Telegram notification could not be queued.'));
-  res.json(formatProcessingStatus(updated))
 })
 
 app.get('/api/client/reports/:reportId/pdf', requireAuth, requireClientUser, async (req, res) => {

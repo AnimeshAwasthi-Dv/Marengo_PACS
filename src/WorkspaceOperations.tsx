@@ -1,5 +1,6 @@
 import { modalityCodes, modalityLabel } from './modalities';
 import { ReportingActivity, type ReportingActivityData } from './features/analytics/ReportingActivity';
+import { StudyAnalysisExport } from './features/analytics/StudyAnalysisExport';
 import { useState } from 'react';
 import { Activity, BarChart3, CalendarDays, ChevronLeft, ChevronRight, Download, RefreshCw } from 'lucide-react';
 import { BarChart, Bar, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -12,6 +13,7 @@ type StudyRow = {
   service?: string; units?: number | null; amountMinor?: number | null; currency?: string; billingStatus?: string; invoice?: string;
 };
 type Statistics = {
+  studyAnalysisAvailable: boolean;
   tatByModality: { modality: string; minimumMinutes: number | null; maximumMinutes: number | null; averageMinutes: number | null; samples: number }[];
   reporting: ReportingActivityData; tatStudies: {study:number;id:string;modality:string;minutes:number}[];
   modalities: string[]; tatDaily: { day: string; minutes: number | null; samples: number }[];
@@ -74,6 +76,7 @@ export function WorkspaceStatistics({ token, mode }: { token: string; mode: 'ana
       <select aria-label="Statistics modality" value={modality} onChange={event => { setModality(event.target.value); setPage(1); }}><option value="">All modalities</option>{(result?.data.modalities ?? modalityCodes.map(modalityLabel)).map(value => <option key={value}>{value}</option>)}</select>
       <div className="pw-stats-exports"><button disabled={!data || downloading} onClick={() => void download('studies')}><Download size={15}/>{mode === 'billing' ? 'Billing CSV' : 'Download MIS CSV'}</button><button disabled={!data || downloading} onClick={() => void download('daily', 'analytics')}><Download size={15}/>{mode === 'billing' ? 'Usage CSV' : 'Daily totals CSV'}</button>{mode === 'analytics' && <button disabled={!data || downloading} onClick={() => void download('reporting')}><Download size={15}/>Reporting activity CSV</button>}</div>
     </div>
+    {mode === 'analytics' && result?.data.studyAnalysisAvailable && <StudyAnalysisExport token={token} from={from} to={to}/>}
     {error && <div className="pw-alert" role="alert">{error}{data && ' Showing the last received data.'}</div>}
     {!data ? <div className="pw-empty" role="status">{error ? 'Statistics unavailable for this selection.' : 'Loading statistics...'}</div> : <>
       <section className="pw-metric-strip" aria-label="Period totals">

@@ -14,7 +14,7 @@ const fullRowSelect = {
   archiveName: true, clinicalIndication: true, processingJobId: true, availabilityStatus: true,
   workflowStatus: true, lastSyncedAt: true, selectedAt: true, submittedAt: true, autoSubmitAt: true,
   referringPhysician: true, firstDetectedAt: true, createdAt: true, priority: true,
-  processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true } },
+  processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true, providerJobId: true, submissionRetryCount: true } },
   dispatchRequests: {
     select: { requestId: true, status: true, progressPercentage: true, createdAt: true, lastErrorMessage: true },
     orderBy: { createdAt: 'desc' },
@@ -33,7 +33,7 @@ const worklistRowSelect = {
   patientId: true, patientName: true, accessionNumber: true, studyDescription: true, modalities: true,
   referringPhysician: true, processingJobId: true, priority: true, availabilityStatus: true,
   workflowStatus: true, lastSyncedAt: true, firstDetectedAt: true, createdAt: true, submittedAt: true, autoSubmitAt: true, updatedAt: true,
-  processingJob: { select: { id: true, status: true, completedAt: true, priority: true } },
+  processingJob: { select: { id: true, status: true, completedAt: true, priority: true, providerJobId: true, submissionRetryCount: true } },
   _count: { select: { attachments: true } },
 } satisfies Prisma.AvailableBridgeStudySelect
 
@@ -109,7 +109,7 @@ export function findStudyDetail(scope: StudyScope, studyId: string) {
       ...fullRowSelect,
       autoSubmitAt: !readOnly, priority: !readOnly,
       updatedAt: true,
-      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true, error: true } },
+      processingJob: { select: { id: true, status: true, clinicalStatus: true, completedAt: true, priority: true, error: true, providerJobId: true, submissionRetryCount: true } },
     },
   })
 }
