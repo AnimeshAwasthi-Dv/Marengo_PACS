@@ -230,6 +230,10 @@ export async function enqueueStudyStatusNotification(db: DbClient, input: {
   error?: string | null
   idempotencyKey: string
 }) {
+  if (/FAILED|ERROR/i.test(input.status)) {
+    const { recordOperationalFailure } = await import('./operationalAlerts');
+    await recordOperationalFailure(input.eventType, input.processingJobId ?? input.reportId ?? input.idempotencyKey, `Study workflow failed at ${input.status}. See portal audit history for details.`, input.clientId, db);
+  }
   const urgentConfig = telegramUrgentConfig();
   if (urgentConfig.enabled && (input.processingJobId || input.reportId)) {
     const mapping = !input.processingJobId && input.reportId ? await db.providerJobMapping.findFirst({ where: { reportReviewId: input.reportId }, select: { processingJobId: true } }) : null;
@@ -296,6 +300,7 @@ export async function processWhatsappOutbox(limit = 25) {
   if (outboxWorkerRunning) return
   outboxWorkerRunning = true
   try {
+    await prisma.notificationOutbox.updateMany({ where: { eventType: PHYSICIAN_REPORT_READY, status: 'SENDING', nextAttemptAt: { lte: new Date() } }, data: { status: 'FAILED' } });
     if (physicianWhatsappReady()) await enqueuePhysicianReports(prisma)
     const due = await prisma.notificationOutbox.findMany({
       where: { eventType: PHYSICIAN_REPORT_READY, status: { in: ['PENDING', 'FAILED'] }, nextAttemptAt: { lte: new Date() } },
@@ -304,6 +309,8 @@ export async function processWhatsappOutbox(limit = 25) {
     })
     if (due.length && process.env.WHATSAPP_PROVIDER === 'wati' && !(await watiTemplateApproved())) return
     for (const item of due) {
+      const claimed = await prisma.notificationOutbox.updateMany({ where: { id: item.id, status: { in: ['PENDING', 'FAILED'] }, nextAttemptAt: { lte: new Date() } }, data: { status: 'SENDING', nextAttemptAt: new Date(Date.now() + 5 * 60_000) } });
+      if (!claimed.count) continue;
       try {
         if (item.eventType === PHYSICIAN_REPORT_READY) {
           // Never route a patient-specific link through the general recipient resolver.
@@ -534,6 +541,7 @@ async function sendWhatsappPayload(to: string, payload: Record<string, unknown>)
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
   if (!token || !phoneNumberId) throw new Error('WhatsApp Cloud API token or phone number ID is missing')
   const response = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+    signal: AbortSignal.timeout(30_000),
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

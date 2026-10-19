@@ -9,6 +9,7 @@ export const excludedTechnicalEndpoints = new Set([
   ...[5002, 5106, 5107, 5108].map(port => `DICOM receive:54.95.134.100:${port}`),
 ]);
 export function technicalAlertExcluded(row: Pick<HealthObservation, 'id' | 'service'>) {
+  if (row.id.startsWith('operation:')) return false;
   return row.id === 'notifications' || /whatsapp/i.test(row.service) || /^(XRAY_SKELETAL|XRAY_CHEST|CT_THORAX|CT_ORCHESTRATOR|SPECIAL_XRAY|MRI_STUDY|MRI_S3_STUDY|MAMMOGRAPHY_STUDY|MAMMOGRAPHY_S3_REPORT):/.test(row.id) || excludedTechnicalEndpoints.has(row.id);
 }
 export function technicalFailure(row: HealthObservation) {

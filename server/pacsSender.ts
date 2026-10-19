@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import type { ReturnFormat } from '@prisma/client'
 import { prisma } from './db'
+import { reportInstanceUid } from './reportInstanceUid'
 
 const execFileAsync = promisify(execFile)
 const pacsOutboxPath = path.resolve(process.cwd(), 'uploads', 'pacs-outbox')
@@ -133,6 +134,8 @@ async function createEncapsulatedPdfDicom(input: { sourcePath: string; dcmPath: 
     '+pn', toDicomPersonName(metadata.patientName),
     '+pi', sanitizeDicomText(metadata.patientId || input.report.id, 64),
     ...commonDicomKeys(input.report, metadata, title, 'DOC'),
+    '-k', `0008,0018=${reportInstanceUid(input.report.id, await fs.readFile(input.sourcePath), 'PDF')}`,
+    '-k', `0020,000E=${reportInstanceUid(input.report.id, Buffer.from(input.report.id), 'SERIES')}`,
     input.sourcePath,
     input.dcmPath,
   ]
@@ -147,6 +150,8 @@ async function createSecondaryCaptureDicom(input: { sourcePath: string; dcmPath:
     '-i', 'BMP',
     '-sc',
     ...commonDicomKeys(input.report, metadata, title, 'OT', true),
+    '-k', `0008,0018=${reportInstanceUid(input.report.id, await fs.readFile(input.sourcePath), 'BMP')}`,
+    '-k', `0020,000E=${reportInstanceUid(input.report.id, Buffer.from(input.report.id), 'SERIES')}`,
     input.sourcePath,
     input.dcmPath,
   ]

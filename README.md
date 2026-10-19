@@ -16,7 +16,7 @@ openssl rand -hex 32  # generate a separate JWT_SECRET
 nano .env
 docker compose config --quiet
 docker compose up -d --build
-docker compose run --rm app npm run db:seed
+docker compose run --rm api npm run db:seed
 docker compose ps
 curl -fsS http://127.0.0.1:4000/api/health
 ```
@@ -57,7 +57,7 @@ With `QUICKVIEW_ENABLED=true`, X-ray (CR/DX/DR), mammography (MG), ultrasound (U
 After configuration changes:
 
 ```bash
-docker compose up -d --force-recreate app
+docker compose up -d --force-recreate api ingest worker
 ```
 
 ## PACS connectivity
@@ -78,9 +78,17 @@ The default range is `5000–5099`. Keep `PACS_PORT_START`, `PACS_PORT_END`, and
 | PostgreSQL | 1.25 | 4 GB |
 | HTTPS proxy | 0.25 | 512 MB |
 
-The remaining RAM covers Ubuntu, filesystem cache and deployment builds. The API uses a 4 GB Node heap and a 10-connection database pool. Report rendering is limited to two concurrent operations. Inbound scans cannot overlap. Study processing retains its existing serialized queue to avoid duplicate submission. Most browser refreshes use 30 seconds and pause in hidden/offline tabs; selected operational screens refresh every 15 seconds. Static assets have immutable caching and HTTP compression. Charts, PDF tooling, QR generation and DICOM upload parsing load on demand.
+The remaining RAM covers Ubuntu, filesystem cache and deployment builds. The API uses a 4 GB Node heap and a 10-connection database pool. Report rendering is limited to two concurrent operations. Inbound scans cannot overlap. The worker submits up to three studies at a time; each job is claimed in the database before it is sent, so a study is not submitted twice. Most browser refreshes use 30 seconds and pause in hidden/offline tabs; selected operational screens refresh every 15 seconds. Static assets have immutable caching and HTTP compression. Charts, PDF tooling, QR generation and DICOM upload parsing load on demand.
 
-Use **one app replica**: existing DICOM listeners and processing coordination are process-local. Measure `docker stats`, response times, upload sizes and queue latency under your actual workload before increasing concurrency. These settings are a conservative starting point, not a throughput guarantee.
+The app runs as three services from one image, chosen by `PROCESS_ROLE` (`server/processRole.ts`):
+
+- **api**: portal and integration HTTP, including the Renewist webhook, which only stores the report. No background work; it can run more than one copy.
+- **ingest**: DICOM receivers (kept in step with the PACS configs every 30 s), the inbound scan and every Bridge endpoint. Caddy sends `/api/v1/bridge`, `/api/v1/study-bridge` and `/api/v1/study-agents` here. Run **one** copy.
+- **worker**: study submission, auto-submit, PACS return, recovery and retries, messaging, invoices, viewer pre-import and archive maintenance. Run **one** copy.
+
+They exchange work as messages through Redis (BullMQ, `server/queue/index.ts`, the `queue-redis` service): study intake, DICOM metadata extraction and auto-submit scheduling, Renewist submission, PACS delivery, cancellation and receiver changes. The database stays the record: every handler re-checks its row, failures are retried with backoff, and each service re-sends messages for pending work every 60 s, so a lost message or a Redis restart delays work but never loses it. `QUEUE_REDIS_URL` is required for ingest and worker; Redis must use `maxmemory-policy noeviction`.
+
+All three mount the same `uploads` volume, so they must run on the same host. Each process has its own database pool, so the database sees up to three pools. Leaving `PROCESS_ROLE` unset runs everything in one process, as before. Measure `docker stats`, response times, upload sizes and queue latency under your actual workload before increasing concurrency. These settings are a conservative starting point, not a throughput guarantee.
 
 Chromium runs as the non-root app user; its internal sandbox is disabled inside this container for compatibility. Docker isolation remains in place. Only report generation uses Chromium; there is no local DICOM image renderer.
 
@@ -91,16 +99,16 @@ Before updates, back up **both** PostgreSQL and the uploads volume. Stored file 
 ```bash
 mkdir -p backups
 # Pause processing while taking a consistent database/files backup.
-docker compose stop app
+docker compose stop api ingest worker
 docker compose exec -T db pg_dump -U marengo -d marengo -Fc > backups/marengo.dump
-docker compose run --rm --no-deps -T app tar -C /app/uploads -czf - . > backups/uploads.tar.gz
-docker compose start app
+docker compose run --rm --no-deps -T api tar -C /app/uploads -czf - . > backups/uploads.tar.gz
+docker compose start api ingest worker
 
 git pull --ff-only
 docker compose build
 docker compose up -d --force-recreate migrate
-docker compose up -d app web
-docker compose logs --tail=100 app
+docker compose up -d api ingest worker web
+docker compose logs --tail=100 api ingest worker
 ```
 
 Keep backups off-instance and periodically test restoring them to a separate deployment. Do not assume reverting the application also reverses a database migration. For an existing Windows database, plan a separate restore/migration: existing absolute Windows file paths must be remapped to `/app/uploads`. This release does not automatically import current credentials, patients or uploads.

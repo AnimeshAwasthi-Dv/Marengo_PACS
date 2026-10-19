@@ -1,5 +1,7 @@
 # Technical Alerts
 
+Operational study, archive, PACS and notification failures now also create incidents independently of the health-probe exclusions below. See `PROCESS-GAPS-FIXES.md` for retry, cancellation and deployment details.
+
 Super Admin → Technical Alerts shows persistent incidents and their acknowledgment, delivery, health-change, and resolution logs.
 
 ## Operation

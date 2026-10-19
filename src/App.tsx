@@ -10765,19 +10765,20 @@ function MarengoUnifiedWorklist({
       setDownloadingStudyId(null);
     }
   }
-  async function terminateProcessing(study: BridgeStudy) {
-    if (user.role !== "SUPER_ADMIN" || !study.processingJobId || terminatingStudyId) return;
-    const reason = window.prompt("Reason for terminating this processing job before repush:", "Super admin terminated processing for repush");
-    if (reason === null) return;
+  async function terminateProcessing(study: BridgeStudy, remove = false) {
+    if (user.role !== "SUPER_ADMIN" || terminatingStudyId) return;
+    const reason = window.prompt(remove ? "Delete this study from the worklist and stop portal processing? Reports and audit history are retained. Enter a reason:" : "Force stop portal processing and retries? Work already accepted by Renewist needs cancellation with Renewist. Enter a reason:");
+    if (!reason?.trim()) return;
     setFeedback(null);
     setTerminatingStudyId(study.id);
     try {
-      const result = await api<{ message: string }>(`/api/workspace/studies/${encodeURIComponent(study.id)}/terminate-processing`, token, {
-        method: "POST",
+      const result = await api<{ message: string }>(`/api/workspace/studies/${encodeURIComponent(study.id)}${remove ? '' : '/terminate-processing'}`, token, {
+        method: remove ? "DELETE" : "POST",
         body: JSON.stringify({ reason }),
       });
       setFeedback({ text: result.message, error: false });
       notice(result.message);
+      if (remove) setDetailStudy(null);
       await Promise.all([loadWorklistStudies(true), reload()]);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to terminate processing.";
@@ -10928,7 +10929,7 @@ function MarengoUnifiedWorklist({
                   <div className="pw-study-tool-row">
                     {permissions.attach && <button disabled={Boolean(study.processingJobId)} title={study.processingJobId ? "Study has already entered reporting" : "Add clinical indication, history or supporting files"} onClick={() => setActionDialog({ kind: "attach", study })}><Plus size={14}/>Add indication / history</button>}
                     <button className="pw-primary" disabled={!permissions.submit || detailRow?.state !== "AVAILABLE" || Boolean(study.processingJobId)} title={detailRow?.state !== "AVAILABLE" ? "Study has already entered reporting" : "Send study for reporting"} onClick={() => beginSend(study)}><Send size={14}/>Send for reporting</button>
-                    {user.role === "SUPER_ADMIN" && detailRow?.state === "REPORTING" && study.processingJobId && <button className="pw-danger" disabled={terminatingStudyId === study.id} title="Cancel this processing job and make the study available to send again" onClick={() => void terminateProcessing(study)}><X size={14}/>{terminatingStudyId === study.id ? "Terminating..." : "Terminate processing"}</button>}
+                    {user.role === "SUPER_ADMIN" && <><button className="pw-danger" disabled={Boolean(terminatingStudyId)} onClick={() => void terminateProcessing(study)}><X size={14}/>{terminatingStudyId === study.id ? "Working..." : "Force terminate"}</button><button className="pw-danger" disabled={Boolean(terminatingStudyId)} onClick={() => void terminateProcessing(study, true)}>Delete study</button></>}
                   </div>
                   <div className="pw-study-tool-row">
                     <button onClick={() => setStudyMedia({ kind: "dicom", studyId: study.id, title: study.studyDescription || "DICOM study" })}><Eye size={14}/>DICOM viewer</button>

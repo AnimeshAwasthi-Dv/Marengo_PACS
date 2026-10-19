@@ -7,7 +7,7 @@ import test from 'node:test'
 import yauzl from 'yauzl'
 import yazl from 'yazl'
 import { pipeline } from 'node:stream/promises'
-import { aiServiceTypeForServiceType, cleanDicomZip, inferBridgeServiceType, prepareRenewistStudyZip, serviceMatchesBridgeInference, serviceNameForType, zipDirectory } from './uploadPipeline'
+import { aiServiceTypeForServiceType, cleanDicomText, cleanDicomZip, inferBridgeServiceType, prepareRenewistStudyZip, serviceMatchesBridgeInference, serviceNameForType, zipDirectory } from './uploadPipeline'
 
 test('X-ray and CT Thorax service routes resolve to their dedicated AI pipelines', () => {
   assert.equal(serviceNameForType('xray'), 'X-ray Suite')
@@ -119,3 +119,15 @@ function listZipEntries(filePath: string) {
     })
   })
 }
+
+test('cleanDicomText removes DICOM NUL padding before database writes', () => {
+  assert.equal(cleanDicomText('P-ABENEZER^AYCHEW\u0000'), 'P-ABENEZER AYCHEW')
+  assert.equal(cleanDicomText('2026-9-240033\u0000'), '2026-9-240033')
+  assert.equal(cleanDicomText('M\u0000'), 'M')
+  assert.equal(cleanDicomText('24Y\u0000'), '24Y')
+})
+
+test('cleanDicomText removes non-printing controls but preserves whitespace normalization', () => {
+  assert.equal(cleanDicomText('  Knee\u0007\tMRI\r\nStudy  '), 'Knee MRI Study')
+  assert.equal(cleanDicomText(undefined), '')
+})

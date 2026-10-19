@@ -1,4 +1,5 @@
 export type ProviderStudySubmission = {
+  signal?: AbortSignal
   dectrocelJobId: string
   studyInstanceUid?: string | null
   accessionNumber?: string | null

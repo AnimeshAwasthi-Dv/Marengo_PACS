@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 import yauzl from 'yauzl'
 import { z } from 'zod'
 import { prisma } from './db'
-import { renderHtmlReportPdf, sendApprovedReportToPacs } from './pacsSender'
+import { renderHtmlReportPdf } from './pacsSender'
 import { storeObject, type StoredObject } from './reportStorage'
 import { getDeploymentFeatures } from './deploymentProfile'
 import { RenewistAdapter } from './renewistAdapter'
@@ -18,6 +18,10 @@ import { enqueueStudyStatusNotification } from './whatsapp'
 import { recordStudyAcknowledgement } from './studyTracking'
 import { redactExchange } from './telegramPolicy'
 import { evidenceHash } from './adminEvidence'
+import { recordOperationalFailure } from './operationalAlerts'
+import { renewistCallbackIdentity } from './renewistCallbackIdentity'
+import { LeaseBusyError, withLease } from './workLease'
+import { jobId as messageId, sendMessage } from './queue'
 
 const uploadsPath = path.resolve(process.cwd(), 'uploads')
 const renewistReportPath = path.join(uploadsPath, 'renewist-reports')
@@ -44,6 +48,7 @@ renewistIntegrationRouter.use((req, res, next) => {
         const job = mapping?.processingJobId ? await prisma.processingJob.findUnique({ where: { id: mapping.processingJobId }, select: { clientId: true } }) : null
         const evidence = { requestPayload, responsePayload, receivedAt, responseAt, httpStatus: status, endpoint: req.path, requestId: req.get('x-renewist-request-id') ?? null, dectrocelJobId: reference || null, processingJobId: mapping?.processingJobId ?? null, captureScope: requestPayload === null ? 'Multipart request body not captured; response JSON captured' : 'Redacted parsed JSON; not original wire bytes', responseFinishedLocally: true }
         await prisma.auditLog.create({ data: { clientId: job?.clientId, action: 'RENEWIST_HTTP_EXCHANGE', ipAddress: req.ip, metadata: { ...evidence, capturedEvidenceSha256: evidenceHash(evidence) } as Prisma.InputJsonObject } })
+        if (status >= 400) await recordOperationalFailure('Renewist callback', reference || req.path, `Callback failed with HTTP ${status}; inspect the integration audit.`, job?.clientId)
       })().catch(() => console.error('Renewist exchange audit persistence failed; HTTP handling is unchanged.'))
     })
     return originalJson(body)
@@ -212,12 +217,26 @@ renewistIntegrationRouter.post('/status', async (req, res) => {
 })
 
 async function handleReportSubmission(req: Request, res: Response, rawInput: ParsedReportRequest) {
+  // Serialize repeated callbacks for one job across processes. A lease row, not a held transaction,
+  // so a burst of callbacks cannot exhaust the connection pool.
+  try {
+    return await withLease(`renewist-callback:${rawInput.dectrocel_job_id}`, { ttlMs: 15 * 60_000, waitMs: 30_000 }, () => handleReportSubmissionLocked(req, res, rawInput))
+  } catch (error) {
+    if (!(error instanceof LeaseBusyError)) throw error
+    await cleanupRenewistLocalFiles(rawInput, { discard: true })
+    res.set('Retry-After', '60')
+    return sendError(res, 503, 'CALLBACK_IN_PROGRESS', 'A callback for this job is still being processed; retry later', true, rawInput.dectrocel_job_id)
+  }
+}
+
+async function handleReportSubmissionLocked(req: Request, res: Response, rawInput: ParsedReportRequest) {
   let input = rawInput
   const validation = await validateRenewistRequest(req, input)
   if (!validation.ok) return sendError(res, validation.status, validation.code, validation.message, false)
 
   const existingRequest = await prisma.providerApiRequest.findUnique({ where: { requestId: validation.requestId } })
   if (existingRequest?.status === 'ACCEPTED') {
+    await cleanupRenewistLocalFiles(input, { discard: true })
     return res.json({ accepted: true, duplicate: true, request_id: validation.requestId, dectrocel_job_id: input.dectrocel_job_id })
   }
 
@@ -227,6 +246,10 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
     return sendError(res, 404, 'STUDY_NOT_FOUND', 'No matching Dectrocel report or processing job was found', false, input.dectrocel_job_id)
   }
   const processingJob = await findProcessingJobForRenewistReport(input, report.id)
+  if (processingJob?.status === 'cancelled') {
+    await cleanupRenewistLocalFiles(input, { discard: true })
+    return sendError(res, 409, 'STUDY_CANCELLED', 'Portal processing was terminated for this study', false, input.dectrocel_job_id)
+  }
   if (input.renewist_job_id === input.dectrocel_job_id && processingJob?.providerJobId && processingJob.providerJobId !== input.dectrocel_job_id) {
     input = { ...input, renewist_job_id: processingJob.providerJobId }
   }
@@ -379,7 +402,7 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
       },
     }),
     ...(isFinalReport && processingJob ? [prisma.processingJob.update({
-      where: { id: processingJob.id },
+      where: { id: processingJob.id, status: { not: 'cancelled' } },
       data: {
         status: 'completed',
         clinicalStatus: 'APPROVED',
@@ -425,8 +448,10 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
         metadata,
       },
     })] : []),
-    prisma.providerApiRequest.create({
-      data: {
+    prisma.providerApiRequest.upsert({
+      where: { requestId: validation.requestId },
+      update: { status: 'ACCEPTED', authenticated: true, responseCode: 202, metadata },
+      create: {
         providerId: validation.providerId,
         requestId: validation.requestId,
         direction: 'INBOUND',
@@ -438,6 +463,7 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
         metadata,
       },
     }),
+    ...(processingJob ? [prisma.processingJob.update({ where: { id: processingJob.id, status: { not: 'cancelled' } }, data: { updatedAt: new Date() } })] : []),
   ])
 
   await enqueueStudyStatusNotification(prisma, {
@@ -455,83 +481,15 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
     idempotencyKey: `study-status:renewist:${report.id}:${input.report_version}:${input.report_status}`,
   })
 
-  let pacsDelivery: unknown = null
-  if (isFinalReport) {
-    const signedPdfPath = input.signedFiles?.pdf?.path ?? (input.report_format === 'PDF' ? input.reportFilePath : null)
-    try {
-      if (!signedPdfPath) {
-        throw new Error('Exact Renewist signed PDF is not available; refusing to push generated fallback report')
-      }
-      pacsDelivery = await sendApprovedReportToPacs({
-        report: { ...report, editedReportJson: { htmlReport }, outputFormat: report.outputFormat },
-        htmlReport,
-        sourcePdfPath: signedPdfPath,
-      })
-      await prisma.$transaction([
-        prisma.reportReview.update({
-          where: { id: report.id },
-          data: {
-            status: 'APPROVED',
-            pushedAt: new Date(),
-            editedReportJson: toPrismaJsonObject({
-              ...(report.editedReportJson as Record<string, unknown>),
-              htmlReport,
-              renewist: metadata,
-              reportFilePath: input.reportFilePath,
-              reportChecksum: input.reportChecksum ?? input.report_checksum,
-              signedReportFiles: signedReportFilesForJson(input.signedFiles),
-              pacsDelivery,
-            }),
-          },
-        }),
-        ...(processingJob ? [prisma.processingJob.update({
-          where: { id: processingJob.id },
-          data: {
-            status: 'completed',
-            clinicalStatus: 'APPROVED',
-            providerJobId: input.renewist_job_id,
-            error: null,
-          },
-        })] : []),
-        prisma.pacsReturnJob.updateMany({
-          where: { reportReviewId: report.id, status: 'PENDING' },
-          data: { status: 'SUCCESS', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: null, deliveryResult: toPrismaJsonValue(pacsDelivery) },
-        }),
-        prisma.reportAuditLog.create({
-          data: { reportId: report.id, action: 'RENEWIST_REPORT_SENT_TO_CLIENT_PACS', metadata: toPrismaJsonObject({ ...metadata, pacsDelivery }) },
-        }),
-      ])
-      await enqueueStudyStatusNotification(prisma, {
-        eventType: 'RENEWIST_REPORT_SENT_TO_CLIENT_PACS',
-        clientId: report.clientId,
-        reportId: report.id,
-        processingJobId: processingJob?.id ?? null,
-        status: 'APPROVED',
-        patientName: report.patientName,
-        patientId: input.patient_id ?? report.patientId,
-        accession: input.accession_number ?? report.accession,
-        modality: report.modality,
-        serviceName: report.serviceName,
-        radiologistName: input.radiologist_name,
-        idempotencyKey: `study-status:renewist-pushed:${report.id}:${input.report_version}`,
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to send Renewist report to client PACS'
-      await prisma.$transaction([
-        prisma.pacsReturnJob.updateMany({
-          where: { reportReviewId: report.id, status: 'PENDING' },
-          data: { status: 'PENDING', attempts: { increment: 1 }, lastAttemptAt: new Date(), errorMessage: message },
-        }),
-        prisma.reportAuditLog.create({
-          data: { reportId: report.id, action: 'RENEWIST_REPORT_PACS_SEND_FAILED', metadata: toPrismaJsonObject({ ...metadata, error: message }) },
-        }),
-      ])
-    }
-  }
-  if (!isFinalReport || pacsDelivery) {
-    await cleanupRenewistLocalFiles(input).catch((error) => {
-      console.warn(`Unable to clean local Renewist report files for ${report.id}:`, error instanceof Error ? error.message : error)
-    })
+  // PACS delivery runs in the worker (processPendingPacsReturnJobs) from the PacsReturnJob created above,
+  // so this callback only stores the report. Local files with an S3 copy are removed now; the worker
+  // restores them from S3 when it sends. Files without an S3 copy are kept for the worker.
+  await cleanupRenewistLocalFiles(input).catch((error) => {
+    console.warn(`Unable to clean local Renewist report files for ${report.id}:`, error instanceof Error ? error.message : error)
+  })
+  // Tell the worker to deliver now; its 60 s sweep sends this again if the message is lost.
+  for (const returnJob of await prisma.pacsReturnJob.findMany({ where: { reportReviewId: report.id, status: 'PENDING' }, select: { id: true, attempts: true } })) {
+    await sendMessage('pacs-deliver', messageId('pacs-deliver', returnJob.id, returnJob.attempts), { returnJobId: returnJob.id })
   }
 
   const acknowledgement = {
@@ -540,14 +498,14 @@ async function handleReportSubmission(req: Request, res: Response, rawInput: Par
     dectrocel_job_id: input.dectrocel_job_id,
     report_id: report.id,
     submission_id: submission.id,
-    pacs_return_status: isFinalReport ? (pacsDelivery ? 'SUCCESS' : 'PENDING') : 'NOT_REQUIRED',
+    pacs_return_status: isFinalReport ? 'PENDING' : 'NOT_REQUIRED',
   }
   if (processingJob) await recordStudyAcknowledgement(processingJob.id, 'RENEWIST_EXCHANGE', acknowledgement)
   res.status(202).json(acknowledgement)
 }
 
 async function validateRenewistRequest(req: Request, fields: Record<string, unknown>) {
-  const requestId = header(req, 'x-renewist-request-id') ?? crypto.randomUUID()
+  const requestId = header(req, 'x-renewist-request-id') ?? renewistCallbackIdentity(fields)
   const provider = await prisma.teleradiologyProvider.findUnique({ where: { code: 'RENEWIST' } }).catch(() => null)
   // Renewist clients in the field use both header spellings. Either header
   // authenticates the callback with the dedicated inbound API key; HMAC is
@@ -599,6 +557,9 @@ async function parseMultipartReport(req: Request): Promise<ParsedReportRequest> 
     let reportFile: SavedReportFile | null = null
     let signedFiles: SignedReportFiles = { all: [] }
     const writes: Promise<unknown>[] = []
+    let uploadError: Error | null = null
+    busboy.on('filesLimit', () => { uploadError = new Error('Too many report files') })
+    req.on('aborted', () => { busboy.destroy(new Error('Report upload interrupted')) })
 
     busboy.on('field', (name, value) => {
       fields[name] = value
@@ -608,6 +569,7 @@ async function parseMultipartReport(req: Request): Promise<ParsedReportRequest> 
       const outputPath = path.join(renewistReportPath, `${Date.now()}-${crypto.randomUUID()}-${safeName}`)
       const hash = crypto.createHash('sha256')
       const output = fs.createWriteStream(outputPath)
+      file.on('limit', () => { uploadError = new Error('Report file exceeds the upload size limit') })
       file.on('data', (chunk: Buffer) => hash.update(chunk))
       writes.push(new Promise((fileResolve, fileReject) => {
         output.on('finish', () => {
@@ -625,13 +587,14 @@ async function parseMultipartReport(req: Request): Promise<ParsedReportRequest> 
         })
         output.on('error', fileReject)
         file.on('error', fileReject)
-      }))
+      }).catch(error => { uploadError = error instanceof Error ? error : new Error('Report file write failed') }))
       file.pipe(output)
     })
     busboy.on('error', reject)
     busboy.on('finish', async () => {
       try {
         await Promise.all(writes)
+        if (uploadError) throw uploadError
         const parsed = reportSchema.parse(normalizeMinimalReportFields(fields))
         if (!reportFile?.path) throw new Error('Missing required report file field "report"')
         resolve({ ...parsed, reportFilePath: reportFile?.path, reportChecksum: reportFile?.checksum, fileName: reportFile?.fileName, signedFiles })
@@ -694,6 +657,8 @@ async function findReportForDectrocelJob(dectrocelJobId: string, studyInstanceUi
 }
 
 async function findProcessingJobForRenewistReport(input: ParsedReportRequest, reportId: string) {
+  const exact = await prisma.processingJob.findFirst({ where: { OR: [{ id: input.dectrocel_job_id }, { internalJobId: input.dectrocel_job_id }] } })
+  if (exact) return exact
   const mapped = await prisma.providerJobMapping.findFirst({
     where: {
       OR: [
@@ -902,6 +867,10 @@ async function storeRenewistSignedReports(input: ParsedReportRequest, reportId: 
       console.warn(`Unable to upload Renewist report file ${file.path} to S3:`, error instanceof Error ? error.message : error)
       return null
     })
+    if (!storage) {
+      const { recordOperationalFailure } = await import('./operationalAlerts')
+      await recordOperationalFailure('Signed report storage', reportId, 'Remote signed report storage unavailable. Exact local source retained for PACS recovery.')
+    }
     const stored = { ...file, storage }
     storedByPath.set(file.path, stored)
     return stored
@@ -927,7 +896,11 @@ async function storeRenewistSignedReports(input: ParsedReportRequest, reportId: 
   }
 }
 
-async function cleanupRenewistLocalFiles(input: ParsedReportRequest) {
+async function cleanupRenewistLocalFiles(input: ParsedReportRequest, options: { discard?: boolean } = {}) {
+  // Keep the exact signed source until a durable remote copy exists. `discard` is for callbacks
+  // that were not applied (duplicate, cancelled, busy): their files are never used.
+  const files = [...(input.signedFiles?.all ?? []), input.signedFiles?.pdf, input.signedFiles?.docx, input.signedFiles?.withoutLetterheadPdf, input.signedFiles?.withoutLetterheadDocx].filter((file): file is SavedReportFile => Boolean(file))
+  const retained = new Set(options.discard ? [] : files.filter(file => !file.storage?.bucket || !file.storage?.key).map(file => file.path))
   const candidates = new Set<string>()
   if (input.reportFilePath) candidates.add(input.reportFilePath)
   for (const file of input.signedFiles?.all ?? []) if (file.path) candidates.add(file.path)
@@ -935,6 +908,7 @@ async function cleanupRenewistLocalFiles(input: ParsedReportRequest) {
   if (input.signedFiles?.withoutLetterheadPdf?.path) candidates.add(input.signedFiles.withoutLetterheadPdf.path)
   if (input.signedFiles?.docx?.path) candidates.add(input.signedFiles.docx.path)
   await Promise.all([...candidates].map(async (candidate) => {
+    if (retained.has(candidate)) return
     try {
       const realUploadsRoot = fs.realpathSync(uploadsPath)
       const realCandidate = fs.realpathSync(path.resolve(candidate))
