@@ -27,6 +27,18 @@ test('Renewist multipart includes configured location for each center and keeps 
   assert(bodies[1].includes('name="location"\r\n\r\nFaridabad\r\n'));
   assert(bodies[2].includes('name="location"\r\n\r\n\r\n'));
   for (const body of bodies) { assert(body.includes('name="hospital_slug"\r\n\r\nmarengo\r\n')); assert(body.includes('name="study"; filename="study.zip"')); }
+  // Capture the actual multipart request; never send test studies to the external service.
+  for (const [priority, metadata, expected] of [
+    ['URGENT', {}, 'true'], ['REGULAR', {}, 'false'],
+    ['REGULAR', { priority: 'URGENT' }, 'false'],
+    [' urgent ', {}, 'true'], [undefined, { priority: 'URGENT' }, 'true'],
+    [undefined, {}, 'false'],
+  ] as const) {
+    await adapter.submitStudy({ dectrocelJobId: 'priority-test', workflowType: 'TELERADIOLOGY_ONLY', studyZipPath: zip, priority, metadata });
+    const body = bodies.at(-1)!;
+    assert.equal((body.match(/name="urgent"/g) ?? []).length, 1);
+    assert.ok(body.includes(`name="urgent"\r\n\r\n${expected}\r\n`), `Priority ${priority} must send urgent=${expected}`);
+  }
  } finally {
   if (previous === undefined) delete process.env.RENEWIST_OUTBOUND_STUDY_SUBMISSION_URL; else process.env.RENEWIST_OUTBOUND_STUDY_SUBMISSION_URL = previous;
   server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));

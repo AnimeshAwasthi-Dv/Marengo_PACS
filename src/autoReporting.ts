@@ -2,6 +2,7 @@ import { modalityCode } from './modalities';
 import { isSpecialXrayStudy } from './specialXray';
 
 export const AUTO_REPORTING_DELAY_MS = 5 * 60 * 1000;
+export const XRAY_AUTO_REPORTING_DELAY_MS = 3 * 60 * 1000;
 
 export function autoReportingModality(study: { modalities: string[]; studyDescription?: string | null }) {
   if (isSpecialXrayStudy(study)) return 'SPECIALXRAY';
@@ -14,9 +15,9 @@ export function autoReportingEnabled(enabled: string[], study: { modalities: str
   return Boolean(modality && enabled.includes(modality));
 }
 
-/** Routine X-rays are safe to send immediately; other enabled studies retain the clinical-details window. */
+/** Allow three minutes for routine X-ray clinical details and five for other enabled studies. */
 export function autoReportingDelayMs(study: { modalities: string[]; studyDescription?: string | null }) {
-  if (autoReportingModality(study) === 'XR') return 0;
+  if (autoReportingModality(study) === 'XR') return XRAY_AUTO_REPORTING_DELAY_MS;
   return AUTO_REPORTING_DELAY_MS;
 }
 

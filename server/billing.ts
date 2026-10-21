@@ -4,6 +4,7 @@ import { createHmac, randomUUID } from 'node:crypto'
 import type { Prisma } from '@prisma/client'
 import { prisma } from './db'
 import { requireAuth, requireClientUser, requireSuperAdmin } from './auth'
+import { editableBillingStatuses, loadClientTariff, resolveClientTariff, tariffTransactionData } from './clientTariff'
 
 const sgstRatePercent = Number(process.env.BILLING_SGST_RATE_PERCENT ?? 9)
 const cgstRatePercent = Number(process.env.BILLING_CGST_RATE_PERCENT ?? 9)
@@ -182,11 +183,13 @@ billingRouter.post('/usage/:transactionId/reclassify', requireAuth, requireSuper
     units: z.number().int().positive().optional(),
   }).parse(req.body)
   const existing = await prisma.studyBillingTransaction.findUniqueOrThrow({ where: { id: String(req.params.transactionId) } })
+  if (existing.invoiceId || !editableBillingStatuses.includes(existing.status)) return res.status(409).json({ message: 'Only uninvoiced transactions can be repriced.' })
   const priority = body.priority ?? existing.priority
   const category = body.category ?? existing.category
   const units = body.units ?? existing.units
   const price = await findPricingRule(existing.serviceName, existing.workflowType, priority, category)
   const amountMinor = billingAmountMinor(existing.serviceName, units, price.unitPriceMinor)
+  const scoped = await resolveClientTariff(prisma, existing)
   const updated = await prisma.studyBillingTransaction.update({
     where: { id: existing.id },
     data: {
@@ -197,6 +200,7 @@ billingRouter.post('/usage/:transactionId/reclassify', requireAuth, requireSuper
       amountMinor,
       currency: price.currency,
       metadata: { reclassifiedAt: new Date().toISOString(), previous: existing },
+      ...(scoped ? tariffTransactionData(scoped, existing.metadata) : {}),
     },
   })
   await auditSuperAdminChange(req, 'BILLING_USAGE_RECLASSIFIED', { transactionId: existing.id, previous: { priority: existing.priority, category: existing.category, units: existing.units }, updated: { priority, category, units } }, existing.clientId)
@@ -563,7 +567,13 @@ export async function getClientBillingSnapshot(clientId: string) {
     prisma.pricingRule.findMany({ where: { active: true }, orderBy: [{ serviceName: 'asc' }, { priority: 'asc' }] }),
     prisma.billingDispute.findMany({ where: { clientId }, orderBy: { createdAt: 'desc' }, take: 100 }),
   ])
-  return buildBillingSnapshot({ transactions, invoices, payments, pricingRules, payables: [], settlements: [], disputes })
+  const tariff = await loadClientTariff(prisma, clientId)
+  const effectivePricingRules = tariff ? tariff.rows.map(row => ({
+    id: row.key, serviceName: `${row.modality} - ${row.bodyPart}: ${row.studies}`,
+    workflowType: 'ANY', priority: 'REGULAR', category: row.chargeType, currency: 'INR',
+    unitPriceMinor: row.rateMinor, unit: row.unit, active: true,
+  })) : pricingRules
+  return buildBillingSnapshot({ transactions, invoices, payments, pricingRules: effectivePricingRules, payables: [], settlements: [], disputes })
 }
 
 export async function recordBillingEvent(input: BillingEventInput) {
@@ -571,6 +581,7 @@ export async function recordBillingEvent(input: BillingEventInput) {
   const price = await findPricingRule(input.serviceName, input.workflowType, priority, priority)
   const manualBilling = price.manualBilling === true
   const amountMinor = billingAmountMinor(input.serviceName, input.units, price.unitPriceMinor)
+  const scoped = await resolveClientTariff(prisma, input)
   const transactionData = {
     studyId: input.studyId,
     serviceName: input.serviceName,
@@ -586,7 +597,9 @@ export async function recordBillingEvent(input: BillingEventInput) {
   const existingByJob = input.processingJobId
     ? await prisma.studyBillingTransaction.findFirst({ where: { processingJobId: input.processingJobId } })
     : null
-  const transaction = existingByJob && existingByJob.serviceName !== input.serviceName && existingByJob.status === 'UNINVOICED'
+  if (existingByJob?.invoiceId || (existingByJob && !editableBillingStatuses.includes(existingByJob.status))) return existingByJob
+  if (scoped) Object.assign(transactionData, tariffTransactionData(scoped, transactionData.metadata))
+  const transaction = existingByJob && (scoped || existingByJob.serviceName !== input.serviceName) && editableBillingStatuses.includes(existingByJob.status)
     ? await prisma.studyBillingTransaction.update({ where: { id: existingByJob.id }, data: transactionData })
     : await prisma.studyBillingTransaction.upsert({
       where: { processingJobId_serviceName: { processingJobId: input.processingJobId, serviceName: input.serviceName } },
@@ -642,6 +655,12 @@ export async function repriceUninvoicedZeroBillingTransactions(processingJobIds?
   })
   let updated = 0
   for (const transaction of transactions) {
+    const scoped = await resolveClientTariff(prisma, transaction)
+    if (scoped) {
+      await prisma.studyBillingTransaction.update({ where: { id: transaction.id }, data: tariffTransactionData(scoped, transaction.metadata) })
+      updated++
+      continue
+    }
     const price = await findPricingRule(transaction.serviceName, transaction.workflowType, transaction.priority, transaction.category)
     if (price.manualBilling || price.unitPriceMinor <= 0) continue
     const amountMinor = billingAmountMinor(transaction.serviceName, transaction.units, price.unitPriceMinor)
@@ -670,7 +689,7 @@ async function generateInvoices(periodStart: Date, periodEnd: Date, clientId?: s
     by: ['clientId'],
     where: {
       clientId,
-      status: 'UNINVOICED',
+      status: { in: editableBillingStatuses },
       createdAt: { gte: periodStart, lte: periodEnd },
     },
   })
@@ -678,9 +697,19 @@ async function generateInvoices(periodStart: Date, periodEnd: Date, clientId?: s
   for (const group of grouped) {
     const invoice = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`invoice:${group.clientId}`}))`
-    const transactions = await tx.studyBillingTransaction.findMany({
-      where: { clientId: group.clientId, status: 'UNINVOICED', createdAt: { gte: periodStart, lte: periodEnd } },
+    const candidates = await tx.studyBillingTransaction.findMany({
+      where: { clientId: group.clientId, invoiceId: null, status: { in: editableBillingStatuses }, createdAt: { gte: periodStart, lte: periodEnd } },
     })
+    const tariff = await loadClientTariff(tx, group.clientId)
+    const transactions = []
+    for (const candidate of candidates) {
+      if (!tariff) { if (candidate.status === 'UNINVOICED') transactions.push(candidate); continue }
+      const decision = await resolveClientTariff(tx, candidate, tariff)
+      if (!decision) throw new Error('Client tariff resolution failed')
+      // Recheck report status and pricing at invoice time, including previously held rows.
+      const updated = await tx.studyBillingTransaction.update({ where: { id: candidate.id }, data: tariffTransactionData(decision, candidate.metadata) })
+      if (updated.status === 'UNINVOICED') transactions.push(updated)
+    }
     if (!transactions.length) return null
     const client = await tx.client.findUniqueOrThrow({ where: { id: group.clientId }, select: { billingDiscountPercent: true } })
     const grossMinor = transactions.reduce((sum, item) => sum + item.amountMinor, 0)
@@ -730,7 +759,7 @@ async function generateInvoices(periodStart: Date, periodEnd: Date, clientId?: s
         data: { invoiceId: created.id, status: 'INVOICED' },
       })
       return tx.invoice.findUniqueOrThrow({ where: { id: created.id }, include: invoiceInclude })
-    })
+    }, { timeout: 120000, isolationLevel: 'Serializable' })
     if (invoice) invoices.push(invoice)
   }
   return invoices
@@ -1273,6 +1302,15 @@ async function nextInvoiceNumber(clientId: string, db: Prisma.TransactionClient 
   const client = await db.client.findUnique({ where: { id: clientId }, select: { code: true } })
   const now = new Date()
   const period = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`
+  const [{ sequence }] = await db.$queryRaw<Array<{ sequence: string | null }>>`SELECT to_regclass('invoice_number_sequence')::text AS sequence`
+  if (!sequence) {
+    // Older deployments lack the sequence migration. Invoice generation already
+    // holds the per-client advisory lock, so allocation remains serialized.
+    const prefix = `INV-${client?.code ?? 'CLIENT'}-${period}-`
+    const existing = await db.invoice.findMany({ where: { invoiceNumber: { startsWith: prefix } }, select: { invoiceNumber: true } })
+    const next = existing.reduce((max, row) => Math.max(max, Number(row.invoiceNumber.slice(prefix.length)) || 0), 0) + 1
+    return `${prefix}${String(next).padStart(4, '0')}`
+  }
   const [{ value }] = await db.$queryRaw<Array<{ value: bigint }>>`SELECT nextval('invoice_number_sequence') AS value`
   return `INV-${client?.code ?? 'CLIENT'}-${period}-${String(value).padStart(4, '0')}`
 }

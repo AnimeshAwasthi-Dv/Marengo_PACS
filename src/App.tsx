@@ -1,4 +1,5 @@
 import { autoReportingCountdown } from './autoReporting';
+import { canChangeJobPriority, canChangeStudyPriority } from './studyPriority';
 import { modalityCodes, modalityCode, modalityLabel, uploadModalityCodes, uploadDicomModality } from './modalities';
 import LoginView from './LoginView';
 import './pacs-workspace.css';
@@ -10668,7 +10669,7 @@ function MarengoUnifiedWorklist({
   }
 
   async function changeStudyPriority(study: BridgeStudy, priority: "URGENT" | "REGULAR") {
-    if (!permissions.submit || priorityRequests.current.has(study.id)) return;
+    if (!permissions.submit || !canChangeStudyPriority(study) || priorityRequests.current.has(study.id)) return;
     priorityRequests.current.add(study.id);
     setPrioritySaving(new Set(priorityRequests.current));
     setFeedback(null);
@@ -10695,7 +10696,7 @@ function MarengoUnifiedWorklist({
 
   function priorityBadge(study: BridgeStudy, urgent: boolean, reported: boolean, mobile = false) {
     const className = `${mobile ? "pw-mobile-priority" : "pw-priority"} ${urgent ? "urgent" : "routine"}`;
-    if (reported || !permissions.submit) return <span className={className} title={reported ? "Reported study priority is read-only" : undefined}>{urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}</span>;
+    if (reported || !canChangeStudyPriority(study) || !permissions.submit) return <span className={className} title="Priority is read-only after submission starts">{urgent ? <><AlertTriangle size={12}/>Urgent</> : "Routine"}</span>;
     const nextLabel = urgent ? "Routine" : "Urgent";
     return <button type="button" className={className}
       disabled={prioritySaving.has(study.id)} aria-busy={prioritySaving.has(study.id)}
@@ -13810,7 +13811,7 @@ function ClientProcessingView({
     return (
       (job.priority ?? "REGULAR") !== "URGENT" &&
       ageMs <= 5 * 60 * 1000 &&
-      ["queued", "processing"].includes(normalizedStatus(job))
+      canChangeJobPriority(job)
     );
   };
   const statusSummary = {
@@ -13897,7 +13898,7 @@ function ClientProcessingView({
         method: "POST",
       });
       notice(
-        "Study marked urgent. Renewist submission will carry urgent=true if it has not already been sent.",
+        "Study marked urgent. Renewist submission will carry urgent=true.",
       );
       await reload();
     } catch (error) {

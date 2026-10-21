@@ -31,12 +31,14 @@ test('special X-rays and mammograms do not inherit routine X-ray auto-send', () 
   assert.equal(autoReportingEnabled(['MG'], { modalities: ['MG', 'DX'] }), true)
 })
 
-test('routine X-rays skip the grace period while other modalities retain it', () => {
-  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'CXR PA view' }), 0)
-  assert.equal(autoReportingDelayMs({ modalities: ['CR'], studyDescription: 'X-Ray Chest AP' }), 0)
-  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'X-Ray Knee' }), 0)
-  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'X-Ray Lumbo-Sacral Spine' }), 0)
+test('routine X-rays wait three minutes while other modalities retain five minutes', () => {
+  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'CXR PA view' }), 180000)
+  assert.equal(autoReportingDelayMs({ modalities: ['CR'], studyDescription: 'X-Ray Chest AP' }), 180000)
+  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'X-Ray Knee' }), 180000)
+  assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'X-Ray Lumbo-Sacral Spine' }), 180000)
+  for (const modality of ['XR', 'DR', 'XRAY']) assert.equal(autoReportingDelayMs({ modalities: [modality] }), 180000)
   assert.equal(autoReportingDelayMs({ modalities: ['CT'], studyDescription: 'CT Chest' }), AUTO_REPORTING_DELAY_MS)
+  assert.equal(autoReportingDelayMs({ modalities: ['MR'], studyDescription: 'MRI Brain' }), 300000)
   assert.equal(autoReportingDelayMs({ modalities: ['DX'], studyDescription: 'Barium swallow' }), AUTO_REPORTING_DELAY_MS)
 })
 
@@ -50,12 +52,21 @@ test('five-minute countdown is stable across refreshes and never goes negative',
   assert.equal(autoReportingCountdown(due, start + 600000), 'Auto-send pending')
 })
 
+test('routine X-ray deadline displays a three-minute countdown through expiry', () => {
+  const start = Date.parse('2026-10-17T12:00:00Z')
+  const due = new Date(start + autoReportingDelayMs({ modalities: ['DX'] })).toISOString()
+  assert.equal(autoReportingCountdown(due, start), 'Auto-send in 3:00')
+  assert.equal(autoReportingCountdown(due, start + 61000), 'Auto-send in 1:59')
+  assert.equal(autoReportingCountdown(due, start + 179999), 'Auto-send in 0:01')
+  assert.equal(autoReportingCountdown(due, start + 180000), 'Auto-send pending')
+})
+
 test('study responses expose the deadline only before submission; reporting TAT excludes the grace period', () => {
   const now = new Date('2026-09-30T12:00:00Z')
   const study = {
     id: 'study', publicStudyId: 'public', agentId: 'agent', studyInstanceUid: 'uid',
     modalities: ['DX'], seriesCount: 1, instanceCount: 1, availabilityStatus: 'Available',
-    workflowStatus: 'Available', lastSyncedAt: now, autoSubmitAt: new Date(now.getTime() + AUTO_REPORTING_DELAY_MS),
+    workflowStatus: 'Available', lastSyncedAt: now, autoSubmitAt: new Date(now.getTime() + autoReportingDelayMs({ modalities: ['DX'] })),
   }
   assert.equal(formatBridgeStudyForClient(study).autoSubmitAt, study.autoSubmitAt)
   assert.equal(worklistTatStart('AVAILABLE', null), null)

@@ -35,6 +35,7 @@ import bcrypt from 'bcryptjs'
 import { scopedShareToken, scopedShareReportId, verifyShareScope } from './shareScope'
 import { workspacePermissions, assignableCenterRoles } from '../src/workspacePermissions'
 import { workspaceRouter } from './workspaceRouter'
+import { markProcessingJobUrgent } from './worklistPriority'
 import { adminConsoleRouter } from './adminConsoleRouter'
 import { requireWorkspaceCapability, workspaceAccess } from './workspaceAccess'
 import cors from 'cors'
@@ -78,8 +79,8 @@ import type { ProviderStudySubmission } from './providerAdapters'
 import { ProviderSubmissionError } from './providerAdapters'
 import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
-import { downloadStoredObjectToFile, findStoredStudyObject, readStoredObject, storeObject, type StorageKind } from './reportStorage'
-import { bridgeStudyS3KeyCandidates, studyViewerStorageKind } from './lib/studyStorage'
+import { downloadStoredObjectToFile, findStoredStudyObject, prepareViewerStudyObject, readStoredObject, storeObject, type StorageKind } from './reportStorage'
+import { bridgeStudyS3KeyCandidates, studyViewerStorageKind, studyObjectReference } from './lib/studyStorage'
 import { startStudyArchiveMaintenance, storeOriginalStudy } from './services/studyArchive.service'
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
@@ -174,7 +175,7 @@ async function startBridgeStudyViewerImport(studyId: string): Promise<{ importId
     },
   })
   if (!study) return null
-  const storedStudy = getOriginalStudyStorage(study.processingJob?.upstreamStatus)
+  const storedStudy = studyObjectReference(study.processingJob?.upstreamStatus, study.archivePath)
   const archivePath = await resolveSafeBundleFile(study.archivePath)
   const kind = studyViewerStorageKind(study.modalities)
   const discoveredStudy = storedStudy?.key ? null : await findStoredStudyObject({
@@ -190,7 +191,7 @@ async function startBridgeStudyViewerImport(studyId: string): Promise<{ importId
   if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return { importId: cached.importId, sourceIdentity, viewerUrl: cached.viewerUrl }
   let importId = cached?.archivePath === sourceIdentity ? cached.importId : ''
   if (!importId) {
-    const storage = storedStudy?.key || discoveredStudy?.key ? { key: storedStudy?.key ?? discoveredStudy!.key, bucket: storedStudy?.bucket ?? discoveredStudy!.bucket } : await storeObject({
+    const storage = storedStudy?.key || discoveredStudy?.key ? await prepareViewerStudyObject({ key: storedStudy?.key ?? discoveredStudy!.key, bucket: storedStudy?.bucket ?? discoveredStudy!.bucket }, kind, study.id) : await storeObject({
       kind,
       keyParts: ['viewer-imports', study.id, study.archiveName || path.basename(archivePath!)],
       body: fsSync.createReadStream(archivePath!),
@@ -3212,34 +3213,15 @@ app.post(['/api/v1/study-bridge/:agentId/dispatch-requests/:requestId/progress',
 })
 
 app.post('/api/client/processing-jobs/:jobId/mark-urgent', requireAuth, requireClientUser, async (req, res) => {
-  const job = await prisma.processingJob.findUniqueOrThrow({ where: { id: String(req.params.jobId) } })
-  if (job.clientId !== req.user!.clientId) return res.status(403).json({ message: 'Cannot update another client study' })
-  const ageMs = Date.now() - job.createdAt.getTime()
-  if (ageMs > 5 * 60 * 1000) return res.status(409).json({ message: 'Urgent marking is available only for 5 minutes after study submission.' })
-  if (['submitted_to_outsourced_teleradiology', 'sent_to_radiologist', 'completed', 'sent_to_pacs', 'failed'].includes(job.status)) {
-    return res.status(409).json({ message: 'This study has already moved past the urgent update window for outbound submission.' })
+  try {
+    const updated = await markProcessingJobUrgent(String(req.params.jobId), req.user!.clientId!, req.user!.sub)
+    await enqueueTelegramStudy(prisma, updated).catch(() => console.warn('Urgent Telegram notification could not be queued.'))
+    res.json(formatProcessingStatus(updated))
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2034') return res.status(409).json({ message: 'Study changed during this update. Refresh and try again.' })
+    if (error && typeof error === 'object' && 'status' in error) return res.status(Number(error.status)).json({ message: (error as Error).message })
+    throw error
   }
-  const updated = await prisma.processingJob.update({
-    where: { id: job.id },
-    data: {
-      priority: 'URGENT',
-      upstreamStatus: {
-        ...(job.upstreamStatus && typeof job.upstreamStatus === 'object' && !Array.isArray(job.upstreamStatus) ? job.upstreamStatus as Record<string, unknown> : {}),
-        priority: 'URGENT',
-        urgentMarkedAt: new Date().toISOString(),
-      },
-    },
-  })
-  await prisma.auditLog.create({
-    data: {
-      clientId: job.clientId,
-      actorUserId: req.user!.sub,
-      action: 'STUDY_MARKED_URGENT',
-      metadata: { processingJobId: job.id, uploadName: job.uploadName, previousPriority: job.priority ?? 'REGULAR' },
-    },
-  })
-  await enqueueTelegramStudy(prisma, updated).catch(() => console.warn('Urgent Telegram notification could not be queued.'));
-  res.json(formatProcessingStatus(updated))
 })
 
 app.get('/api/client/reports/:reportId/pdf', requireAuth, requireClientUser, async (req, res) => {
