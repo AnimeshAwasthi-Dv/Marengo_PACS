@@ -79,8 +79,8 @@ import type { ProviderStudySubmission } from './providerAdapters'
 import { ProviderSubmissionError } from './providerAdapters'
 import { redactExchange } from './telegramPolicy'
 import { buildRadiologyReport } from './reportBuilder'
-import { downloadStoredObjectToFile, findStoredStudyObject, readStoredObject, storeObject, type StorageKind } from './reportStorage'
-import { bridgeStudyS3KeyCandidates, studyViewerStorageKind } from './lib/studyStorage'
+import { downloadStoredObjectToFile, findStoredStudyObject, prepareViewerStudyObject, readStoredObject, storeObject, type StorageKind } from './reportStorage'
+import { bridgeStudyS3KeyCandidates, studyViewerStorageKind, studyObjectReference } from './lib/studyStorage'
 import { startStudyArchiveMaintenance, storeOriginalStudy } from './services/studyArchive.service'
 import { closeRedis, invalidateDashboardCaches, redisGetJson, redisNamespace, redisPing, redisSetJson } from './redisCache'
 import { supportRouter } from './support'
@@ -175,7 +175,7 @@ async function startBridgeStudyViewerImport(studyId: string): Promise<{ importId
     },
   })
   if (!study) return null
-  const storedStudy = getOriginalStudyStorage(study.processingJob?.upstreamStatus)
+  const storedStudy = studyObjectReference(study.processingJob?.upstreamStatus, study.archivePath)
   const archivePath = await resolveSafeBundleFile(study.archivePath)
   const kind = studyViewerStorageKind(study.modalities)
   const discoveredStudy = storedStudy?.key ? null : await findStoredStudyObject({
@@ -191,7 +191,7 @@ async function startBridgeStudyViewerImport(studyId: string): Promise<{ importId
   if (cached?.archivePath === sourceIdentity && cached.status === 'completed' && cached.viewerUrl && cached.expiresAt > Date.now() + 60_000) return { importId: cached.importId, sourceIdentity, viewerUrl: cached.viewerUrl }
   let importId = cached?.archivePath === sourceIdentity ? cached.importId : ''
   if (!importId) {
-    const storage = storedStudy?.key || discoveredStudy?.key ? { key: storedStudy?.key ?? discoveredStudy!.key, bucket: storedStudy?.bucket ?? discoveredStudy!.bucket } : await storeObject({
+    const storage = storedStudy?.key || discoveredStudy?.key ? await prepareViewerStudyObject({ key: storedStudy?.key ?? discoveredStudy!.key, bucket: storedStudy?.bucket ?? discoveredStudy!.bucket }, kind, study.id) : await storeObject({
       kind,
       keyParts: ['viewer-imports', study.id, study.archiveName || path.basename(archivePath!)],
       body: fsSync.createReadStream(archivePath!),

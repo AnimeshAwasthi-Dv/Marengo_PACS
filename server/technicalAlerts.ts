@@ -18,7 +18,9 @@ class TelegramError extends Error {
   constructor(public code: number, public retryAfter = 0) { super(`Telegram request failed (HTTP/API ${code})`); }
 }
 async function telegram<T>(method: string, body: object): Promise<T> {
-  const token = config().token;
+  const settings = config();
+  if (!settings.enabled) throw new TelegramError(403);
+  const token = settings.token;
   if (!token) throw new TelegramError(401);
   // Never log the request URL: it contains the bot credential.
   let response: Response;

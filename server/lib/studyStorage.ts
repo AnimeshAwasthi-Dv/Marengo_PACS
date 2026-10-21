@@ -1,5 +1,17 @@
 import type { StorageKind } from '../reportStorage'
 
+/** An explicit archive URI is authoritative; retain encoded S3 key bytes verbatim. */
+export function studyObjectReference(value: unknown, archivePath?: string | null): { bucket: string; key: string } | null {
+  const match = archivePath?.match(/^s3:\/\/([^/]+)\/(.+)$/i)
+  if (match) return { bucket: match[1], key: match[2] }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const container = record.storage && typeof record.storage === 'object' && !Array.isArray(record.storage) ? record.storage as Record<string, unknown> : record
+  const original = container.originalStudy as Record<string, unknown> | undefined
+  return original && typeof original.bucket === 'string' && original.bucket && typeof original.key === 'string' && original.key
+    ? { bucket: original.bucket, key: original.key } : null
+}
+
 // Shared by the external viewer import and QuickView so both find a study ZIP in S3 the same way.
 
 /** Bucket kind an original study ZIP is stored under, by processing service type. */

@@ -30,6 +30,10 @@ TECH_ALERT_CHAT_ID=<numeric group ID>
 
 The existing environment loader reads `.env.telegram.local`. This monitor has its own enable flag and is independent of `DISABLE_STARTUP_WORKERS`, which controls clinical workers. `DATABASE_READ_ONLY=true` disables technical monitoring mutations too.
 
+Docker Compose also loads the optional `.env.telegram.local` file at runtime, with `.env` taking precedence, matching the application loader. Place the ignored Telegram file beside `compose.yaml` on the deployment host; it is excluded from the Docker image. This optional environment-file syntax requires Docker Compose 2.24.0 or newer. Recreate the app container after changing these settings. Starting the enabled monitor sends queued alerts, so defer recreation when only a configuration change is requested.
+
+This deployment explicitly sets all five Telegram enable flags to `false` in the shared Compose environment. These settings override both environment files for API, ingest and worker containers. Telegram stays disabled until those Compose overrides are intentionally changed and containers recreated.
+
 Run `npx prisma migrate deploy` before enabling the worker. Keep one or more API processes running on the intended server network. Local development monitoring stops when the local API stops; local connectivity can differ from deployment connectivity.
 
 This in-process monitor depends on its database for incident persistence and coordination. A total database or application-host outage needs an independent external watchdog; it cannot be reliably reported by the failed process itself. Technical Alerts displays the last worker heartbeat to expose stale monitoring.
@@ -41,3 +45,5 @@ Telegram replies are polled using [getUpdates](https://core.telegram.org/bots/ap
 `npm test` covers exclusions, cadence, navigation, and acknowledgment identity/message rules. `node --import tsx scripts/check-technical-alerts.ts` verifies incident deduplication, recovery without auto-resolution, message correlation, idempotent acknowledgment, and reminder suppression in a rolled-back database transaction. It sends no Telegram messages.
 
 `node --import tsx scripts/technical-alert-status.ts` reads runtime status and verifies the local API returns 200 for Super Admin and 403 for a center user. It does not print tokens.
+
+`node --env-file=.env scripts/with-pg-tls-proxy.cjs node --import tsx scripts/diagnose-technical-alerts.ts` checks the stored heartbeat, incident delivery counts, configuration-key presence, Telegram group access and webhook presence. It flags a heartbeat older than two minutes as stale. It does not start the monitor, consume Telegram updates, send messages or change database records. Its configuration checks describe the process running the diagnostic; run it on the deployment host to inspect deployment settings.

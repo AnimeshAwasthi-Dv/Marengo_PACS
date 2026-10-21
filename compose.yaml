@@ -7,11 +7,23 @@ x-logging: &logging
 x-app: &app
   image: marengo-portal:local
   build: .
-  env_file: .env
+  # Match server/db.ts: .env takes precedence over the optional Telegram file.
+  # Secrets stay outside the image (excluded by .dockerignore).
+  env_file:
+    - path: .env.telegram.local
+      required: false
+    - path: .env
+      required: true
   environment: &environment
     NODE_ENV: production
     HOST: 0.0.0.0
     PORT: '4000'
+    # Keep Telegram disabled for this deployment, including optional environment-file overrides.
+    TELEGRAM_ENABLED: 'false'
+    TELEGRAM_ALERT_ENABLED: 'false'
+    TELEGRAM_URGENT_ENABLED: 'false'
+    TELEGRAM_CALLBACK_ENABLED: 'false'
+    TECH_ALERT_ENABLED: 'false'
     DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
     NODE_OPTIONS: --max-old-space-size=4096
     UV_THREADPOOL_SIZE: '4'

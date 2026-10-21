@@ -114,6 +114,7 @@ export class TelegramDeliveryError extends Error {
 }
 
 export async function sendTelegram(config: TelegramConfig, text: string, url: string, transport: typeof fetch = fetch, buttonLabel = 'Study status & TAT') {
+  if (!config.enabled) throw new TelegramDeliveryError(403);
   let response: Response;
   try {
     response = await transport(`https://api.telegram.org/bot${config.token}/sendMessage`, {

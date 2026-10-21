@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { Transform, Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { GetObjectCommand, ListObjectsV2Command, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { CopyObjectCommand, GetObjectCommand, ListObjectsV2Command, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 
 export type StorageKind = 'original-studies' | 'cleaned-dicoms' | 'ct-studies' | 'mri-studies' | 'xray-studies' | 'mammography-studies' | 'ai-reports' | 'final-reports' | 'provider-reports' | 'clinical-indications'
 export type StoredObject = { key: string; url: string; bucket: string; localPath?: string }
@@ -77,6 +77,19 @@ export async function storeObject(input: { kind: StorageKind; keyParts: string[]
   const base = config.publicBaseUrl?.replace(/\/+$/g, '')
   const url = config.public && base ? `${base}/${key}` : `s3://${config.bucket}/${key}`
   return { key, url, bucket: config.bucket, localPath: input.localPath }
+}
+
+/** The viewer chooses its bucket by modality, so legacy archives must be copied into that bucket. */
+export async function prepareViewerStudyObject(source: Pick<StoredObject, 'bucket' | 'key'>, kind: StorageKind, studyId: string): Promise<Pick<StoredObject, 'bucket' | 'key'>> {
+  const config = getS3Config(kind)
+  if (!config) throw new Error('Viewer study storage is not configured')
+  if (source.bucket === config.bucket) return source
+  const key = [config.prefix, 'viewer-imports', studyId, 'study.zip'].filter(Boolean).join('/')
+  const client = new S3Client({ region: config.region, endpoint: config.endpoint, forcePathStyle: config.forcePathStyle, credentials: config.credentials })
+  try {
+    await client.send(new CopyObjectCommand({ Bucket: config.bucket, Key: key, CopySource: [source.bucket, ...source.key.split('/')].map(encodeURIComponent).join('/') }))
+    return { bucket: config.bucket, key }
+  } finally { client.destroy() }
 }
 
 export async function findStoredStudyObject(input: { kinds: StorageKind[]; keys: string[] }): Promise<StoredObject | null> {

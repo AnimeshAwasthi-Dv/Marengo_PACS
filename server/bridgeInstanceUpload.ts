@@ -100,7 +100,8 @@ export function createInstanceUploadStore(options: { root: string; maxBatchBytes
       }
 
       try {
-        for await (const chunk of body as AsyncIterable<Buffer>) {
+        // Validation errors must leave the HTTP socket alive long enough to return a structured error.
+        for await (const chunk of body.iterator({ destroyOnReturn: false }) as AsyncIterable<Buffer>) {
           let offset = 0
           while (offset < chunk.length) {
             if (index >= refs.length) throw new InstanceUploadError(400, 'BATCH_SIZE_MISMATCH', 'Batch carries more bytes than its images declare')
@@ -261,6 +262,7 @@ export function createBridgeInstanceUploadRouter(options: {
       }
       res.json(await options.store.writeBatch(String(req.query.client_code ?? ''), String(req.query.study_instance_uid ?? ''), refs, body))
     } catch (error) {
+      req.resume()
       sendError(res, error)
     }
   })

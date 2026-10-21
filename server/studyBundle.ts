@@ -1,11 +1,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
+import fsp from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { pipeline } from 'node:stream/promises'
 import type { Response } from 'express'
 import yazl from 'yazl'
 import { resolveArchivePath } from './viewer/archivePaths'
-import { bridgeStudyS3KeyCandidates, studyViewerStorageKind } from './lib/studyStorage'
+import { bridgeStudyS3KeyCandidates, studyViewerStorageKind, studyObjectReference } from './lib/studyStorage'
 import { findStoredStudyObject, openStoredObject, type StorageKind } from './reportStorage'
 
 type StoredReference = { bucket: string; key: string }
@@ -28,25 +30,13 @@ type Dependencies = {
   openStored: (reference: StoredReference, signal?: AbortSignal) => Promise<{ stream: Readable; size?: number } | null>
   findStored: (input: { kinds: StorageKind[]; keys: string[] }) => Promise<StoredReference | null>
 }
-function storedReference(value: unknown): StoredReference | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
-  const container = record.storage && typeof record.storage === 'object' ? record.storage as Record<string, unknown> : record
-  const original = container.originalStudy as Record<string, unknown> | undefined
-  return original && typeof original.bucket === 'string' && original.bucket && typeof original.key === 'string' && original.key
-    ? { bucket: original.bucket, key: original.key } : null
-}
-function s3Path(value?: string | null): StoredReference | null {
-  const match = value?.match(/^s3:\/\/([^/]+)\/(.+)$/)
-  return match ? { bucket: match[1], key: match[2] } : null
-}
 export function bundleFileName(value: string) {
   return value.replaceAll('\\', '/').split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^\.+/, '') || 'study.zip'
 }
 
 /** Call only after study authorization. Never accept a bucket/key from request parameters. */
 export async function openStudyArchive(study: BundleStudySource, dependencies: Dependencies, signal?: AbortSignal): Promise<Archive> {
-  const recorded = storedReference(study.processingJob?.upstreamStatus) ?? s3Path(study.archivePath)
+  const recorded = studyObjectReference(study.processingJob?.upstreamStatus, study.archivePath)
   const name = bundleFileName(study.archiveName || study.processingJob?.uploadName || `${study.studyInstanceUid || study.id}.zip`)
   const open = async (reference: StoredReference) => {
     signal?.throwIfAborted()
@@ -80,6 +70,29 @@ export async function openStudyArchive(study: BundleStudySource, dependencies: D
 }
 
 /** Stream the archive inside the ZIP; do not buffer multi-GB studies or recompress ZIP data. */
+/** Materialize remote archives with bounded memory and remove incomplete downloads on failure. */
+export async function materializeStudyArchive(study: BundleStudySource, options: { directory: string; dependencies: Dependencies; maxBytes?: number; signal?: AbortSignal }) {
+  for (const candidate of [study.archivePath, study.processingJob?.uploadPath]) {
+    const local = await options.dependencies.local(candidate)
+    if (local) return local
+  }
+  const archive = await openStudyArchive(study, options.dependencies, options.signal)
+  const destination = path.join(options.directory, `${randomUUID()}-${archive.name}`)
+  let size = 0
+  try {
+    await fsp.mkdir(options.directory, { recursive: true })
+    await pipeline(archive.stream, new Transform({ transform(chunk: Buffer, _encoding, callback) {
+      size += chunk.length
+      callback(size > (options.maxBytes ?? 4 * 1024 ** 3) ? new Error('Study archive exceeds size limit') : null, chunk)
+    } }), fs.createWriteStream(destination), { signal: options.signal })
+    return destination
+  } catch (error) {
+    archive.stream.destroy()
+    await fsp.rm(destination, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
 export async function sendStudyBundle(res: Response, input: {
   source: BundleStudySource
   metadata: Record<string, unknown>

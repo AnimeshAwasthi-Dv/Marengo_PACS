@@ -3,6 +3,7 @@ dist/
 uploads/
 artifacts/
 backups/
+billing-backups/
 tmp/
 .env
 .env.*
@@ -34,3 +35,7 @@ server/testing/
 !server/submissionReliability.test.ts
 !server/studyAnalysis.test.ts
 !server/worklistPriority.test.ts
+!server/clientTariff.test.ts
+!server/telegramDisabled.test.ts
+!server/bridgeStreaming.test.ts
+!server/studyStorage.test.ts
